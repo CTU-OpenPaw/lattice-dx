@@ -8,13 +8,22 @@
  */
 'use strict';
 
-const { isSafeAppPath } = require('./blocks-helpers');
+const {
+  isSafeAppPath,
+  fetchCollectionsMeta,
+  inferCollectionFieldsMeta,
+} = require('./blocks-helpers');
 
 const SVG_WIDTH = 640;
 const SVG_HEIGHT = 360;
 const SVG_PAD = 24;
 const MAPLIBRE_CSS_ID = 'dxos-maplibre-css';
 const HITL_DELTA_THRESHOLD_C = 2.0;
+const BLOCKED_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const SAFE_WEBGIS_COLLECTION_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,63}$/;
+const SAFE_WEBGIS_FIELD_RE = /^[a-zA-Z][a-zA-Z0-9_]{0,62}$/;
+const LIKELY_LAT_FIELD_RE = /^(?:[a-z0-9_]*_)?[lL]at(?:$|_|[A-Z0-9])|^[a-z][a-z0-9]*Lat(?:$|_|[A-Z0-9])|latitude|LATITUDE/;
+const LIKELY_LNG_FIELD_RE = /^(?:[a-z0-9_]*_)?[lL](?:ng|on)(?:$|_|[A-Z0-9])|^[a-z][a-z0-9]*L(?:ng|on)(?:$|_|[A-Z0-9])|longitude|LONGITUDE/;
 
 const DEFAULT_VIETNAM_BOUNDS = {
   minLat: 8.0,
@@ -259,6 +268,111 @@ function inferCoordsForRecord(record, locationById, index) {
     lat: Number((fallback.lat + spread * 0.5).toFixed(4)),
     lng: Number((fallback.lng + spread * 0.4).toFixed(4)),
   };
+}
+
+function normalizeWebGisCollection(raw) {
+  const clean = String(raw ?? '').trim();
+  if (!clean || BLOCKED_PROTO_KEYS.has(clean)) return '';
+  return SAFE_WEBGIS_COLLECTION_RE.test(clean) ? clean : '';
+}
+
+function normalizeWebGisFieldName(raw) {
+  const clean = String(raw ?? '').trim();
+  if (!clean || BLOCKED_PROTO_KEYS.has(clean)) return '';
+  return SAFE_WEBGIS_FIELD_RE.test(clean) ? clean : '';
+}
+
+function safeReadOwnField(record, fieldName) {
+  if (!record || typeof record !== 'object') return undefined;
+  const clean = normalizeWebGisFieldName(fieldName);
+  if (!clean || !Object.hasOwn(record, clean)) return undefined;
+  return record[clean];
+}
+
+function pickFirstOwnField(record, candidates) {
+  for (const key of candidates) {
+    const val = safeReadOwnField(record, key);
+    if (val !== undefined && val !== null && val !== '') return val;
+  }
+  return undefined;
+}
+
+function buildCustomCollectionMarkers(records = [], collectionMeta = null, options = {}) {
+  const inferred = inferCollectionFieldsMeta(collectionMeta);
+  const explicitLatField = normalizeWebGisFieldName(options.latField);
+  const explicitLngField = normalizeWebGisFieldName(options.lngField);
+  const explicitLabelField = normalizeWebGisFieldName(options.labelField);
+  const explicitStatusField = normalizeWebGisFieldName(options.statusField);
+
+  const inferredLat = normalizeWebGisFieldName(inferred.latField);
+  const inferredLng = normalizeWebGisFieldName(inferred.lngField);
+  const safeInferredLat = inferredLat && LIKELY_LAT_FIELD_RE.test(inferredLat) ? inferredLat : '';
+  const safeInferredLng = inferredLng && LIKELY_LNG_FIELD_RE.test(inferredLng) ? inferredLng : '';
+
+  const effectiveLatField = explicitLatField || safeInferredLat;
+  const effectiveLngField = explicitLngField || safeInferredLng;
+  const effectiveLabelField = explicitLabelField || normalizeWebGisFieldName(inferred.titleField) || '';
+  const effectiveStatusField = explicitStatusField || normalizeWebGisFieldName(inferred.statusField) || 'status';
+
+  const markers = [];
+  const rows = Array.isArray(records) ? records : [];
+  rows.forEach((rec, idx) => {
+    if (!rec || typeof rec !== 'object') return;
+    const rawLat = explicitLatField
+      ? safeReadOwnField(rec, explicitLatField)
+      : effectiveLatField
+        ? safeReadOwnField(rec, effectiveLatField)
+        : pickFirstOwnField(rec, ['lat', 'latitude', 'geoLat', 'geo_lat']);
+    const rawLng = explicitLngField
+      ? safeReadOwnField(rec, explicitLngField)
+      : effectiveLngField
+        ? safeReadOwnField(rec, effectiveLngField)
+        : pickFirstOwnField(rec, ['lng', 'lon', 'longitude', 'geoLng', 'geo_lng']);
+
+    const pt = projectGeoPoint(rawLat, rawLng);
+    if (!pt) return;
+
+    const labelVal = effectiveLabelField ? safeReadOwnField(rec, effectiveLabelField) : undefined;
+    const fallbackName = pickFirstOwnField(rec, ['name', 'title', 'subject', 'label', 'code', 'lotCode']);
+    const name = String(
+      (labelVal !== undefined && labelVal !== null && String(labelVal).trim() !== '' ? labelVal : fallbackName)
+      ?? `#${rec.id ?? idx}`,
+    ).trim();
+    const rawCode = pickFirstOwnField(rec, ['code', 'lotCode']);
+    const code = String(
+      (rawCode !== undefined && rawCode !== null && String(rawCode).trim() !== '' ? rawCode : name)
+      || `#${rec.id ?? idx}`,
+    ).trim();
+    const rawStatus = safeReadOwnField(rec, effectiveStatusField) ?? safeReadOwnField(rec, 'status');
+    const status = rawStatus !== undefined && rawStatus !== null && String(rawStatus).trim() !== ''
+      ? String(rawStatus).trim()
+      : 'active';
+    const rawSeverity = safeReadOwnField(rec, 'severity');
+    const rawAssetId = safeReadOwnField(rec, 'assetId');
+
+    markers.push({
+      id: `custom-${rec.id ?? idx}`,
+      recordId: rec.id ?? null,
+      assetId: rawAssetId !== undefined && rawAssetId !== null ? rawAssetId : null,
+      isCustom: true,
+      collection: String(options.collection || ''),
+      organizationId: String(options.orgId || safeReadOwnField(rec, 'organizationId') || '').trim(),
+      code,
+      name,
+      kind: 'custom',
+      address: String(safeReadOwnField(rec, 'address') ?? ''),
+      lat: pt.lat,
+      lng: pt.lng,
+      severity: rawSeverity !== undefined && rawSeverity !== null ? String(rawSeverity).trim() : '',
+      status,
+      temperatureC: parseFiniteGeo(safeReadOwnField(rec, 'temperatureC')),
+      targetTempC: parseFiniteGeo(safeReadOwnField(rec, 'targetTempC')),
+      twinStatus: 'synced',
+      alarmCount: 0,
+    });
+  });
+
+  return markers;
 }
 
 function buildMarkersGeoJson(markers = []) {
@@ -619,10 +733,21 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       tileUrlTemplate: '',
       offlineOnly: false,
       showTwinOverlay: true,
+      collection: '',
+      latField: '',
+      lngField: '',
+      labelField: '',
+      statusField: '',
       ...(model?.props || {}),
       ...stepCfg,
       ...(liveConfig || {}),
     };
+
+    const customCollection = normalizeWebGisCollection(cfg.collection);
+    const explicitLatField = normalizeWebGisFieldName(cfg.latField);
+    const explicitLngField = normalizeWebGisFieldName(cfg.lngField);
+    const explicitLabelField = normalizeWebGisFieldName(cfg.labelField);
+    const explicitStatusField = normalizeWebGisFieldName(cfg.statusField);
 
     const [filterMode, setFilterMode] = React.useState('all');
     const [selectedId, setSelectedId] = React.useState('');
@@ -631,12 +756,16 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       () => Boolean(cfg.offlineOnly) || (typeof navigator !== 'undefined' && navigator.onLine === false) || !cfg.tileUrlTemplate,
     );
     const [webglFailed, setWebglFailed] = React.useState(false);
-    const [state, setState] = React.useState({
-      loading: false,
-      markers: DEFAULT_VIETNAM_GEO_MARKERS,
-      usingFallback: true,
+    const [state, setState] = React.useState(() => ({
+      loading: Boolean(customCollection && api?.request),
+      markers: customCollection ? [] : DEFAULT_VIETNAM_GEO_MARKERS,
+      usingFallback: !customCollection,
+      totalRecords: 0,
+      unmappedReason: customCollection && !api?.request
+        ? `Collection ${customCollection} chưa có kết nối API để tải dữ liệu bản đồ.`
+        : '',
       error: '',
-    });
+    }));
 
     // Twin Control Drawer state
     const [twinForm, setTwinForm] = React.useState({
@@ -648,13 +777,20 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     const [twinBusy, setTwinBusy] = React.useState(false);
     const [twinFeedback, setTwinFeedback] = React.useState({ type: '', text: '' });
 
-    const [reqTracker] = React.useState(() => ({ seq: 0, unmounted: false }));
+    const [reqTracker] = React.useState(() => ({
+      seq: 0,
+      unmounted: false,
+      collection: customCollection,
+      collectionMeta: cfg.collectionMeta || null,
+    }));
+    reqTracker.collection = customCollection;
+    reqTracker.collectionMeta = cfg.collectionMeta || null;
     const [mapHolder] = React.useState(() => ({
       containerEl: null,
       map: null,
       ready: false,
       offlineSwitched: false,
-      latestGeo: { markersGeoJson: buildMarkersGeoJson([]), corridorsGeoJson: buildCorridorsGeoJson([]), selectedId: '' },
+      latestGeo: { markersGeoJson: buildMarkersGeoJson([]), corridorsGeoJson: buildCorridorsGeoJson([], []), selectedId: '' },
       onSelectMarker: null,
     }));
 
@@ -671,17 +807,41 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
       };
     }, [reqTracker, mapHolder]);
 
+    React.useEffect(() => {
+      setSelectedId('');
+      setDrawerOpen(false);
+      setTwinFeedback({ type: '', text: '' });
+      if (customCollection) {
+        setState({
+          loading: Boolean(api?.request),
+          markers: [],
+          usingFallback: false,
+          totalRecords: 0,
+          unmappedReason: api?.request ? '' : `Collection ${customCollection} chưa có kết nối API để tải dữ liệu bản đồ.`,
+          error: '',
+        });
+      }
+    }, [customCollection, api]);
+
     const loadGeoData = React.useCallback(async (isCancelled = null) => {
       if (!api?.request) return;
       reqTracker.seq += 1;
+      const targetCollection = customCollection;
+      reqTracker.collection = targetCollection;
       const mySeq = reqTracker.seq;
       const isStale = () => (
         reqTracker.unmounted
         || reqTracker.seq !== mySeq
+        || reqTracker.collection !== targetCollection
         || (typeof isCancelled === 'function' && isCancelled())
       );
 
-      setState((prev) => ({ ...prev, loading: true, error: '' }));
+      setState((prev) => ({
+        ...prev,
+        loading: true,
+        error: '',
+        ...(targetCollection ? { markers: [], usingFallback: false, unmappedReason: '', totalRecords: 0 } : {}),
+      }));
 
       const orgId = cfg.defaultOrganizationId ? String(cfg.defaultOrganizationId).trim() : '';
       const orgParams = orgId ? { organizationId: orgId } : {};
@@ -716,6 +876,56 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           return allRows.length ? allRows : null;
         }
       };
+
+      if (targetCollection) {
+        const propMeta = reqTracker.collectionMeta && typeof reqTracker.collectionMeta === 'object'
+          && (!reqTracker.collectionMeta.name || reqTracker.collectionMeta.name === targetCollection)
+          ? reqTracker.collectionMeta
+          : null;
+        const [rows, metaList] = await Promise.all([
+          safeFetchList(`${targetCollection}:list`),
+          propMeta ? Promise.resolve([propMeta]) : fetchCollectionsMeta(api),
+        ]);
+        if (isStale()) return;
+
+        const collectionMeta = propMeta
+          || (Array.isArray(metaList) ? metaList.find((c) => c?.name === targetCollection) : null)
+          || null;
+        if (rows === null) {
+          setState({
+            loading: false,
+            markers: [],
+            usingFallback: false,
+            totalRecords: 0,
+            unmappedReason: `Không tải được dữ liệu bản đồ cho collection ${targetCollection}.`,
+            error: `Không tải được dữ liệu từ ${targetCollection}.`,
+          });
+          return;
+        }
+
+        const customMarkers = buildCustomCollectionMarkers(rows, collectionMeta, {
+          collection: targetCollection,
+          orgId,
+          latField: explicitLatField,
+          lngField: explicitLngField,
+          labelField: explicitLabelField,
+          statusField: explicitStatusField,
+        });
+        const unmappedReason = customMarkers.length
+          ? ''
+          : rows.length === 0
+            ? `Collection ${targetCollection} chưa có bản ghi nào để hiển thị trên bản đồ.`
+            : `Collection ${targetCollection} (${rows.length} bản ghi) chưa có trường tọa độ hợp lệ (lat/lng).`;
+        setState({
+          loading: false,
+          markers: customMarkers,
+          usingFallback: false,
+          totalRecords: rows.length,
+          unmappedReason,
+          error: '',
+        });
+        return;
+      }
 
       const [assets, locations, incidents] = await Promise.all([
         safeFetchList('latticeAssets:list'),
@@ -838,16 +1048,28 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 
       if (isStale()) return;
       if (markers.length) {
-        setState({ loading: false, markers, usingFallback: false, error: '' });
+        setState({ loading: false, markers, usingFallback: false, totalRecords: markers.length, unmappedReason: '', error: '' });
       } else {
         setState({
           loading: false,
           markers: DEFAULT_VIETNAM_GEO_MARKERS,
           usingFallback: true,
+          totalRecords: 0,
+          unmappedReason: '',
           error: assets === null && locations === null ? 'Đang hiển thị tuyến mặc định (chưa kết nối dữ liệu tài sản).' : '',
         });
       }
-    }, [api, cfg.defaultOrganizationId, cfg.showTwinOverlay, reqTracker]);
+    }, [
+      api,
+      cfg.defaultOrganizationId,
+      cfg.showTwinOverlay,
+      customCollection,
+      explicitLatField,
+      explicitLngField,
+      explicitLabelField,
+      explicitStatusField,
+      reqTracker,
+    ]);
 
     React.useEffect(() => {
       let cancelled = false;
@@ -884,16 +1106,19 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     }, [visibleMarkers, selectedId]);
 
     const markersGeoJson = React.useMemo(() => buildMarkersGeoJson(visibleMarkers), [visibleMarkers]);
-    const corridorsGeoJson = React.useMemo(() => buildCorridorsGeoJson(visibleMarkers), [visibleMarkers]);
+    const corridorsGeoJson = React.useMemo(
+      () => buildCorridorsGeoJson(visibleMarkers, customCollection ? [] : DEFAULT_VIETNAM_GEO_MARKERS),
+      [visibleMarkers, customCollection],
+    );
 
     const handleSelectMarker = React.useCallback((marker) => {
       const id = typeof marker === 'string' ? marker : marker?.id;
       if (!id) return;
       setSelectedId(id);
-      setDrawerOpen(true);
       setTwinFeedback({ type: '', text: '' });
       const target = classifiedMarkers.find((m) => m.id === id);
-      if (target) {
+      setDrawerOpen(Boolean(target && target.assetId != null && cfg.showTwinOverlay !== false));
+      if (target && target.assetId != null) {
         const initTemp = target.desiredJson?.targetTempC ?? target.targetTempC ?? target.temperatureC ?? -18;
         setTwinForm({
           targetTempInput: String(initTemp),
@@ -902,7 +1127,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
           doorLock: target.desiredJson?.doorLock || 'locked',
         });
       }
-    }, [classifiedMarkers]);
+    }, [classifiedMarkers, cfg.showTwinOverlay]);
 
     mapHolder.onSelectMarker = handleSelectMarker;
     mapHolder.latestGeo = { markersGeoJson, corridorsGeoJson, selectedId: selectedMarker?.id || '' };
@@ -1002,7 +1227,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 
     async function handleTwinSubmit(e) {
       if (e && typeof e.preventDefault === 'function') e.preventDefault();
-      if (!api?.request || !selectedMarker || twinBusy) return;
+      if (!api?.request || !selectedMarker || selectedMarker.assetId == null || twinBusy) return;
       if (parsedInputTemp === null || parsedInputTemp < -80 || parsedInputTemp > 120) {
         setTwinFeedback({ type: 'error', text: 'targetTempC phải là số hợp lệ trong [-80, 120]°C.' });
         return;
@@ -1090,6 +1315,11 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     });
 
     const centerGeo = projectGeoPoint(cfg.centerLat, cfg.centerLng);
+    const showUnmappedNotice = Boolean(customCollection && !state.loading && state.markers.length === 0);
+    const hasTwinControls = Boolean(selectedMarker && selectedMarker.assetId != null && cfg.showTwinOverlay !== false);
+    const unmappedSubsetCount = customCollection && state.totalRecords > state.markers.length
+      ? state.totalRecords - state.markers.length
+      : 0;
 
     return h('section', {
       'data-testid': 'dxos-webgis-block',
@@ -1108,13 +1338,15 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         h('div', null,
           h('strong', { style: { fontSize: 15, color: '#0f172a' } }, String(cfg.title || 'WebGIS Chuỗi lạnh [D]')),
           h('div', { style: { fontSize: 11, color: '#64748b' } },
-            `Tuyến ĐBSCL – TP.HCM – Đà Nẵng – Hà Nội · ${visibleMarkers.length} điểm hiển thị${state.usingFallback ? ' (dữ liệu mẫu)' : ''}${useMapLibreCanvas ? (offlineStyleMode ? ' · MapLibre WGS84 Offline' : ' · MapLibre GL') : ' · Vector WGS84 Fallback'}`,
+            customCollection
+              ? `${customCollection} · ${visibleMarkers.length} điểm hiển thị${unmappedSubsetCount > 0 ? ` (${unmappedSubsetCount} chưa có tọa độ)` : ''}${useMapLibreCanvas ? (offlineStyleMode ? ' · MapLibre WGS84 Offline' : ' · MapLibre GL') : ' · Vector WGS84 Fallback'}`
+              : `Tuyến ĐBSCL – TP.HCM – Đà Nẵng – Hà Nội · ${visibleMarkers.length} điểm hiển thị${state.usingFallback ? ' (dữ liệu mẫu)' : ''}${useMapLibreCanvas ? (offlineStyleMode ? ' · MapLibre WGS84 Offline' : ' · MapLibre GL') : ' · Vector WGS84 Fallback'}`,
           ),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
           h('button', { type: 'button', 'data-testid': 'dxos-webgis-filter-all', onClick: () => setFilterMode('all'), style: filterBtnStyle(filterMode === 'all') }, 'Tất cả'),
           h('button', { type: 'button', 'data-testid': 'dxos-webgis-filter-alarms', onClick: () => setFilterMode('alarms'), style: filterBtnStyle(filterMode === 'alarms') }, 'Cảnh báo Chuỗi lạnh'),
-          h('button', { type: 'button', 'data-testid': 'dxos-webgis-filter-warehouses', onClick: () => setFilterMode('warehouses'), style: filterBtnStyle(filterMode === 'warehouses') }, 'Kho & Trạm'),
+          !customCollection ? h('button', { type: 'button', 'data-testid': 'dxos-webgis-filter-warehouses', onClick: () => setFilterMode('warehouses'), style: filterBtnStyle(filterMode === 'warehouses') }, 'Kho & Trạm') : null,
           h('button', {
             type: 'button',
             onClick: () => loadGeoData(),
@@ -1124,6 +1356,18 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         ),
       ),
       state.error ? h('div', { style: { fontSize: 11, color: '#b45309' } }, state.error) : null,
+      showUnmappedNotice ? h('div', {
+        'data-testid': 'dxos-webgis-unmapped-notice',
+        style: {
+          padding: '10px 12px',
+          borderRadius: 8,
+          border: '1px solid #fcd34d',
+          background: '#fffbeb',
+          color: '#92400e',
+          fontSize: 12,
+          fontWeight: 600,
+        },
+      }, state.unmappedReason || `Collection ${customCollection} chưa có bản ghi có tọa độ hợp lệ (lat/lng).`) : null,
       h('div', {
         style: {
           display: 'grid',
@@ -1152,7 +1396,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 'data-testid': 'dxos-webgis-svg-fallback',
                 viewBox: `0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`,
                 role: 'img',
-                'aria-label': 'Bản đồ hành lang chuỗi lạnh Việt Nam',
+                'aria-label': customCollection ? `Bản đồ dữ liệu ${customCollection}` : 'Bản đồ hành lang chuỗi lạnh Việt Nam',
                 style: { width: '100%', height: 'auto', display: 'block' },
               },
                 [10, 14, 18, 22].map((latLine) => {
@@ -1169,14 +1413,14 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                     h('text', { x: pt.x + 3, y: 12, fill: '#64748b', fontSize: 9 }, `${lngLine}°E`),
                   ) : null;
                 }),
-                h('polyline', {
+                !customCollection ? h('polyline', {
                   fill: 'none',
                   stroke: '#38bdf8',
                   strokeOpacity: 0.55,
                   strokeWidth: 2.5,
                   strokeDasharray: '6 4',
                   points: corridorPolylinePoints,
-                }),
+                }) : null,
                 centerGeo ? h('circle', {
                   cx: centerGeo.x,
                   cy: centerGeo.y,
@@ -1228,7 +1472,11 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         },
           selectedMarker ? h(React.Fragment, null,
             h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-              h('strong', { style: { fontSize: 14, color: '#0f172a' } }, `${selectedMarker.code} — ${selectedMarker.name}`),
+              h('strong', { style: { fontSize: 14, color: '#0f172a' } },
+                selectedMarker.code && selectedMarker.code !== selectedMarker.name
+                  ? `${selectedMarker.code} — ${selectedMarker.name}`
+                  : selectedMarker.name,
+              ),
               h('span', {
                 style: {
                   fontSize: 11,
@@ -1245,11 +1493,16 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
               `Tọa độ: ${Number(selectedMarker.lat).toFixed(4)}°N, ${Number(selectedMarker.lng).toFixed(4)}°E`,
               selectedMarker.address ? ` · ${selectedMarker.address}` : '',
             ),
-            h('div', { style: { padding: 8, borderRadius: 8, background: '#ffffff', border: '1px solid #e2e8f0', fontSize: 12 } },
-              h('div', { style: { color: '#64748b', fontSize: 11 } }, 'Nhiệt độ thực tế / Setpoint'),
-              h('strong', { style: { fontSize: 14, color: selectedMarker.meta.color } }, selectedMarker.meta.tempSummary),
-            ),
-            cfg.showTwinOverlay !== false ? h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 } },
+            (!selectedMarker.isCustom || selectedMarker.meta.temperatureC !== null || selectedMarker.meta.targetTempC !== null)
+              ? h('div', { style: { padding: 8, borderRadius: 8, background: '#ffffff', border: '1px solid #e2e8f0', fontSize: 12 } },
+                  h('div', { style: { color: '#64748b', fontSize: 11 } }, 'Nhiệt độ thực tế / Setpoint'),
+                  h('strong', { style: { fontSize: 14, color: selectedMarker.meta.color } }, selectedMarker.meta.tempSummary),
+                )
+              : h('div', { style: { padding: 8, borderRadius: 8, background: '#ffffff', border: '1px solid #e2e8f0', fontSize: 12 } },
+                  h('div', { style: { color: '#64748b', fontSize: 11 } }, `Trạng thái (${selectedMarker.collection || 'collection'})`),
+                  h('strong', { style: { fontSize: 13, color: selectedMarker.meta.color } }, String(selectedMarker.status || selectedMarker.meta.label)),
+                ),
+            hasTwinControls ? h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 } },
               h('span', { style: { color: '#475569' } }, 'Trạng thái Digital Twin:'),
               h('span', {
                 style: {
@@ -1263,7 +1516,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 },
               }, selectedMarker.meta.twinStatus),
             ) : null,
-            cfg.showTwinOverlay !== false ? h('button', {
+            hasTwinControls ? h('button', {
               type: 'button',
               'data-testid': 'dxos-webgis-open-twin-drawer-btn',
               onClick: () => handleSelectMarker(selectedMarker),
@@ -1281,7 +1534,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
             selectedMarker.alarmCount > 0 ? h('div', { style: { fontSize: 12, color: '#991b1b', background: '#fee2e2', padding: '6px 8px', borderRadius: 6 } },
               `Sự cố đang mở (${selectedMarker.alarmCount}): ${selectedMarker.latestAlarm || 'Cảnh báo ngưỡng nhiệt'}`,
             ) : null,
-            selectedMarker.meta.level !== 'normal' ? h('button', {
+            selectedMarker.meta.level !== 'normal' && (!selectedMarker.isCustom || selectedMarker.alarmCount > 0) ? h('button', {
               type: 'button',
               onClick: () => safeGo(app, '/p/incidents'),
               style: {
@@ -1295,10 +1548,10 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 cursor: 'pointer',
               },
             }, 'Mở trang Xử lý Sự cố') : null,
-          ) : h('div', { style: { fontSize: 13, color: '#64748b' } }, 'Không có điểm giám sát phù hợp với bộ lọc hiện tại.'),
+          ) : h('div', { style: { fontSize: 13, color: '#64748b' } }, customCollection ? 'Chưa có điểm bản đồ hợp lệ để hiển thị.' : 'Không có điểm giám sát phù hợp với bộ lọc hiện tại.'),
         ),
       ),
-      drawerOpen && selectedMarker ? h('div', {
+      drawerOpen && hasTwinControls ? h('div', {
         'data-testid': 'dxos-webgis-twin-drawer',
         role: 'region',
         'aria-label': `Điều khiển Digital Twin ${selectedMarker.code}`,
@@ -1413,6 +1666,9 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
 module.exports = {
   DEFAULT_VIETNAM_BOUNDS,
   DEFAULT_VIETNAM_GEO_MARKERS,
+  normalizeWebGisCollection,
+  normalizeWebGisFieldName,
+  buildCustomCollectionMarkers,
   projectGeoPoint,
   classifyColdChainMarker,
   inferCoordsForRecord,

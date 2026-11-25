@@ -2225,3 +2225,327 @@ test('Task 5 Fix Round 1: prototype keys, time-field fallback, non-status status
   );
   unmount();
 });
+
+test('Task 6: DxosWebGisBlockModel uiSchema preserves existing 5 fields and adds optional collection, latField, lngField, labelField, statusField', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { React } = createMiniHooks();
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+
+  const cfgStep = models.DxosWebGisBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  for (const field of ['title', 'defaultOrganizationId', 'centerLat', 'centerLng', 'showTwinOverlay']) {
+    assert.ok(cfgStep.uiSchema[field], `DxosWebGisBlockModel uiSchema missing ${field}`);
+  }
+  for (const optField of ['collection', 'latField', 'lngField', 'labelField', 'statusField']) {
+    assert.ok(cfgStep.uiSchema[optField], `DxosWebGisBlockModel uiSchema missing optional ${optField}`);
+    assert.equal(Object.hasOwn(cfgStep.defaultParams, optField), true, `defaultParams missing ${optField}`);
+  }
+});
+
+test('Task 6: DxosWebGisBlockView renders dxos-webgis-unmapped-notice for latticeCustomFleet without lat/lng or empty records without falling back to DEFAULT_VIETNAM_GEO_MARKERS', async () => {
+  const { createWebGisBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+
+  // (a1) Custom collection with records lacking lat/lng (even with city keywords in text)
+  const hooks1 = createMiniHooks();
+  const calls1 = [];
+  const api1 = {
+    async request(req) {
+      calls1.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                {
+                  name: 'latticeCustomFleet',
+                  title: 'Đội xe lạnh',
+                  isCustom: true,
+                  fields: [
+                    { name: 'plateNumber', type: 'string', title: 'Biển số' },
+                    { name: 'driverName', type: 'string', title: 'Tài xế' },
+                    { name: 'city', type: 'string', title: 'Thành phố' },
+                  ],
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'latticeCustomFleet:list') {
+        return {
+          data: {
+            data: [
+              { id: 1, plateNumber: '51A12345', driverName: 'Xe Cần Thơ', city: 'Cần Thơ', status: 'active' },
+              { id: 2, plateNumber: '29A99999', driverName: 'Xe Hà Nội', city: 'Hà Nội', status: 'active' },
+            ],
+          },
+        };
+      }
+      throw new Error(`Unexpected API call in custom unmapped mode: ${req.url}`);
+    },
+  };
+
+  const View1 = createWebGisBlockView({ useAPIClient: () => api1 }, hooks1.React, {}, {});
+  let tree1 = hooks1.render(View1, {
+    model: { props: { title: 'Bản đồ Đội xe', collection: 'latticeCustomFleet', defaultOrganizationId: 'org-a', showTwinOverlay: true } },
+  });
+  await new Promise((r) => setTimeout(r, 25));
+  tree1 = hooks1.render(View1, {
+    model: { props: { title: 'Bản đồ Đội xe', collection: 'latticeCustomFleet', defaultOrganizationId: 'org-a', showTwinOverlay: true } },
+  });
+
+  assert.equal(calls1.some((c) => c.url === 'latticeAssets:list'), false, 'Must NEVER query latticeAssets:list when cfg.collection is set');
+  assert.equal(calls1.some((c) => c.url === 'latticeLocations:list'), false, 'Must NEVER query latticeLocations:list when cfg.collection is set');
+  assert.equal(calls1.some((c) => c.url === 'dxosBlocks:twinShadow'), false, 'Must NEVER query twinShadow for custom collection');
+  const fleetCall = calls1.find((c) => c.url === 'latticeCustomFleet:list');
+  assert.ok(fleetCall, 'Must query latticeCustomFleet:list');
+  assert.deepEqual(fleetCall.params?.filter, { organizationId: 'org-a' });
+
+  const unmappedNotice1 = findByTestId(tree1, 'dxos-webgis-unmapped-notice');
+  assert.ok(unmappedNotice1, 'Must render dxos-webgis-unmapped-notice when custom records lack finite lat/lng');
+  const pins1 = collectNodes(tree1).filter((n) => n.props?.['data-testid'] === 'dxos-webgis-pin');
+  assert.equal(pins1.length, 0, 'Must render zero pins instead of VIETNAM_CITY_COORDS or DEFAULT_VIETNAM_GEO_MARKERS');
+  const text1 = textOf(tree1);
+  for (const fallbackCode of ['HUB-CT', 'HUB-HCM', 'HUB-DN', 'HUB-HN']) {
+    assert.equal(text1.includes(fallbackCode), false, `Must NEVER substitute fallback marker ${fallbackCode}`);
+  }
+  hooks1.unmount();
+
+  // (a2) Custom collection with empty records []
+  const hooks2 = createMiniHooks();
+  const calls2 = [];
+  const api2 = {
+    async request(req) {
+      calls2.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') return { data: { data: { collections: [] } } };
+      if (req.url === 'latticeCustomFleet:list') return { data: { data: [] } };
+      throw new Error(`Unexpected API call: ${req.url}`);
+    },
+  };
+  const View2 = createWebGisBlockView({ useAPIClient: () => api2 }, hooks2.React, {}, {});
+  let tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeCustomFleet' } } });
+  await new Promise((r) => setTimeout(r, 25));
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeCustomFleet' } } });
+  assert.ok(findByTestId(tree2, 'dxos-webgis-unmapped-notice'), 'Empty custom collection must render dxos-webgis-unmapped-notice');
+  assert.equal(collectNodes(tree2).filter((n) => n.props?.['data-testid'] === 'dxos-webgis-pin').length, 0);
+  hooks2.unmount();
+});
+
+test('Task 6: DxosWebGisBlockView renders dynamic latticeCustomSites with explicit & inferred fields, skips Twin controls without assetId, and retains Twin view when collection is unset', async () => {
+  const { createWebGisBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+
+  // (b1) Explicit latField/lngField/labelField/statusField
+  const hooks1 = createMiniHooks();
+  const calls1 = [];
+  const api1 = {
+    async request(req) {
+      calls1.push(req);
+      if (req.url === 'dxosBlocks:collectionsMeta') return { data: { data: { collections: [] } } };
+      if (req.url === 'latticeCustomSites:list') {
+        return {
+          data: {
+            data: [
+              { id: 10, siteName: 'Trạm Đà Lạt', healthState: 'warning', geoLat: 11.9404, geoLng: 108.4583, organizationId: 'org-a' },
+              { id: 11, siteName: 'Trạm Chưa Gắn Tọa Độ', healthState: 'normal', geoLat: null, geoLng: '' },
+            ],
+          },
+        };
+      }
+      throw new Error(`Unexpected call: ${req.url}`);
+    },
+  };
+  const View1 = createWebGisBlockView({ useAPIClient: () => api1 }, hooks1.React, {}, {});
+  let tree1 = hooks1.render(View1, {
+    model: {
+      props: {
+        title: 'Bản đồ Trạm',
+        collection: 'latticeCustomSites',
+        latField: 'geoLat',
+        lngField: 'geoLng',
+        labelField: 'siteName',
+        statusField: 'healthState',
+        showTwinOverlay: true,
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 25));
+  tree1 = hooks1.render(View1, {
+    model: {
+      props: {
+        title: 'Bản đồ Trạm',
+        collection: 'latticeCustomSites',
+        latField: 'geoLat',
+        lngField: 'geoLng',
+        labelField: 'siteName',
+        statusField: 'healthState',
+        showTwinOverlay: true,
+      },
+    },
+  });
+
+  assert.equal(findByTestId(tree1, 'dxos-webgis-unmapped-notice'), null);
+  const pins1 = collectNodes(tree1).filter((n) => n.props?.['data-testid'] === 'dxos-webgis-pin');
+  assert.equal(pins1.length, 1, 'Only finite-coord custom record should become a pin');
+  assert.equal(pins1[0].props['data-severity'], 'warning');
+  assert.ok(textOf(tree1).includes('Trạm Đà Lạt'));
+  assert.equal(textOf(tree1).includes('Trạm Chưa Gắn Tọa Độ'), false);
+
+  pins1[0].props.onClick();
+  tree1 = hooks1.render(View1, {
+    model: {
+      props: {
+        title: 'Bản đồ Trạm',
+        collection: 'latticeCustomSites',
+        latField: 'geoLat',
+        lngField: 'geoLng',
+        labelField: 'siteName',
+        statusField: 'healthState',
+        showTwinOverlay: true,
+      },
+    },
+  });
+  assert.equal(findByTestId(tree1, 'dxos-webgis-open-twin-drawer-btn'), null, 'Must skip Twin control button when marker lacks assetId');
+  assert.equal(findByTestId(tree1, 'dxos-webgis-twin-drawer'), null, 'Must not open Twin drawer when marker lacks assetId');
+  assert.equal(calls1.some((c) => c.url === 'dxosBlocks:twinSetDesired'), false);
+  hooks1.unmount();
+
+  // (b2) Inferred geo/label/status fields via dxosBlocks:collectionsMeta when latField/lngField omitted
+  const hooks2 = createMiniHooks();
+  const api2 = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                {
+                  name: 'latticeCustomFleetTrips',
+                  title: 'Chuyến xe lạnh',
+                  isCustom: true,
+                  fields: [
+                    { name: 'tripName', type: 'string', title: 'Tên chuyến' },
+                    { name: 'tripStage', type: 'string', interface: 'select', enumValues: [{ value: 'critical', label: 'Khẩn cấp' }] },
+                    { name: 'geoLat', type: 'float' },
+                    { name: 'geoLng', type: 'float' },
+                  ],
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'latticeCustomFleetTrips:list') {
+        return {
+          data: {
+            data: [
+              { id: 33, tripName: 'Chuyến Mỹ Tho - Sài Gòn', tripStage: 'critical', geoLat: 10.36, geoLng: 106.36 },
+            ],
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const View2 = createWebGisBlockView({ useAPIClient: () => api2 }, hooks2.React, {}, {});
+  let tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeCustomFleetTrips' } } });
+  await new Promise((r) => setTimeout(r, 25));
+  tree2 = hooks2.render(View2, { model: { props: { collection: 'latticeCustomFleetTrips' } } });
+  const pins2 = collectNodes(tree2).filter((n) => n.props?.['data-testid'] === 'dxos-webgis-pin');
+  assert.equal(pins2.length, 1);
+  assert.equal(pins2[0].props['data-severity'], 'critical');
+  assert.ok(textOf(tree2).includes('Chuyến Mỹ Tho - Sài Gòn'));
+  hooks2.unmount();
+
+  // (c) Unset collection='' retains default latticeLocations + latticeAssets Twin view
+  const hooks3 = createMiniHooks();
+  const calls3 = [];
+  const api3 = {
+    async request(req) {
+      calls3.push(req);
+      if (req.url === 'latticeAssets:list') {
+        return { data: { data: [{ id: 88, code: 'COLD-88', name: 'Kho mặc định', kind: 'cold_room', status: 'active', organizationId: 'org-a' }] } };
+      }
+      if (req.url === 'latticeLocations:list') {
+        return { data: { data: [{ id: 3, code: 'LOC-3', name: 'Cần Thơ', address: 'Cần Thơ' }] } };
+      }
+      if (req.url === 'latticeIncidentCases:list') return { data: { data: [] } };
+      if (req.url === 'dxosBlocks:twinShadow') {
+        return { data: { data: { shadow: { assetId: 88, commandStatus: 'synced', desiredJson: { targetTempC: -18 }, reportedJson: { targetTempC: -18 } } } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const View3 = createWebGisBlockView({ useAPIClient: () => api3 }, hooks3.React, {}, {});
+  let tree3 = hooks3.render(View3, { model: { props: { collection: '', showTwinOverlay: true } } });
+  await new Promise((r) => setTimeout(r, 25));
+  tree3 = hooks3.render(View3, { model: { props: { collection: '', showTwinOverlay: true } } });
+  assert.ok(calls3.some((c) => c.url === 'latticeAssets:list'));
+  assert.ok(calls3.some((c) => c.url === 'latticeLocations:list'));
+  assert.ok(calls3.some((c) => c.url === 'dxosBlocks:twinShadow'));
+  assert.ok(textOf(tree3).includes('COLD-88'));
+  assert.ok(findByTestId(tree3, 'dxos-webgis-open-twin-drawer-btn'));
+  hooks3.unmount();
+});
+
+test('Task 6: webgis-block rejects prototype keys (__proto__, constructor, prototype) in collection and field lookups', async () => {
+  const {
+    normalizeWebGisCollection,
+    normalizeWebGisFieldName,
+    createWebGisBlockView,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/webgis-block.js'));
+
+  assert.equal(normalizeWebGisCollection('__proto__'), '');
+  assert.equal(normalizeWebGisCollection('constructor'), '');
+  assert.equal(normalizeWebGisCollection('prototype'), '');
+  assert.equal(normalizeWebGisCollection('123bad'), '');
+  assert.equal(normalizeWebGisCollection('latticeCustomSites'), 'latticeCustomSites');
+
+  assert.equal(normalizeWebGisFieldName('__proto__'), '');
+  assert.equal(normalizeWebGisFieldName('constructor'), '');
+  assert.equal(normalizeWebGisFieldName('prototype'), '');
+  assert.equal(normalizeWebGisFieldName('toString'), 'toString');
+  assert.equal(normalizeWebGisFieldName('geoLat'), 'geoLat');
+
+  const hooks = createMiniHooks();
+  const calls = [];
+  const api = {
+    async request(req) {
+      calls.push(req);
+      return { data: { data: [] } };
+    },
+  };
+  const View = createWebGisBlockView({ useAPIClient: () => api }, hooks.React, {}, {});
+  hooks.render(View, {
+    model: {
+      props: {
+        collection: '__proto__',
+        latField: 'constructor',
+        lngField: 'prototype',
+        labelField: '__proto__',
+        statusField: 'constructor',
+      },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(calls.some((c) => c.url.includes('__proto__')), false, 'Must NEVER query __proto__:list');
+  assert.ok(calls.some((c) => c.url === 'latticeAssets:list'), 'Rejected prototype collection falls back to default Twin view');
+  hooks.unmount();
+});
