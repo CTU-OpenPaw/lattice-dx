@@ -265,7 +265,7 @@ function normalizeOrchestratorField(rawField) {
     ...(enumValues.length ? { enum: enumValues } : {}),
     uiSchema: {
       type: meta.uiType,
-      title: String(rawField?.title || fname),
+      title: String(rawField?.title || rawField?.label || fname).trim(),
       ...((ftype === 'select' || ftype === 'enum') && enumValues.length
         ? { enum: enumValues.map((v) => ({ value: v, label: v })) }
         : {}),
@@ -596,7 +596,16 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
         throw failBuild('BLOCK_MODEL_FORBIDDEN', 400, `BlockModel "${blockUse}" không nằm trong danh sách cho phép.`);
       }
       if (existingUses.has(blockUse) && specItem?.allowDuplicate !== true) continue;
-      let cfg = { title: specItem?.title || pageTitle, collection: collectionName, ...(specItem?.config || {}) };
+      const flatAliasCfg = {};
+      for (const aliasKey of ['collection', 'statusField', 'dateField', 'titleField', 'latField', 'lngField', 'labelField']) {
+        if (specItem?.[aliasKey] !== undefined && specItem[aliasKey] !== '') {
+          flatAliasCfg[aliasKey] = specItem[aliasKey];
+        }
+      }
+      let cfg = { title: specItem?.title || pageTitle, collection: collectionName, ...flatAliasCfg, ...(specItem?.config || {}) };
+      if (cfg.collection && isProtectedCollection(cfg.collection)) {
+        throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn block vào bảng hệ thống "${cfg.collection}".`);
+      }
       if (blockUse === 'DxosCreativeStudioBlockModel' && !cfg.blueprintJson) {
         const recBp = buildRecommendedBlueprintFromFields(collectionName, fields, roleName, pageTitle).recommendedCreativeBlock.blueprint;
         const cleanBp = sanitizeCreativeBlueprintPayload({ ...recBp, title: cfg.title, theme: creativeTheme });
@@ -714,7 +723,7 @@ async function upsertFlowV2Rule(db, actor, flowSpec) {
   const schemaMod = getFlowSchemaMod();
   const validatorMod = getFlowValidatorMod();
   const regMod = loadCrossPluginModule('@latticedx/plugin-dxos-studio', 'plugin-dxos-studio', 'flow/registry');
-  const rawGraph = flowSpec.graphJson || flowSpec.graph;
+  const rawGraph = flowSpec.graphJson || flowSpec.graph || (Array.isArray(flowSpec.nodes) ? { version: 2, nodes: flowSpec.nodes, edges: Array.isArray(flowSpec.edges) ? flowSpec.edges : [] } : null);
   if (!rawGraph || !Array.isArray(rawGraph.nodes)) {
     throw failBuild('FLOW_INVALID_GRAPH', 400, 'flowGraph.graphJson phải là đồ thị Flow v2 hợp lệ.');
   }
@@ -1321,8 +1330,9 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
         aiNickname: spec.aiNickname,
       }];
   const normalizedRoles = rawRolesList.map((r) => {
-    const rTitle = String(r?.roleTitle || `Quản trị ${defaultPageTitle}`).trim();
-    const rName = r?.roleName ? String(r.roleName).trim() : slugifyVietnameseToLdxRole(rTitle);
+    const rTitle = String(r?.roleTitle || r?.title || `Quản trị ${defaultPageTitle}`).trim();
+    const rawRoleName = r?.roleName || r?.name;
+    const rName = rawRoleName ? String(rawRoleName).trim() : slugifyVietnameseToLdxRole(rTitle);
     if (!LDX_ROLE_RE.test(rName)) {
       throw failBuild('ROLE_FORBIDDEN', 403, `roleName "${rName}" phải bắt đầu bằng ldx_*.`);
     }
@@ -1352,11 +1362,12 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
         creativeTheme: spec.creativeTheme || 'industrial-cockpit',
       }];
   const normalizedPortals = rawPortalsList.map((p) => {
-    const pSlug = String(p?.portalSlug || defaultPortalSlug).trim().toLowerCase();
+    const pSlug = String(p?.portalSlug || p?.slug || defaultPortalSlug).trim().toLowerCase();
     if (!SLUG_RE.test(pSlug)) {
       throw failBuild('PORTAL_SLUG_INVALID', 400, `portalSlug "${pSlug}" không hợp lệ.`);
     }
-    const pRoleName = p?.roleName ? String(p.roleName).trim() : primaryRole.roleName;
+    const rawPortalRole = p?.roleName || p?.role;
+    const pRoleName = rawPortalRole ? String(rawPortalRole).trim() : primaryRole.roleName;
     if (!LDX_ROLE_RE.test(pRoleName)) {
       throw failBuild('ROLE_FORBIDDEN', 403, `roleName "${pRoleName}" phải bắt đầu bằng ldx_*.`);
     }
@@ -1366,14 +1377,18 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
       if (!ORCHESTRATOR_ALLOWED_BLOCKS.has(useName)) {
         throw failBuild('BLOCK_MODEL_FORBIDDEN', 400, `BlockModel "${useName}" không được phép.`);
       }
+      const blockCol = b?.config?.collection || b?.collection;
+      if (blockCol && isProtectedCollection(blockCol)) {
+        throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn block vào bảng hệ thống "${blockCol}".`);
+      }
     }
-    const targetCol = String(p?.collectionName || collectionName).trim();
+    const targetCol = String(p?.collectionName || p?.collection || collectionName).trim();
     if (isProtectedCollection(targetCol)) {
       throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn portal vào bảng hệ thống "${targetCol}".`);
     }
     return {
       portalSlug: pSlug,
-      pageTitle: String(p?.pageTitle || defaultPageTitle).trim(),
+      pageTitle: String(p?.pageTitle || p?.title || defaultPageTitle).trim(),
       roleName: pRoleName,
       roleTitle: String(p?.roleTitle || primaryRole.roleTitle).trim(),
       collectionName: targetCol,

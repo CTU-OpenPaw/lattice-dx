@@ -2751,3 +2751,49 @@ test('Task 11: ai-studio-page renders Tab 7 Built Apps Manager (dxos-tab-built-a
   assert.equal(tdReq.data.keepData, true);
   assert.equal(JSON.stringify(tree).includes('torndown'), true);
 });
+
+test('probeLlmHealth verifyCompletion catches upstream 503 on /chat/completions even when GET /models returns 200', async () => {
+  const { probeLlmHealth, createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const db = makeMockDb();
+  db.stores.llmServices.push({
+    name: 'local-9router',
+    provider: 'openai-completions',
+    enabled: true,
+    options: { baseURL: 'http://127.0.0.1:20128/v1', apiKey: 'sk-9router-hidden' },
+  });
+  db.stores.latticeAiProfiles.push({
+    username: 'dxos-architect',
+    llmService: 'local-9router',
+    modelName: 'ag/gemini-3.8-flash',
+    enabled: true,
+  });
+
+  const failingCompletionFetch = async (url) => {
+    if (String(url).endsWith('/models')) return { ok: true, status: 200 };
+    if (String(url).endsWith('/chat/completions')) return { ok: false, status: 503 };
+    return { ok: false, status: 404 };
+  };
+
+  // Without verifyCompletion -> /models 200 is OK
+  const shallow = await probeLlmHealth(db, { fetchImpl: failingCompletionFetch, isAdmin: true });
+  assert.equal(shallow.ok, true);
+
+  // With verifyCompletion=true -> /chat/completions 503 is caught cleanly without leaking apiKey
+  const deepFail = await probeLlmHealth(db, { fetchImpl: failingCompletionFetch, isAdmin: true, verifyCompletion: true });
+  assert.equal(deepFail.ok, false);
+  assert.equal(deepFail.status, 503);
+  assert.equal(deepFail.code, 'LLM_UNAVAILABLE');
+  assert.equal(deepFail.completionChecked, true);
+  assert.equal(JSON.stringify(deepFail).includes('sk-9router-hidden'), false);
+
+  // Action checkLlmHealth forwards verifyCompletion=1 and returns ok=true when completion succeeds
+  const actions = createDxosAiActions(db, {
+    fetchImpl: async (url) => (String(url).endsWith('/models') || String(url).endsWith('/chat/completions')
+      ? { ok: true, status: 200 }
+      : { ok: false, status: 404 }),
+  });
+  const ctx = { method: 'GET', state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: { verifyCompletion: '1' } }, body: null };
+  await actions.checkLlmHealth(ctx, async () => {});
+  assert.equal(ctx.body.ok, true);
+  assert.equal(ctx.body.completionChecked, true);
+});

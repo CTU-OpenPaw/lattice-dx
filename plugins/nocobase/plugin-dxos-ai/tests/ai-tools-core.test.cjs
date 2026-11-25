@@ -637,3 +637,23 @@ test('Task 10: dxos_extend_collection_schema updateFieldMeta & deprecateField, d
   const nonAdminRebuild = parseVietnameseNaturalIntent('Dựng lại ứng dụng appKey:inspections-app', { isAdmin: false });
   assert.equal(nonAdminRebuild.refused, true);
 });
+
+test('dxos_provision_role_workspace exposes strict nested collections/portals schema and architect prompt documents multi-entity lifecycle', () => {
+  const { STARTER_AI_BLUEPRINTS } = require('../src/server/ai-schemas');
+  const tools = createDxosTools();
+  const provisionTool = tools.find((t) => t.definition.name === 'dxos_provision_role_workspace');
+  assert.ok(provisionTool);
+  const props = provisionTool.jsonSchema.properties;
+  assert.ok(props.collections.items?.properties?.collectionName);
+  assert.ok(props.collections.items?.properties?.fields?.items?.properties?.target);
+  assert.ok(props.portals.items?.properties?.blocks?.items?.properties?.blockUse);
+  assert.ok(props.portals.items?.properties?.blocks?.items?.properties?.collection);
+  assert.ok(props.roles.items?.properties?.roleName);
+
+  const architect = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-architect');
+  assert.ok(architect);
+  assert.match(architect.systemPrompt, /collections:.*belongsTo/);
+  assert.match(architect.systemPrompt, /list_built_apps/);
+  assert.match(architect.systemPrompt, /rebuild_enterprise_app/);
+  assert.match(architect.systemPrompt, /DxosKanbanScheduleBlockModel/);
+});

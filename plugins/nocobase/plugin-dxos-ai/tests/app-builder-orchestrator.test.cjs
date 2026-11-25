@@ -1209,3 +1209,64 @@ test('Task 11 live E2E regressions: verifyEnterpriseApp allows NocoBase 2.2.50 T
   assert.deepEqual(td.droppedCollections, ['latticeCustomLiveCompat']);
   assert.equal(store.collections.some((c) => c.name === 'latticeCustomLiveCompat'), false);
 });
+
+test('orchestrateEnterpriseAppBuild normalizes LLM aliases (name/title/slug/targetCollection/enumValues/flat block collection) while keeping strict system-table & cycle refusal', async () => {
+  const { orchestrateEnterpriseAppBuild } = require('../src/server/app-builder-orchestrator');
+  const { db, ctx, store } = makeOrchestratorHarness();
+  store.latticeBuiltApps = [];
+  const actor = { userId: 1, username: 'admin', organizationId: 'native-ui-lab', isAdmin: true, isRoot: true, roleNames: ['root'] };
+
+  // Aliases build cleanly
+  const built = await orchestrateEnterpriseAppBuild(ctx, db, actor, {
+    appKey: 'clinic-alias-test',
+    portalSlug: 'clinic',
+    pageTitle: 'Phòng khám Alias',
+    collections: [
+      {
+        name: 'latticeCustomAliasVisits',
+        title: 'Lịch khám',
+        fields: [
+          { name: 'status', label: 'Trạng thái', type: 'select', enumValues: ['scheduled', 'done'] },
+          { name: 'doctor', label: 'Bác sĩ', type: 'belongsTo', targetCollection: 'latticeCustomAliasDoctors' },
+        ],
+      },
+      {
+        name: 'latticeCustomAliasDoctors',
+        title: 'Bác sĩ',
+        fields: [{ name: 'fullName', label: 'Họ tên', type: 'string' }],
+      },
+    ],
+    roles: [{ name: 'ldx_alias_clinic', title: 'Bác sĩ Phòng khám' }],
+    portals: [{
+      slug: 'clinic',
+      title: 'Phòng khám Alias',
+      role: 'ldx_alias_clinic',
+      collection: 'latticeCustomAliasVisits',
+      blocks: [
+        { use: 'DxosKanbanScheduleBlockModel', title: 'Kanban Lịch khám', collection: 'latticeCustomAliasVisits', statusField: 'status' },
+      ],
+    }],
+  });
+  assert.equal(built.built, true);
+  assert.equal(built.collections[0], 'latticeCustomAliasDoctors');
+  assert.equal(built.collections[1], 'latticeCustomAliasVisits');
+  const kanbanModel = store.flowModels.find((m) => m.use === 'DxosKanbanScheduleBlockModel');
+  assert.ok(kanbanModel);
+  assert.equal(kanbanModel.props.collection, 'latticeCustomAliasVisits');
+  assert.equal(kanbanModel.props.statusField, 'status');
+
+  // Protected system collection on flat block config is still rejected (403)
+  await assert.rejects(
+    () => orchestrateEnterpriseAppBuild(ctx, db, actor, {
+      portalSlug: 'clinic',
+      pageTitle: 'Blocked Block Target',
+      collectionName: 'latticeCustomSafeVisits',
+      portals: [{
+        slug: 'clinic',
+        title: 'Blocked',
+        blocks: [{ use: 'DxosKanbanScheduleBlockModel', collection: 'users' }],
+      }],
+    }),
+    (err) => err.status === 403 && err.code === 'SYSTEM_COLLECTION_FORBIDDEN',
+  );
+});

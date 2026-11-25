@@ -47,36 +47,62 @@ function makeZodPassthroughObject(z) {
   return typeof base?.passthrough === 'function' ? base.passthrough() : base;
 }
 
+function buildZodField(z, prop = {}) {
+  let field;
+  if (Array.isArray(prop.enum) && prop.enum.length > 0 && prop.type === 'string') {
+    field = z.enum(prop.enum);
+  } else if (prop.type === 'boolean') {
+    field = z.boolean();
+  } else if (prop.type === 'number' || prop.type === 'integer') {
+    field = z.number();
+  } else if (prop.type === 'array') {
+    const itemDef = prop.items || {};
+    const itemType = itemDef.type;
+    let itemSchema;
+    if (itemType === 'number' || itemType === 'integer') {
+      itemSchema = z.number();
+    } else if (itemType === 'object') {
+      if (itemDef.properties && typeof itemDef.properties === 'object' && Object.keys(itemDef.properties).length > 0) {
+        const innerShape = {};
+        for (const [k, v] of Object.entries(itemDef.properties)) {
+          innerShape[k] = buildZodField(z, v);
+        }
+        const innerObj = z.object(innerShape);
+        itemSchema = typeof innerObj?.passthrough === 'function' ? innerObj.passthrough() : innerObj;
+      } else {
+        itemSchema = makeZodPassthroughObject(z);
+      }
+    } else if (itemType === 'boolean') {
+      itemSchema = z.boolean();
+    } else {
+      itemSchema = z.string();
+    }
+    field = z.array(itemSchema);
+  } else if (prop.type === 'object') {
+    if (prop.properties && typeof prop.properties === 'object' && Object.keys(prop.properties).length > 0) {
+      const innerShape = {};
+      for (const [k, v] of Object.entries(prop.properties)) {
+        innerShape[k] = buildZodField(z, v);
+      }
+      const innerObj = z.object(innerShape);
+      field = typeof innerObj?.passthrough === 'function' ? innerObj.passthrough() : innerObj;
+    } else {
+      field = makeZodPassthroughObject(z);
+    }
+  } else {
+    field = z.string();
+  }
+  if (prop.description && typeof field?.describe === 'function') field = field.describe(prop.description);
+  if (!prop.required && typeof field?.optional === 'function') field = field.optional();
+  return field;
+}
+
 function buildZodSchema(spec = {}, injectedZod = null) {
   const z = injectedZod || loadZod();
   if (!z) return null;
   const shape = {};
   for (const [key, prop] of Object.entries(spec.properties || {})) {
-    let field;
-    if (Array.isArray(prop.enum) && prop.enum.length > 0 && prop.type === 'string') {
-      field = z.enum(prop.enum);
-    } else if (prop.type === 'boolean') {
-      field = z.boolean();
-    } else if (prop.type === 'number' || prop.type === 'integer') {
-      field = z.number();
-    } else if (prop.type === 'array') {
-      const itemType = prop.items?.type;
-      const itemSchema = itemType === 'number' || itemType === 'integer'
-        ? z.number()
-        : itemType === 'object'
-          ? makeZodPassthroughObject(z)
-          : itemType === 'boolean'
-            ? z.boolean()
-            : z.string();
-      field = z.array(itemSchema);
-    } else if (prop.type === 'object') {
-      field = makeZodPassthroughObject(z);
-    } else {
-      field = z.string();
-    }
-    if (prop.description) field = field.describe(prop.description);
-    if (!prop.required) field = field.optional();
-    shape[key] = field;
+    shape[key] = buildZodField(z, prop);
   }
   const obj = z.object(shape);
   return spec.description ? obj.describe(spec.description) : obj;

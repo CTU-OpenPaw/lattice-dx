@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const fs = require('node:fs');
 const { randomBytes } = require('node:crypto');
 const net = require('node:net');
 const path = require('node:path');
@@ -929,7 +930,7 @@ function buildLlmProbeTarget(provider, rawBase, apiKey) {
   };
 }
 
-async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = false, llmServiceName = '', modelName = '' } = {}) {
+async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = false, llmServiceName = '', modelName = '', verifyCompletion = false } = {}) {
   const resultBase = (fields) => ({
     ok: Boolean(fields.ok),
     status: Number(fields.status) || 503,
@@ -938,8 +939,62 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
     modelName: String(fields.modelName || ''),
     provider: String(fields.provider || ''),
     message: String(fields.message || ''),
+    ...(fields.completionChecked ? { completionChecked: true } : {}),
     ...(isAdmin && fields.baseURL !== undefined ? { baseURL: String(fields.baseURL || '') } : {}),
   });
+
+  const classifyHttpFailure = (status, { serviceName, boundModel, provider, baseURL, completionChecked = false }) => {
+    if (status === 401 || status === 403) {
+      return resultBase({
+        ok: false,
+        status,
+        code: 'LLM_AUTH_ERROR',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL,
+        completionChecked,
+        message: `Dịch vụ LLM "${serviceName}" từ chối xác thực (HTTP ${status}). Kiểm tra lại API key.`,
+      });
+    }
+    if (status === 502) {
+      return resultBase({
+        ok: false,
+        status: 502,
+        code: 'LLM_BAD_GATEWAY',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL,
+        completionChecked,
+        message: `Upstream LLM gateway "${serviceName}" lỗi 502 Bad Gateway.`,
+      });
+    }
+    if (status === 504) {
+      return resultBase({
+        ok: false,
+        status: 504,
+        code: 'LLM_TIMEOUT',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL,
+        completionChecked,
+        message: `Upstream LLM "${serviceName}" quá thời gian phản hồi (HTTP 504).`,
+      });
+    }
+    return resultBase({
+      ok: false,
+      status,
+      code: 'LLM_UNAVAILABLE',
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      baseURL,
+      completionChecked,
+      message: `Dịch vụ LLM "${serviceName}" không khả dụng (HTTP ${status}).`,
+    });
+  };
 
   let boundService = String(llmServiceName || '').trim();
   let boundModel = String(modelName || '').trim();
@@ -1047,82 +1102,82 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
     });
   }
 
-  let timeoutId = null;
-  let controller = null;
-  let signal = null;
-  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
-    signal = AbortSignal.timeout(5000);
-  } else if (typeof AbortController === 'function') {
-    controller = new AbortController();
-    signal = controller.signal;
-    timeoutId = setTimeout(() => controller.abort(), 5000);
-    if (typeof timeoutId?.unref === 'function') timeoutId.unref();
-  }
+  const createTimeoutSignal = (ms) => {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+      return { signal: AbortSignal.timeout(ms), clear: () => {} };
+    }
+    if (typeof AbortController === 'function') {
+      const c = new AbortController();
+      const tid = setTimeout(() => c.abort(), ms);
+      if (typeof tid?.unref === 'function') tid.unref();
+      return { signal: c.signal, clear: () => clearTimeout(tid) };
+    }
+    return { signal: null, clear: () => {} };
+  };
 
+  let clearModelsTimer = () => {};
+  let clearCompTimer = () => {};
   try {
+    const modelsTimeout = createTimeoutSignal(5000);
+    clearModelsTimer = modelsTimeout.clear;
     const res = await doFetch(target.probeUrl, {
       method: 'GET',
       headers: target.headers,
-      ...(signal ? { signal } : {}),
+      ...(modelsTimeout.signal ? { signal: modelsTimeout.signal } : {}),
     });
     const status = Number(res?.status) || (res?.ok ? 200 : 503);
-    if (res?.ok) {
+    if (!res?.ok) {
+      return classifyHttpFailure(status, { serviceName, boundModel, provider, baseURL: target.baseURL });
+    }
+
+    const lowerProv = provider.toLowerCase();
+    const isOpenAiCompat = lowerProv.includes('openai') || lowerProv.includes('deepseek') || lowerProv.includes('9router');
+    if (verifyCompletion && boundModel && isOpenAiCompat) {
+      const compTimeout = createTimeoutSignal(8000);
+      clearCompTimer = compTimeout.clear;
+      const compRes = await doFetch(`${target.baseURL}/chat/completions`, {
+        method: 'POST',
+        headers: { ...target.headers, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: boundModel,
+          messages: [{ role: 'user', content: 'ok' }],
+          max_tokens: 4,
+          temperature: 0,
+        }),
+        ...(compTimeout.signal ? { signal: compTimeout.signal } : {}),
+      });
+      const compStatus = Number(compRes?.status) || (compRes?.ok ? 200 : 503);
+      if (!compRes?.ok) {
+        return classifyHttpFailure(compStatus, {
+          serviceName,
+          boundModel,
+          provider,
+          baseURL: target.baseURL,
+          completionChecked: true,
+        });
+      }
       return resultBase({
         ok: true,
-        status,
+        status: compStatus,
         code: 'OK',
         llmService: serviceName,
         modelName: boundModel,
         provider,
         baseURL: target.baseURL,
-        message: `Dịch vụ LLM "${serviceName}" sẵn sàng.`,
+        completionChecked: true,
+        message: `Dịch vụ LLM "${serviceName}" (${boundModel}) sẵn sàng.`,
       });
     }
-    if (status === 401 || status === 403) {
-      return resultBase({
-        ok: false,
-        status,
-        code: 'LLM_AUTH_ERROR',
-        llmService: serviceName,
-        modelName: boundModel,
-        provider,
-        baseURL: target.baseURL,
-        message: `Dịch vụ LLM "${serviceName}" từ chối xác thực (HTTP ${status}). Kiểm tra lại API key.`,
-      });
-    }
-    if (status === 502) {
-      return resultBase({
-        ok: false,
-        status: 502,
-        code: 'LLM_BAD_GATEWAY',
-        llmService: serviceName,
-        modelName: boundModel,
-        provider,
-        baseURL: target.baseURL,
-        message: `Upstream LLM gateway "${serviceName}" lỗi 502 Bad Gateway.`,
-      });
-    }
-    if (status === 504) {
-      return resultBase({
-        ok: false,
-        status: 504,
-        code: 'LLM_TIMEOUT',
-        llmService: serviceName,
-        modelName: boundModel,
-        provider,
-        baseURL: target.baseURL,
-        message: `Upstream LLM "${serviceName}" quá thời gian phản hồi (HTTP 504).`,
-      });
-    }
+
     return resultBase({
-      ok: false,
+      ok: true,
       status,
-      code: 'LLM_UNAVAILABLE',
+      code: 'OK',
       llmService: serviceName,
       modelName: boundModel,
       provider,
       baseURL: target.baseURL,
-      message: `Dịch vụ LLM "${serviceName}" không khả dụng (HTTP ${status}).`,
+      message: `Dịch vụ LLM "${serviceName}" sẵn sàng.`,
     });
   } catch (err) {
     const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError' || /timeout|aborted/i.test(String(err?.message || ''));
@@ -1135,11 +1190,12 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
       provider,
       baseURL: target.baseURL,
       message: isTimeout
-        ? `Kết nối tới dịch vụ LLM "${serviceName}" quá thời gian chờ (5s).`
+        ? `Kết nối tới dịch vụ LLM "${serviceName}" quá thời gian chờ.`
         : `Không thể kết nối tới dịch vụ LLM "${serviceName}": ${String(err?.code || err?.message || 'network error').slice(0, 140)}`,
     });
   } finally {
-    if (timeoutId) clearTimeout(timeoutId);
+    clearModelsTimer();
+    clearCompTimer();
   }
 }
 
@@ -2005,11 +2061,14 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
       const adminOk = await isStudioAdmin(ctx, targetDb);
       const payload = readActionPayload(ctx);
       const llmServiceName = String(ctx?.action?.params?.llmService || payload.llmService || '').trim();
+      const rawVerify = ctx?.action?.params?.verifyCompletion ?? payload.verifyCompletion;
+      const verifyCompletion = rawVerify === true || rawVerify === '1' || rawVerify === 'true';
       ctx.body = await probeLlmHealth(targetDb, {
         env,
         fetchImpl,
         isAdmin: adminOk,
         llmServiceName,
+        verifyCompletion,
       });
       if (typeof next === 'function') await next();
     },
@@ -2039,8 +2098,14 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
         throw failTool('LLM_API_KEY_REQUIRED', 400, `Cần nhập API Key cho nhà cung cấp "${rawProvider}".`);
       }
 
+      const isInsideDocker = (() => {
+        try { return fs.existsSync('/.dockerenv'); } catch { return false; }
+      })();
+      const dockerAwareDefault = rawProvider === '9router' && isInsideDocker
+        ? 'http://host.docker.internal:20128/v1'
+        : preset.defaultBaseURL;
       const fallbackBase = rawProvider === '9router' || rawProvider === 'openai-completions'
-        ? (String(env?.AGENT_BASE_URL || '').trim() || preset.defaultBaseURL)
+        ? (String(env?.AGENT_BASE_URL || '').trim() || dockerAwareDefault)
         : preset.defaultBaseURL;
       const rawBase = String(payload.baseURL || payload.baseUrl || fallbackBase).trim();
       const baseURL = validateQuickConnectBaseUrl(rawBase);
@@ -2117,6 +2182,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl } = {}) {
           isAdmin: true,
           llmServiceName: serviceName,
           modelName,
+          verifyCompletion: Boolean(payload.verifyCompletion),
         })
         : null;
 
