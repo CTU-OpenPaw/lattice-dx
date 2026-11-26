@@ -13,13 +13,14 @@ const SAFE_LDX_ROLE_RE=/^ldx_[a-z][a-z0-9_]{1,40}$/;
 function resolveCacheOptions(env=process.env){
   const explicit=String(env?.DX_NATIVE_AUTH_CACHE_STORE||'').trim().toLowerCase();
   if(explicit==='memory')return {name:'enterprise-login',prefix:'enterprise-login',store:'memory'};
-  const useRedis=explicit==='redis'||String(env?.CACHE_DEFAULT_STORE||'').trim().toLowerCase()==='redis'||Boolean(env?.REDIS_URL);
+  const redisUrl=String(env?.DX_NATIVE_AUTH_SESSION_REDIS_URL||env?.REDIS_URL||env?.CACHE_REDIS_URL||'').trim();
+  const useRedis=explicit==='redis'||String(env?.CACHE_DEFAULT_STORE||'').trim().toLowerCase()==='redis'||Boolean(redisUrl);
   if(useRedis){
     return {
       name:'enterprise-login',
       prefix:'enterprise-login',
       store:'redis',
-      ...(env?.REDIS_URL?{url:String(env.REDIS_URL).trim()}:{}),
+      ...(redisUrl?{url:redisUrl}:{}),
     };
   }
   return {name:'enterprise-login',prefix:'enterprise-login',store:'memory'};
@@ -167,7 +168,9 @@ function deploymentConfig(env){
   let internal;
   if(env.DX_NATIVE_AUTH_INTERNAL_ISSUER){
     internal=new URL(env.DX_NATIVE_AUTH_INTERNAL_ISSUER);
-    if(issuer.protocol!=='http:'||!['localhost','127.0.0.1'].includes(issuer.hostname)||internal.protocol!=='http:'||internal.hostname!=='keycloak'||internal.port!=='8080'||internal.pathname!==issuer.pathname||internal.username||internal.password||internal.search||internal.hash)throw Error('Internal transport is only supported for the local Keycloak development service.');
+    const issuerLoopback=issuer.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(issuer.hostname);
+    const issuerAllowed=issuer.protocol==='https:'||issuerLoopback;
+    if(!issuerAllowed||internal.protocol!=='http:'||internal.hostname!=='keycloak'||internal.port!=='8080'||internal.pathname!==issuer.pathname||internal.username||internal.password||internal.search||internal.hash)throw Error('Internal transport is only supported for the local Keycloak development service.');
   }
   return {issuer:issuer.href.replace(/\/$/,''),origin:origin.origin,clientId:env.DX_NATIVE_AUTH_CLIENT_ID,internal:internal?.origin,callback:origin.origin+'/api/enterpriseAuth:callback',insecure:issuer.protocol==='http:'};
 }
@@ -184,13 +187,31 @@ async function consumeBound(cache,locks,prefix,key,binding){
     await cache.del(cacheKey);return entry;
   },10000);
 }
+function canUseEnterpriseRlsBypass(db){
+  if(process.env.DX_PG_RLS_SESSION!=='true')return false;
+  const seq=db?.sequelize;
+  if(!seq||typeof seq.transaction!=='function'||typeof seq.query!=='function')return false;
+  if(typeof seq.getDialect==='function'&&seq.getDialect()!=='postgres')return false;
+  return true;
+}
+async function withOptionalSystemRlsBypass(db,fn){
+  if(!canUseEnterpriseRlsBypass(db))return fn(undefined);
+  return db.sequelize.transaction(async(transaction)=>{
+    await db.sequelize.query("SELECT set_config('app.rls_bypass', 'on', true)",{transaction});
+    return fn(transaction);
+  });
+}
 async function resolveMappedUser(db,authenticator,subject,issuer){
   if(typeof subject!=='string'||!subject||subject.length>255)throw denied();
   const links=await db.getRepository('usersAuthenticators').find({filter:{authenticator,uuid:subject},limit:2});
   if(links.length!==1||!issuer||links[0].meta?.issuer!==issuer)throw denied();
   const userId=links[0].userId;
   const users=await db.getRepository('users').find({filter:{id:userId},limit:2});
-  const employees=await db.getRepository('latticeEmployees').find({filter:{userId,active:true},limit:2});
+  const employees=await withOptionalSystemRlsBypass(db,(transaction)=>db.getRepository('latticeEmployees').find({
+    filter:{userId,active:true},
+    limit:2,
+    ...(transaction?{transaction}:{}),
+  }));
   if(users.length!==1||employees.length!==1||!employees[0].organizationId)throw denied();
   return users[0];
 }
@@ -199,6 +220,7 @@ module.exports={
   deploymentConfig,
   safeReturnTo,
   consumeBound,
+  withOptionalSystemRlsBypass,
   resolveMappedUser,
   resolveCacheOptions,
   validateLogoutTokenClaims,

@@ -305,3 +305,56 @@ test('destroy protects built-ins and exportBlueprint outputs deterministic Apach
   await actions.destroy(delCtx);
   assert.deepEqual(delCtx.body, { deleted: true, uid: 'ldx-portal-ops' });
 });
+
+test('supports custom non-ldx enterprise roles in save/list/exportBlueprint while excluding system/builder roles', async () => {
+  const { actions, tables } = setupServer({
+    uiLayouts: [
+      { uid: 'admin-layout-model', title: 'Admin', layoutType: 'desktop', routeName: 'admin', routePath: '/admin', enabled: true },
+      { uid: 'ldx-portal-audit', title: 'Audit', layoutType: 'desktop', routeName: 'p_audit', routePath: '/p/audit', enabled: true },
+    ],
+    desktopRoutes: [
+      { id: 30, type: 'flowPage', schemaUid: 'audit_home', title: 'Audit Home' },
+    ],
+    desktopRoutesUiLayouts: [
+      { desktopRouteId: 30, uiLayoutUid: 'ldx-portal-audit' },
+    ],
+    rolesDesktopRoutes: [
+      { desktopRouteId: 30, roleName: 'ui_builder' },
+      { desktopRouteId: 30, roleName: 'admin' },
+    ],
+    roles: [
+      { name: 'root', title: 'Root', allowConfigure: true, snippets: ['*'] },
+      { name: 'admin', title: 'Admin', allowConfigure: true, snippets: ['pm'] },
+      { name: 'member', title: 'Member', allowConfigure: false, snippets: [] },
+      { name: 'ui_builder', title: 'UI Builder', allowConfigure: true, snippets: ['pm'] },
+      { name: 'ldx_employee', title: 'Employee', allowConfigure: false, snippets: [] },
+      { name: 'enterprise_auditor', title: 'Enterprise Auditor', allowConfigure: false, snippets: [] },
+    ],
+  });
+
+  const saveCtx = makeCtx({
+    method: 'POST',
+    values: {
+      uid: 'ldx-portal-audit',
+      slug: 'audit',
+      title: 'Audit Portal',
+      roles: ['enterprise_auditor', 'ui_builder', 'admin', 'member'],
+    },
+  });
+  await actions.save(saveCtx);
+  assert.deepEqual(saveCtx.body.roles, ['enterprise_auditor']);
+  assert.ok(tables.rolesDesktopRoutes.some(g => g.desktopRouteId === 30 && g.roleName === 'enterprise_auditor'));
+  assert.ok(!tables.rolesDesktopRoutes.some(g => g.desktopRouteId === 30 && g.roleName === 'member'));
+
+  const listCtx = makeCtx({ method: 'GET' });
+  await actions.list(listCtx);
+  assert.deepEqual(listCtx.body.find(p => p.uid === 'ldx-portal-audit').roles, ['enterprise_auditor']);
+
+  const expCtx = makeCtx({ method: 'GET', params: { uid: 'ldx-portal-audit' } });
+  await actions.exportBlueprint(expCtx);
+  assert.deepEqual(expCtx.body.roles, ['enterprise_auditor']);
+
+  const auditorCtx = makeCtx({ roles: ['enterprise_auditor'], method: 'GET' });
+  await actions.listAccessible(auditorCtx);
+  assert.equal(auditorCtx.body.some(p => p.uid === 'ldx-portal-audit'), true);
+});

@@ -567,3 +567,143 @@ test('DxosParaPlugin wires afterCreate/afterUpdate/afterDestroy with transaction
     Module._load = origLoad;
   }
 });
+
+test('extractPdfText decodes Vietnamese ToUnicode CMap bfchar, bfrange (sequential + array), and multi-byte UTF-16BE glyphs', () => {
+  const { extractPdfText, parseToUnicodeCMap } = require(path.join(PLUGIN_ROOT, 'src/server/document-extractor.js'));
+  assert.equal(typeof parseToUnicodeCMap, 'function');
+
+  // Construct a real PDF with /Type /Font -> /ToUnicode CMap (FlateDecode) mapping CID glyphs to "Kho lạnh Cần Thơ"
+  // Text: "Kho lạnh Cần Thơ"
+  // Glyph mapping:
+  //   0001 -> 004B ('K'), 0002 -> 0068 ('h'), 0003 -> 006F ('o'), 0004 -> 0020 (' ')
+  //   0005 -> 006C ('l'), 0006 -> 1EA1 ('ạ'), 0007 -> 006E ('n'), 0008 -> 0068 ('h') (reuse 0002)
+  //   bfrange sequential: <0010> <0012> <0043> => 0010='C', 0011='D', 0012='E'
+  //   bfrange array: <0020> <0024> [<1EA7> <0054> <0068> <01A1>] => 0020='ầ', 0021='T', 0022='h', 0023='ơ'
+  const cmapStreamStr = [
+    '/CIDInit /ProcSet findresource begin',
+    '12 dict begin',
+    'begincmap',
+    '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def',
+    '/CMapName /Adobe-Identity-UCS def',
+    '1 begincodespacerange',
+    '<0000> <FFFF>',
+    'endcodespacerange',
+    '7 beginbfchar',
+    '<0001> <004B>',
+    '<0002> <0068>',
+    '<0003> <006F>',
+    '<0004> <0020>',
+    '<0005> <006C>',
+    '<0006> <1EA1>',
+    '<0007> <006E>',
+    'endbfchar',
+    '2 beginbfrange',
+    '<0010> <0012> <0043>',
+    '<0020> <0023> [<1EA7> <0054> <0068> <01A1>]',
+    'endbfrange',
+    'endcmap',
+  ].join('\n');
+
+  const compressedCmap = zlib.deflateSync(Buffer.from(cmapStreamStr, 'latin1'));
+  // "Kho lạnh" = 0001 0002 0003 0004 0005 0006 0007 0002
+  // "Cần Thơ" = 0010 0020 0007 0004 0021 0022 0023
+  const contentStreamStr = [
+    'BT',
+    '/F1 12 Tf',
+    '72 720 Td',
+    '<00010002000300040005000600070002> Tj',
+    '0 -16 Td',
+    '[<001000200007> -140 <002100220023>] TJ',
+    'ET',
+  ].join('\n');
+  const compressedContent = zlib.deflateSync(Buffer.from(contentStreamStr, 'latin1'));
+
+  const pdfBuf = Buffer.concat([
+    Buffer.from('%PDF-1.4\n', 'latin1'),
+    Buffer.from('1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n', 'latin1'),
+    Buffer.from('2 0 obj << /Type /Pages /Count 1 /Kids [3 0 R] >> endobj\n', 'latin1'),
+    Buffer.from('3 0 obj << /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >> endobj\n', 'latin1'),
+    Buffer.from('4 0 obj << /Type /Font /Subtype /Type0 /BaseFont /VNFont /Encoding /Identity-H /ToUnicode 5 0 R >> endobj\n', 'latin1'),
+    Buffer.from(`5 0 obj << /Length ${compressedCmap.length} /Filter /FlateDecode >>\nstream\n`, 'latin1'),
+    compressedCmap,
+    Buffer.from('\nendstream\nendobj\n', 'latin1'),
+    Buffer.from(`6 0 obj << /Length ${compressedContent.length} /Filter /FlateDecode >>\nstream\n`, 'latin1'),
+    compressedContent,
+    Buffer.from('\nendstream\nendobj\n%%EOF\n', 'latin1'),
+  ]);
+
+  const parsed = extractPdfText(pdfBuf);
+  assert.match(parsed.text, /Kho lạnh/);
+  assert.match(parsed.text, /Cần\s+Thơ/);
+});
+
+test('DxosParaPlugin logs structured retry metadata on afterCommit indexing failures instead of silent swallow', async () => {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  class MockPlugin {}
+  Module._load = function (req, parent, isMain) {
+    if (req === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, req, parent, isMain);
+  };
+  try {
+    const indexPath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+    delete require.cache[indexPath];
+    const DxosParaPlugin = require(indexPath);
+
+    const events = [];
+    const loggedErrors = [];
+    let attemptCount = 0;
+    const plugin = new DxosParaPlugin();
+    plugin.db = {
+      on(eventName, handler) { events.push({ eventName, handler }); },
+      getRepository(name) {
+        if (name === 'latticeParaChunks') {
+          return {
+            destroy: async () => {
+              attemptCount += 1;
+              if (attemptCount === 1) {
+                throw Object.assign(new Error('DB connection temporarily unavailable'), { code: 'ECONNRESET' });
+              }
+            },
+            create: async ({ values }) => ({ id: 1, ...values }),
+            find: async () => [],
+          };
+        }
+        return null;
+      },
+    };
+    plugin.app = {
+      logger: {
+        error(msg, meta) { loggedErrors.push({ msg, meta }); },
+        warn(msg, meta) { loggedErrors.push({ msg, meta }); },
+      },
+      resourceManager: { use() {}, define() {} },
+      acl: { allow() {} },
+    };
+
+    await plugin.load();
+    const afterCreate = events.find((e) => e.eventName === 'latticeParaDocuments.afterCreate');
+    const afterCommitCbs = [];
+    await afterCreate.handler(
+      { id: 99, organizationId: 'org-a', code: 'DOC-99', title: 'Retry Test', contentMarkdown: 'Nội dung test retry' },
+      { transaction: { afterCommit: (fn) => afterCommitCbs.push(fn) } },
+    );
+    assert.equal(afterCommitCbs.length, 1);
+    await afterCommitCbs[0]();
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.ok(loggedErrors.length >= 1, 'afterCommit failure must log structured retry metadata');
+    const firstLog = loggedErrors[0];
+    assert.equal(firstLog.meta.event, 'dxos_para.after_commit_failed');
+    assert.equal(firstLog.meta.operation, 'syncDocumentChunks');
+    assert.equal(firstLog.meta.documentId, 99);
+    assert.equal(firstLog.meta.organizationId, 'org-a');
+    assert.equal(firstLog.meta.attempt, 1);
+    assert.equal(firstLog.meta.retryable, true);
+    assert.ok(typeof firstLog.meta.nextRetryAt === 'string' && firstLog.meta.nextRetryAt.length > 0);
+    assert.match(firstLog.meta.errorMessage, /DB connection temporarily unavailable/);
+    assert.ok(Array.isArray(plugin.indexingRetryLog) && plugin.indexingRetryLog.length >= 1);
+  } finally {
+    Module._load = origLoad;
+  }
+});

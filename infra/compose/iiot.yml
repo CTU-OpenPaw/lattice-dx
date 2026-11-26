@@ -26,17 +26,25 @@ networks:
 services:
   mosquitto:
     <<: *iiot_defaults
-    # EPL-2.0 OSI-clean MQTT edge broker (strictly internal on iiot-net; bridge external sensors via authenticated edge gateway)
+    # EPL-2.0 OR BSD-3-Clause OSI-clean MQTT broker with Dynamic Security ACLs (strictly internal on iiot-net)
     image: eclipse-mosquitto:2.0.21@sha256:94f5a3d7deafa59fa3440d227ddad558f59d293c612138de841eec61bfa4d353
     cap_add:
       - CHOWN
       - SETUID
       - SETGID
       - DAC_OVERRIDE
+      - KILL
+    entrypoint: ["/bin/sh", "/mosquitto/init-dynsec.sh"]
+    environment:
+      MQTT_ADMIN_USER: ${MQTT_ADMIN_USER:-ldx_mqtt_admin}
+      MQTT_ADMIN_PASSWORD: ${MQTT_ADMIN_PASSWORD:-local-mqtt-admin-password}
+      MQTT_BRIDGE_USER: ${MQTT_BRIDGE_USER:-nodered_bridge}
+      MQTT_BRIDGE_PASSWORD: ${MQTT_BRIDGE_PASSWORD:-local-nodered-bridge-password}
     expose:
       - "1883"
     volumes:
       - ../config/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ../config/mosquitto/init-dynsec.sh:/mosquitto/init-dynsec.sh:ro
       - mosquitto-data:/mosquitto/data
       - mosquitto-log:/mosquitto/log
     networks:
@@ -50,17 +58,32 @@ services:
 
   nodered:
     <<: *iiot_defaults
-    # Apache-2.0 OSI-clean IIoT protocol normalization & edge sanitizer
+    # Apache-2.0 OSI-clean IIoT protocol normalization, LWT bridge, Orion-LD sync & Digital Twin downlink
     image: nodered/node-red:4.0.9@sha256:0b295b3a14c512548567ca99db631bc37b23bfc79fd009ee8248a610fafdb4b5
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        node -e 'const fs=require("fs");const u=process.env.MQTT_BRIDGE_USER||"";const p=process.env.MQTT_BRIDGE_PASSWORD||"";if(u&&p){fs.writeFileSync("/data/flows_cred.json",JSON.stringify({"latticedx-mqtt-broker":{user:u,password:p}}),{mode:0o600});}'
+        exec /usr/src/node-red/entrypoint.sh "$$@"
     environment:
       TZ: Asia/Ho_Chi_Minh
+      MQTT_BRIDGE_USER: ${MQTT_BRIDGE_USER:-nodered_bridge}
+      MQTT_BRIDGE_PASSWORD: ${MQTT_BRIDGE_PASSWORD:-local-nodered-bridge-password}
       DX_IIOT_INGEST_URL: ${DX_IIOT_INGEST_URL:-http://nocobase/api/dxosBlocks:telemetryIngest}
+      DX_IIOT_STATUS_URL: ${DX_IIOT_STATUS_URL:-http://nocobase/api/dxosBroker:deviceStatusIngest}
+      DX_TWIN_ACK_URL: ${DX_TWIN_ACK_URL:-http://nocobase/api/dxosBlocks:twinAckCommand}
+      DX_ORION_URL: ${DX_ORION_URL:-}
       DX_IIOT_INGEST_TOKEN: ${DX_IIOT_INGEST_TOKEN:-}
+      NODERED_CREDENTIAL_SECRET: ${NODERED_CREDENTIAL_SECRET:-}
+      NODERED_ADMIN_USER: ${NODERED_ADMIN_USER:-}
+      NODERED_ADMIN_PASS_HASH: ${NODERED_ADMIN_PASS_HASH:-}
     ports:
       - "127.0.0.1:1880:1880"
     volumes:
       - nodered-data:/data
       - ../config/nodered/flows.json:/data/flows.json:ro
+      - ../config/nodered/settings.js:/data/settings.js:ro
     networks:
       - iiot-net
       - default
@@ -74,33 +97,7 @@ services:
       timeout: 5s
       retries: 15
 
-  timescaledb:
-    <<: *iiot_defaults
-    # Apache-2.0 OSS variant time-series Postgres extension store
-    image: timescale/timescaledb:2.19.3-pg16-oss@sha256:769f2b43c7dac8e50887de2b49aff971dc5a8cf4aedfe2045d8b77eca2924a72
-    cap_add:
-      - CHOWN
-      - SETUID
-      - SETGID
-      - DAC_OVERRIDE
-      - FOWNER
-    environment:
-      POSTGRES_DB: ${IIOT_TSDB_NAME:-lattice_iiot}
-      POSTGRES_USER: ${IIOT_TSDB_USER:-lattice_iiot}
-      POSTGRES_PASSWORD: ${IIOT_TSDB_PASSWORD:-local-iiot-tsdb-password}
-    volumes:
-      - timescaledb-data:/var/lib/postgresql/data
-    networks:
-      - iiot-net
-    mem_limit: 768m
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
 volumes:
   mosquitto-data:
   mosquitto-log:
   nodered-data:
-  timescaledb-data:

@@ -26,7 +26,8 @@ const FORBIDDEN_ENTRY_PATTERNS = [
   /(^|\/)\.git(\/|$)/,
   /(^|\/)\.env($|\.(?!example$))/i,
   /\.(pem|key)$/i,
-  /^upstream\/nocobase\/.+/,
+  /(^|\/)upstream(\/|$)/,
+  /(^|\/)\.gitmodules$/,
 ];
 
 export function planTarball({

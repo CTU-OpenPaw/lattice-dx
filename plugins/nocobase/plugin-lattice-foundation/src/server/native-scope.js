@@ -8,7 +8,17 @@
  */
 'use strict';
 
-const { installRlsTransactionBridge, setTransactionRlsOrg, withTenantRlsContext } = require('./pg-rls');
+const {
+  installRlsTransactionBridge,
+  getActiveRlsContext,
+  canUsePgRlsSession,
+  setContextRlsTransaction,
+  setTransactionRlsOrg,
+  setTransactionRlsBypass,
+  withTenantRlsContext,
+  withSystemRlsBypass,
+  runInRlsSavepoint,
+} = require('./pg-rls');
 
 function failure(code, status = 403, message = code) {
   return Object.assign(new Error(message), {code, status});
@@ -34,7 +44,31 @@ const value = (row, key) => typeof row?.get === 'function' ? row.get(key) : row?
 async function resolveNativeActor(db, user, options = {}) {
   const id = value(user, 'id');
   if (id == null || !/^[1-9]\d*$/.test(String(id))) throw failure('NATIVE_LOGIN_REQUIRED', 401);
-  const rows = await db.getRepository('latticeEmployees').find({...options,filter:{userId:id},limit:2});
+  const findEmployee = (findOptions) => db.getRepository('latticeEmployees').find({ ...findOptions, filter: { userId: id }, limit: 2 });
+  let rows;
+  if (!options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)) {
+    rows = await withSystemRlsBypass(db, (transaction) => findEmployee({ ...options, transaction }));
+  } else if (options.transaction && !getActiveRlsContext()?.transaction && canUsePgRlsSession(db)) {
+    const prevRaw = await db.sequelize.query("SELECT current_setting('app.rls_bypass', true) AS prev", {
+      transaction: options.transaction,
+    });
+    const prevBypass = prevRaw?.[0]?.[0]?.prev ?? '';
+    if (prevBypass !== 'on') {
+      await setTransactionRlsBypass(db, options.transaction);
+    }
+    try {
+      rows = await findEmployee(options);
+    } finally {
+      if (prevBypass !== 'on') {
+        await db.sequelize.query("SELECT set_config('app.rls_bypass', :prev, true)", {
+          replacements: { prev: prevBypass },
+          transaction: options.transaction,
+        }).catch(() => {});
+      }
+    }
+  } else {
+    rows = await findEmployee(options);
+  }
   if (rows.length > 1) throw failure('NATIVE_MEMBERSHIP_AMBIGUOUS');
   const employee = rows[0];
   if (!employee || value(employee,'active') !== true) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
@@ -45,10 +79,29 @@ async function resolveNativeActor(db, user, options = {}) {
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
 const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
+const SENSITIVE_SCOPED_COLLECTIONS = new Set([
+  'latticeRecordChatter',
+  'latticeContextOutbox',
+  'latticeIntegrationInbox',
+  'latticeAgentProposals',
+  'latticeAiAuditLogs',
+  'latticeAiQuotaUsage',
+  'latticeUiSnapshots',
+  'latticeAiProfiles',
+  'latticeAiApprovalQueue',
+  'latticeAiTraces',
+  'latticeAiMemory',
+  'latticeA2aTasks',
+  'latticeNotificationDeliveries',
+  'latticeApprovalPolicies',
+  'latticeApprovalRequests',
+  'latticePublicForms',
+  'latticePublicFormSubmissions',
+]);
 const SENSITIVE_CHART_COLLECTIONS = new Set([
   'users', 'roles', 'dataSourcesRoles', 'dataSourcesRolesResources',
   'authenticators', 'applicationTokens', 'apiKeys', 'sessions',
-  'latticeAiAuditLogs', 'latticeAiProfiles',
+  ...SENSITIVE_SCOPED_COLLECTIONS,
 ]);
 function clampPageLimit(limit) {
   const n = Number(limit);
@@ -65,6 +118,22 @@ function assertSafeSort(sort) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
   }
+}
+const SELF_ACTOR_FILTER_FIELDS = Object.freeze({
+  'requester.userId': 'requesterId',
+  'assignee.userId': 'assigneeId',
+});
+function appendConflictSafeFilter(out, fieldName, filterValue) {
+  if (!Object.hasOwn(out, fieldName)) {
+    out[fieldName] = filterValue;
+    return;
+  }
+  if (out.$and !== undefined && !Array.isArray(out.$and)) {
+    throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
+  }
+  out.$and = Array.isArray(out.$and)
+    ? [...out.$and, { [fieldName]: filterValue }]
+    : [{ [fieldName]: filterValue }];
 }
 function isSelfUserIdEquality(entry, actorUserId) {
   if (actorUserId == null) return false;
@@ -96,7 +165,9 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
   }
   if (typeof target !== 'object') return target;
   const out = {};
-  let hasSelfRequesterRewrite = false;
+  const allowRequester = Boolean(options.allowSelfActorFilters || options.allowSelfRequesterUserId);
+  const allowAssignee = Boolean(options.allowSelfActorFilters);
+  const rewrittenFields = [];
   for (const [key, entry] of Object.entries(target)) {
     if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
@@ -105,14 +176,16 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
       throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
     }
     if (!key.startsWith('$')) {
+      const mappedField = SELF_ACTOR_FILTER_FIELDS[key];
+      const selfFieldAllowed = (mappedField === 'requesterId' && allowRequester)
+        || (mappedField === 'assigneeId' && allowAssignee);
       if (
-        key === 'requester.userId'
-        && options.allowSelfRequesterUserId
+        selfFieldAllowed
         && options.actor?.userId != null
         && options.actor?.employeeId != null
         && isSelfUserIdEquality(entry, options.actor.userId)
       ) {
-        hasSelfRequesterRewrite = true;
+        rewrittenFields.push(mappedField);
         continue;
       }
       if (key.includes('.') || SENSITIVE_FILTER_KEY_RE.test(key)) {
@@ -121,18 +194,8 @@ function sanitizeSafeFilter(node, options = {}, depth = 0) {
     }
     out[key] = sanitizeSafeFilter(entry, options, depth + 1);
   }
-  if (hasSelfRequesterRewrite) {
-    const selfFilter = { $eq: options.actor.employeeId };
-    if (!Object.hasOwn(out, 'requesterId')) {
-      out.requesterId = selfFilter;
-    } else {
-      if (out.$and !== undefined && !Array.isArray(out.$and)) {
-        throw failure('NATIVE_RELATION_EXPANSION_UNSUPPORTED');
-      }
-      out.$and = Array.isArray(out.$and)
-        ? [...out.$and, { requesterId: selfFilter }]
-        : [{ requesterId: selfFilter }];
-    }
+  for (const fieldName of rewrittenFields) {
+    appendConflictSafeFilter(out, fieldName, { $eq: options.actor.employeeId });
   }
   return out;
 }
@@ -143,22 +206,32 @@ function scopeNativeRead(params, actor) {
   if (next.limit != null) next.limit = clampPageLimit(next.limit);
   return next;
 }
-function scopeNativeValues(values, actor) {
-  if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID',400);
+function scopeNativeValues(values, actor, { allowPlainJson = false } = {}) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) throw failure('NATIVE_VALUES_INVALID', 400);
   if (!actor?.organizationId) throw failure('NATIVE_MEMBERSHIP_REQUIRED');
   for (const [key, entry] of Object.entries(values)) {
-    if (['id','userId','identitySubject'].includes(key) || (entry !== null && typeof entry === 'object')) throw failure('NATIVE_PROTECTED_FIELD');
+    if (['id', 'userId', 'identitySubject', '__proto__', 'constructor', 'prototype'].includes(key)) {
+      throw failure('NATIVE_PROTECTED_FIELD');
+    }
+    if (!allowPlainJson && entry !== null && typeof entry === 'object') {
+      throw failure('NATIVE_PROTECTED_FIELD');
+    }
   }
   if (values.organizationId !== undefined && values.organizationId !== actor.organizationId) throw failure('NATIVE_ORGANIZATION_MISMATCH');
-  return {...values,organizationId:actor.organizationId};
+  return { ...values, organizationId: actor.organizationId };
 }
 async function recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnapshot) {
   if (!beforeSnapshot || !updatedSnapshot) return;
   try {
-    const { recordFieldDiffChatter } = require('./record-chatter');
-    await recordFieldDiffChatter(db, {
+    const chatterRepo = db?.getRepository?.('latticeRecordChatter');
+    if (!chatterRepo || typeof chatterRepo.create !== 'function') return;
+    const { ALLOWED_CHATTER_COLLECTIONS, computeRecordFieldDiff, recordFieldDiffChatter } = require('./record-chatter');
+    const targetCollection = ctx?.action?.resourceName;
+    if (!ALLOWED_CHATTER_COLLECTIONS.has(targetCollection)) return;
+    if (!computeRecordFieldDiff(beforeSnapshot, updatedSnapshot).length) return;
+    const payload = {
       organizationId: actor.organizationId,
-      targetCollection: ctx.action.resourceName,
+      targetCollection,
       targetRecordId: Number(id),
       before: beforeSnapshot,
       after: updatedSnapshot,
@@ -166,7 +239,15 @@ async function recordChatterSafe(db, ctx, actor, id, beforeSnapshot, updatedSnap
         ...actor,
         username: value(ctx.state?.currentUser, 'username') || (actor.employeeId ? `employee-${actor.employeeId}` : 'operator'),
       },
-    });
+    };
+    const activeTx = getActiveRlsContext()?.transaction || null;
+    if (canUsePgRlsSession(db) && !activeTx && actor?.organizationId) {
+      await withTenantRlsContext(db, actor.organizationId, (transaction) => recordFieldDiffChatter(db, payload, { transaction }));
+    } else if (activeTx) {
+      await runInRlsSavepoint(db, (transaction) => recordFieldDiffChatter(db, payload, { transaction }));
+    } else {
+      await recordFieldDiffChatter(db, payload);
+    }
   } catch {}
 }
 
@@ -250,31 +331,40 @@ function createNativeScopeMiddleware(db, definitions) {
   const schemas = new Map(Object.values(definitions).map(schema=>[schema.name,schema]));
   const read = new Set(['list','get','count']);
   const write = new Set(['create','update','destroy']);
-  const isScopedCollection = (name) => schemas.has(name) || CUSTOM_COLLECTION_RE.test(String(name || ''));
+  const isScopedCollection = (name) => schemas.has(name) || SENSITIVE_SCOPED_COLLECTIONS.has(name) || CUSTOM_COLLECTION_RE.test(String(name || ''));
   return async function nativeScope(ctx,next) {
     const {resourceName,actionName,params} = ctx.action;
     // The host chart action reads the repository directly. Keep its ACL and
     // add the same organization restriction as the collection actions.
-    if (resourceName === 'charts' && actionName === 'queryData' && ctx.state.currentRole !== 'root') {
+    if (resourceName === 'charts' && actionName === 'queryData') {
       const values = params.values || {};
-      if (values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
       const col = String(values.collection || '');
+      if (ctx.state.currentRole === 'root') {
+        if (canUsePgRlsSession(db) && (values.mode === 'sql' || isScopedCollection(col) || col.startsWith('lattice'))) {
+          return withSystemRlsBypass(db, (transaction) => {
+            setContextRlsTransaction(ctx, transaction);
+            return next();
+          });
+        }
+        return next();
+      }
+      if (values.mode !== 'builder') throw failure('NATIVE_CHART_MODE_UNSUPPORTED');
       if (!col || SENSITIVE_CHART_COLLECTIONS.has(col) || (!isScopedCollection(col) && !col.startsWith('lattice') && col !== 'workflowManualTasks')) {
         throw failure('NATIVE_CHART_COLLECTION_FORBIDDEN');
       }
       if (isScopedCollection(col)) {
         const actor = await resolveNativeActor(db, ctx.state.currentUser);
-        const allowSelfRequesterUserId = ['latticeRequests', 'latticeOrders'].includes(col);
+        const allowSelfActorFilters = ['latticeRequests', 'latticeOrders'].includes(col);
         const nextValues = values.filter !== undefined
-          ? { ...values, filter: sanitizeSafeFilter(values.filter, { allowSelfRequesterUserId, actor }) }
+          ? { ...values, filter: sanitizeSafeFilter(values.filter, { allowSelfActorFilters, actor }) }
           : values;
         assertSafeSort(values.sort);
         ctx.state = ctx.state || {};
         ctx.state.latticeRlsOrg = actor.organizationId;
         params.values = scopeNativeRead(nextValues, actor);
-        if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
+        if (canUsePgRlsSession(db)) {
           return withTenantRlsContext(db, actor.organizationId, (transaction) => {
-            ctx.state.latticeRlsTransaction = transaction;
+            setContextRlsTransaction(ctx, transaction);
             return next();
           });
         }
@@ -292,7 +382,15 @@ function createNativeScopeMiddleware(db, definitions) {
       ? () => writeDirectoryRecord(ctx, next)
       : next;
     // Root is the verified host configuration role, not a body/header flag.
-    if (ctx.state.currentRole === 'root') return proceed();
+    if (ctx.state.currentRole === 'root') {
+      if (canUsePgRlsSession(db)) {
+        return withSystemRlsBypass(db, (transaction) => {
+          setContextRlsTransaction(ctx, transaction);
+          return proceed();
+        });
+      }
+      return proceed();
+    }
     const actor = await resolveNativeActor(db,ctx.state.currentUser);
     if (resourceName !== collectionName) throw failure('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED');
     if (!read.has(actionName) && !write.has(actionName)) throw failure('NATIVE_ACTION_UNSUPPORTED');
@@ -303,7 +401,7 @@ function createNativeScopeMiddleware(db, definitions) {
     }
     const document=['latticeRequests','latticeOrders'].includes(collectionName);
     if (params.filter !== undefined) {
-      params.filter = sanitizeSafeFilter(params.filter, { allowSelfRequesterUserId: document, actor });
+      params.filter = sanitizeSafeFilter(params.filter, { allowSelfActorFilters: document, actor });
     }
     assertSafeSort(params.sort);
     if (write.has(actionName) && collectionName === 'latticeEmployees') throw failure('NATIVE_IDENTITY_ADMIN_REQUIRED');
@@ -320,7 +418,9 @@ function createNativeScopeMiddleware(db, definitions) {
       expectedVersion = actionName === 'update' ? extractExpectedVersion(ctx, params) : null;
       ctx.state = ctx.state || {};
       ctx.state.latticeExpectedVersion = expectedVersion;
-      params.values = scopeNativeValues(params.values, actor);
+      params.values = scopeNativeValues(params.values, actor, {
+        allowPlainJson: SENSITIVE_SCOPED_COLLECTIONS.has(collectionName),
+      });
       if (document) {
         if (['status','version','requesterId','assigneeId','decisionReason','submittedAt','submittedBy','cancelledAt','cancelledBy','cancelReason','amendedFromId','amendmentNo'].some(field => Object.hasOwn(params.values, field))) {
           throw failure('NATIVE_DOCUMENT_PROTECTED_FIELD');
@@ -360,14 +460,14 @@ function createNativeScopeMiddleware(db, definitions) {
       ctx.state = ctx.state || {};
       ctx.state.latticeNativeActor = actor;
       ctx.state.latticeRlsOrg = actor.organizationId;
-      if (transaction) ctx.state.latticeRlsTransaction = transaction;
+      if (transaction) setContextRlsTransaction(ctx, transaction);
       if (document && actionName === 'update') {
         return updateScopedDocument(db, ctx, actor, transaction ? { transaction, deferChatter: true } : {});
       }
       return proceed();
     };
 
-    if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function') {
+    if (canUsePgRlsSession(db)) {
       const result = await withTenantRlsContext(db, actor.organizationId, (transaction) => executeScoped(transaction));
       if (typeof result === 'function') {
         try {

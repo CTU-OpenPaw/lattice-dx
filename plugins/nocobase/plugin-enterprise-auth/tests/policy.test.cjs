@@ -239,3 +239,109 @@ test('syncMappedUserRoles neither adds nor revokes privileged ldx_* roles listed
   assert.equal(destroyed.length,1);
   assert.deepEqual(rows.map(r=>r.roleName),['ldx_ops','ldx_ops_pm']);
 });
+
+test('deploymentConfig allows HTTPS public issuer paired with internal keycloak:8080 backchannel',()=>{
+  const prodEnv={
+    DX_NATIVE_AUTH_ISSUER:'https://auth.latticedx.example.com/realms/lattice',
+    DX_NATIVE_AUTH_INTERNAL_ISSUER:'http://keycloak:8080/realms/lattice',
+    DX_NATIVE_AUTH_ORIGIN:'https://app.latticedx.example.com',
+    DX_NATIVE_AUTH_CLIENT_ID:'dx-native',
+  };
+  const c=deploymentConfig(prodEnv);
+  assert.equal(c.issuer,'https://auth.latticedx.example.com/realms/lattice');
+  assert.equal(c.internal,'http://keycloak:8080');
+  assert.equal(c.origin,'https://app.latticedx.example.com');
+  assert.equal(c.callback,'https://app.latticedx.example.com/api/enterpriseAuth:callback');
+  assert.equal(c.insecure,false);
+  assert.throws(()=>deploymentConfig({...prodEnv,DX_NATIVE_AUTH_INTERNAL_ISSUER:'http://evil:8080/realms/lattice'}));
+  assert.throws(()=>deploymentConfig({...prodEnv,DX_NATIVE_AUTH_INTERNAL_ISSUER:'http://keycloak:8080/other'}));
+  assert.throws(()=>deploymentConfig({...prodEnv,DX_NATIVE_AUTH_INTERNAL_ISSUER:'https://keycloak:8080/realms/lattice'}));
+});
+
+test('resolveCacheOptions honors DX_NATIVE_AUTH_SESSION_REDIS_URL on Valkey/Redis',()=>{
+  const {resolveCacheOptions}=require('../src/server/policy');
+  const opts=resolveCacheOptions({
+    CACHE_DEFAULT_STORE:'redis',
+    CACHE_REDIS_URL:'redis://:pw@redis:6379/0',
+    DX_NATIVE_AUTH_SESSION_REDIS_URL:'redis://:pw@redis:6379/2',
+  });
+  assert.equal(opts.store,'redis');
+  assert.equal(opts.url,'redis://:pw@redis:6379/2');
+
+  const urlOnly=resolveCacheOptions({
+    DX_NATIVE_AUTH_SESSION_REDIS_URL:'redis://:pw@redis:6379/2',
+  });
+  assert.equal(urlOnly.store,'redis');
+  assert.equal(urlOnly.url,'redis://:pw@redis:6379/2');
+
+  const memOverride=resolveCacheOptions({
+    DX_NATIVE_AUTH_CACHE_STORE:'memory',
+    DX_NATIVE_AUTH_SESSION_REDIS_URL:'redis://:pw@redis:6379/2',
+  });
+  assert.equal(memOverride.store,'memory');
+});
+
+test('withOptionalSystemRlsBypass sets app.rls_bypass inside transaction on postgres and skips on non-postgres or disabled env',async()=>{
+  const {withOptionalSystemRlsBypass}=require('../src/server/policy');
+  const prev=process.env.DX_PG_RLS_SESSION;
+  try{
+    process.env.DX_PG_RLS_SESSION='true';
+    const calls=[];
+    const fakeTx={id:'tx-1'};
+    const pgDb={
+      sequelize:{
+        getDialect:()=>'postgres',
+        transaction:async(fn)=>fn(fakeTx),
+        query:async(sql,opts)=>{calls.push({sql,opts});},
+      },
+      getRepository:(name)=>({
+        find:async(q)=>{
+          calls.push({repo:name,q});
+          return name==='usersAuthenticators'
+            ?[{userId:12,meta:{issuer:'iss'}}]
+            :name==='users'
+              ?[{id:12}]
+              :[{id:8,userId:12,active:true,organizationId:'org-a'}];
+        },
+      }),
+    };
+    const res=await withOptionalSystemRlsBypass(pgDb,async(tx)=>({tx}));
+    assert.equal(res.tx,fakeTx);
+    assert.equal(calls.length,1);
+    assert.match(calls[0].sql,/set_config\('app\.rls_bypass',\s*'on',\s*true\)/);
+    assert.equal(calls[0].opts.transaction,fakeTx);
+
+    const user=await resolveMappedUser(pgDb,'native-keycloak','sub-1','iss');
+    assert.equal(user.id,12);
+    const empCall=calls.find(c=>c.repo==='latticeEmployees');
+    assert.equal(empCall.q.transaction,fakeTx);
+
+    let sqliteTxCalled=false;
+    const sqliteDb={
+      sequelize:{
+        getDialect:()=>'sqlite',
+        transaction:async()=>{sqliteTxCalled=true;},
+        query:async()=>{sqliteTxCalled=true;},
+      },
+    };
+    const sqliteRes=await withOptionalSystemRlsBypass(sqliteDb,async(tx)=>({tx}));
+    assert.equal(sqliteRes.tx,undefined);
+    assert.equal(sqliteTxCalled,false);
+
+    process.env.DX_PG_RLS_SESSION='false';
+    let disabledTxCalled=false;
+    const disabledPgDb={
+      sequelize:{
+        getDialect:()=>'postgres',
+        transaction:async()=>{disabledTxCalled=true;},
+        query:async()=>{disabledTxCalled=true;},
+      },
+    };
+    const disabledRes=await withOptionalSystemRlsBypass(disabledPgDb,async(tx)=>({tx}));
+    assert.equal(disabledRes.tx,undefined);
+    assert.equal(disabledTxCalled,false);
+  }finally{
+    if(prev===undefined)delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION=prev;
+  }
+});

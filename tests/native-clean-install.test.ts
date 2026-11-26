@@ -9,7 +9,7 @@
 import {describe,it,expect,vi} from 'vitest';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
-import {cleanInstallPlan,assertUnusedCleanProject,assertEmptyNativeDatabase,nativeCleanInstall} from '../scripts/native-clean-install.mjs';
+import {cleanInstallPlan,parseCleanInstallArgs,assertUnusedCleanProject,assertEmptyNativeDatabase,nativeCleanInstall} from '../scripts/native-clean-install.mjs';
 import {dockerContextArgs,resolveDockerContext} from '../scripts/lib/docker-context.mjs';
 
 async function orchestratorFixture(count='0'){
@@ -19,6 +19,7 @@ async function orchestratorFixture(count='0'){
   const migrations=[
     { pkg:'@latticedx/plugin-lattice-foundation', dir:'plugin-lattice-foundation', name:'20261107000100-shared-upload-receipts/@latticedx/plugin-lattice-foundation' },
     { pkg:'@latticedx/plugin-dxos-para', dir:'plugin-dxos-para', name:'20261120000100-dxos-para-init/@latticedx/plugin-dxos-para' },
+    { pkg:'@latticedx/plugin-dxos-blocks', dir:'plugin-dxos-blocks', name:'20261123000500-dxos-telemetry-timeseries/@latticedx/plugin-dxos-blocks' },
     { pkg:'@latticedx/plugin-dxos-studio', dir:'plugin-dxos-studio', name:'20261120000200-dxos-service-tickets/@latticedx/plugin-dxos-studio' },
     { pkg:'@latticedx/plugin-dxos-ai', dir:'plugin-dxos-ai', name:'20261121000100-dxos-ai-workforce/@latticedx/plugin-dxos-ai' },
   ];
@@ -101,6 +102,13 @@ describe('clean native installation boundaries',()=>{
       vi.stubEnv('DOCKER_CONTEXT', expectedCtx ?? 'none');
       const plan = cleanInstallPlan('b'.repeat(12), 13004);
       expect(plan.composeArgs.slice(0, expectedArgs.length)).toEqual(expectedArgs);
+
+      const blankPlan = cleanInstallPlan('c'.repeat(12), 13016, { blankSlate: true });
+      expect(blankPlan.blankSlate).toBe(true);
+      expect(blankPlan.overlay).toContain('LATTICE_SKIP_DEMO_SEED: "1"');
+      expect(blankPlan.overlay).toContain('127.0.0.1:13016:80');
+      expect(parseCleanInstallArgs(['--port=13016', '--blank-slate'])).toEqual({ port: 13016, blankSlate: true, keep: false });
+      expect(() => parseCleanInstallArgs(['--bad-flag'])).toThrow();
     }finally{vi.restoreAllMocks();vi.unstubAllEnvs();}
   });
 });

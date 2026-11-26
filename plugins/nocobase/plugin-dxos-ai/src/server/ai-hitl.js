@@ -8,7 +8,8 @@
  */
 'use strict';
 
-const { recordAiAuditLog, sanitizeAuditSummary } = require('./ai-schemas');
+const { recordAiAuditLog, sanitizeAuditSummary, normalizeToolPermissionsMap } = require('./ai-schemas');
+const { runWithTenantRls, runWithSystemRlsBypass, runInRlsSavepoint } = require('./ai-rls');
 
 const VALID_TOOL_MODES = new Set(['ALLOW', 'ASK', 'OFF']);
 const VALID_RISK_LEVELS = new Set(['low', 'medium', 'high', 'critical']);
@@ -54,12 +55,15 @@ async function resolveEffectiveToolMode(db, { aiEmployee = null, toolName = '', 
   const repo = db?.getRepository?.('latticeAiProfiles');
   if (!repo || typeof repo.findOne !== 'function') return fallback;
 
-  const profile = await repo.findOne({ filter: { username: empName } });
+  const profile = await runWithSystemRlsBypass(db, () => repo.findOne({ filter: { username: empName } }));
   if (!profile) return fallback;
   if (val(profile, 'enabled') === false) return 'OFF';
 
-  const perms = val(profile, 'toolPermissions');
-  if (perms && typeof perms === 'object' && !Array.isArray(perms)) {
+  const rawPerms = val(profile, 'toolPermissions') ?? val(profile, 'toolPermissionsJson');
+  const hasPermsMap = (rawPerms && typeof rawPerms === 'object' && !Array.isArray(rawPerms))
+    || (typeof rawPerms === 'string' && rawPerms.trim().startsWith('{'));
+  if (hasPermsMap) {
+    const perms = normalizeToolPermissionsMap(rawPerms);
     if (Object.prototype.hasOwnProperty.call(perms, targetTool)) {
       return normalizeToolMode(perms[targetTool], 'OFF');
     }
@@ -189,7 +193,7 @@ async function notifyApproversOfPendingApproval(db, row) {
     const approvalId = val(row, 'id');
     const requesterUserId = val(row, 'requesterUserId');
     const requesterUsername = val(row, 'requesterUsername') || `user-${requesterUserId}`;
-    const aiEmployee = val(row, 'aiEmployee') || 'AI Copilot';
+    const aiEmployee = val(row, 'aiEmployee') || 'DX-OS AI Agent';
     const targetCollection = val(row, 'targetCollection');
     const targetRecordId = val(row, 'targetRecordId');
     const operation = val(row, 'operation') || 'update';
@@ -256,26 +260,29 @@ async function enqueueAiApproval(db, {
   const safeTtl = Math.max(60_000, Number(ttlMs) || DEFAULT_HITL_TTL_MS);
   const expiresAt = new Date(Date.now() + safeTtl);
 
-  const created = await repo.create({
-    values: {
-      organizationId: String(actor.organizationId),
-      requesterUserId: Number(actor.userId),
-      requesterUsername: String(actor.username || `user-${actor.userId}`).slice(0, 120),
-      aiEmployee: aiEmployee ? String(aiEmployee).slice(0, 80) : null,
-      toolName: String(toolName).slice(0, 120),
-      targetCollection: String(targetCollection).slice(0, 120),
-      targetRecordId: targetRecordId != null && /^[1-9]\d*$/.test(String(targetRecordId)) ? Number(targetRecordId) : null,
-      operation: String(operation || 'update').slice(0, 32),
-      proposedArgs,
-      diffPreview: sanitizeAuditSummary(diffPreview || {}),
-      riskLevel: normalizedRisk,
-      status: 'pending',
-      expiresAt,
-    },
+  const created = await runWithTenantRls(db, actor.organizationId, async () => {
+    const row = await repo.create({
+      values: {
+        organizationId: String(actor.organizationId),
+        requesterUserId: Number(actor.userId),
+        requesterUsername: String(actor.username || `user-${actor.userId}`).slice(0, 120),
+        aiEmployee: aiEmployee ? String(aiEmployee).slice(0, 80) : null,
+        toolName: String(toolName).slice(0, 120),
+        targetCollection: String(targetCollection).slice(0, 120),
+        targetRecordId: targetRecordId != null && /^[1-9]\d*$/.test(String(targetRecordId)) ? Number(targetRecordId) : null,
+        operation: String(operation || 'update').slice(0, 32),
+        proposedArgs,
+        diffPreview: sanitizeAuditSummary(diffPreview || {}),
+        riskLevel: normalizedRisk,
+        status: 'pending',
+        expiresAt,
+      },
+    });
+    await runInRlsSavepoint(db, () => notifyApproversOfPendingApproval(db, row));
+    return row;
   });
 
   const serialized = serializeApprovalRow(created);
-  await notifyApproversOfPendingApproval(db, created);
   await recordAiAuditLog(db, {
     actorUserId: actor.userId,
     actorUsername: actor.username,
@@ -313,7 +320,10 @@ async function listApprovals(db, { actor, status = 'pending', limit = 50, organi
     ...(cleanStatus ? { status: cleanStatus } : {}),
   };
 
-  const rows = (await repo.find({ filter, sort: ['-id'], limit: cap })) || [];
+  const runFind = () => repo.find({ filter, sort: ['-id'], limit: cap });
+  const rows = (scopedOrg
+    ? await runWithTenantRls(db, scopedOrg, runFind)
+    : await runWithSystemRlsBypass(db, runFind)) || [];
   return rows
     .filter((row) => {
       if (scopedOrg && val(row, 'organizationId') !== scopedOrg) return false;
@@ -445,42 +455,8 @@ async function decideApproval(db, { actor, approvalId, decision, note = '', exec
 
   try {
     const root = isRootActor(actor);
-    const row = await repo.findOne({
-      filter: root ? { id: numericId } : { id: numericId, organizationId: actor.organizationId },
-    });
-    if (!row || (!root && val(row, 'organizationId') !== actor.organizationId)) {
-      throw failHitl('HITL_APPROVAL_NOT_FOUND', 404, 'Không tìm thấy yêu cầu phê duyệt trong phạm vi tổ chức.');
-    }
-
-    const rowOrg = val(row, 'organizationId');
-    const currentStatus = String(val(row, 'status') || '');
-    if (currentStatus !== 'pending') {
-      throw failHitl('HITL_ALREADY_DECIDED', 409, `Yêu cầu phê duyệt đã ở trạng thái "${currentStatus}".`);
-    }
-
-    const expRaw = val(row, 'expiresAt');
-    const expMs = expRaw ? new Date(expRaw).getTime() : NaN;
-    if (Number.isFinite(expMs) && expMs <= Date.now()) {
-      await updateQueueRow(db, repo, row, numericId, { status: 'expired' }, { onlyIfPending: true }).catch(() => {});
-      throw failHitl('HITL_APPROVAL_EXPIRED', 409, 'Yêu cầu phê duyệt đã hết hạn.');
-    }
-
-    if (!root && Number(val(row, 'requesterUserId')) === Number(actor.userId)) {
-      await recordAiAuditLog(db, {
-        actorUserId: actor.userId,
-        actorUsername: actor.username,
-        organizationId: rowOrg,
-        channel: 'hitl-approval',
-        aiEmployee: val(row, 'aiEmployee') || null,
-        toolName: val(row, 'toolName'),
-        argsSummary: { approvalId: numericId, decision: normalizedDecision },
-        status: 'denied',
-        errorCode: 'SELF_APPROVAL_FORBIDDEN',
-        resultSummary: 'Blocked self-approval on AI HITL queue request',
-      });
-      throw failHitl('SELF_APPROVAL_FORBIDDEN', 403, 'Không được phép tự phê duyệt yêu cầu AI do chính mình khởi tạo.');
-    }
-
+    const runReadScope = (fn) => (root ? runWithSystemRlsBypass(db, fn) : runWithTenantRls(db, actor.organizationId, fn));
+    let selfApprovalViolation = null;
     const now = new Date();
     const baseDecisionMeta = {
       decidedByUserId: Number(actor.userId),
@@ -489,13 +465,56 @@ async function decideApproval(db, { actor, approvalId, decision, note = '', exec
       decidedAt: now,
     };
 
-    const nextClaimStatus = normalizedDecision === 'reject' ? 'rejected' : 'executing';
-    await claimPendingApprovalAtomically(db, repo, row, numericId, root, actor, {
-      status: nextClaimStatus,
-      ...baseDecisionMeta,
+    const { plainRow, row, rowOrg } = await runReadScope(async () => {
+      const foundRow = await repo.findOne({
+        filter: root ? { id: numericId } : { id: numericId, organizationId: actor.organizationId },
+      });
+      if (!foundRow || (!root && val(foundRow, 'organizationId') !== actor.organizationId)) {
+        throw failHitl('HITL_APPROVAL_NOT_FOUND', 404, 'Không tìm thấy yêu cầu phê duyệt trong phạm vi tổ chức.');
+      }
+
+      const foundOrg = val(foundRow, 'organizationId');
+      const currentStatus = String(val(foundRow, 'status') || '');
+      if (currentStatus !== 'pending') {
+        throw failHitl('HITL_ALREADY_DECIDED', 409, `Yêu cầu phê duyệt đã ở trạng thái "${currentStatus}".`);
+      }
+
+      const expRaw = val(foundRow, 'expiresAt');
+      const expMs = expRaw ? new Date(expRaw).getTime() : NaN;
+      if (Number.isFinite(expMs) && expMs <= Date.now()) {
+        await runInRlsSavepoint(db, () => updateQueueRow(db, repo, foundRow, numericId, { status: 'expired' }, { onlyIfPending: true })).catch(() => {});
+        throw failHitl('HITL_APPROVAL_EXPIRED', 409, 'Yêu cầu phê duyệt đã hết hạn.');
+      }
+
+      if (!root && Number(val(foundRow, 'requesterUserId')) === Number(actor.userId)) {
+        selfApprovalViolation = { foundOrg, toolName: val(foundRow, 'toolName'), aiEmployee: val(foundRow, 'aiEmployee') || null };
+        return { plainRow: null, row: foundRow, rowOrg: foundOrg };
+      }
+
+      const nextClaimStatus = normalizedDecision === 'reject' ? 'rejected' : 'executing';
+      await claimPendingApprovalAtomically(db, repo, foundRow, numericId, root, actor, {
+        status: nextClaimStatus,
+        ...baseDecisionMeta,
+      });
+
+      return { plainRow: serializeApprovalRow(foundRow), row: foundRow, rowOrg: foundOrg };
     });
 
-    const plainRow = serializeApprovalRow(row);
+    if (selfApprovalViolation) {
+      await recordAiAuditLog(db, {
+        actorUserId: actor.userId,
+        actorUsername: actor.username,
+        organizationId: selfApprovalViolation.foundOrg,
+        channel: 'hitl-approval',
+        aiEmployee: selfApprovalViolation.aiEmployee,
+        toolName: selfApprovalViolation.toolName,
+        argsSummary: { approvalId: numericId, decision: normalizedDecision },
+        status: 'denied',
+        errorCode: 'SELF_APPROVAL_FORBIDDEN',
+        resultSummary: 'Blocked self-approval on AI HITL queue request',
+      });
+      throw failHitl('SELF_APPROVAL_FORBIDDEN', 403, 'Không được phép tự phê duyệt yêu cầu AI do chính mình khởi tạo.');
+    }
 
     if (normalizedDecision === 'reject') {
       await recordAiAuditLog(db, {
@@ -530,23 +549,25 @@ async function decideApproval(db, { actor, approvalId, decision, note = '', exec
         ? await executeApprovedWrite(plainRow)
         : { approvedOnly: true };
     } catch (err) {
-      if (err?.status === 403) {
-        await updateQueueRow(db, repo, row, numericId, {
-          status: 'pending',
-          decidedByUserId: null,
-          decidedByUsername: null,
-          decisionNote: null,
-          decidedAt: null,
-        }).catch(() => {});
-      } else {
-        await updateQueueRow(db, repo, row, numericId, {
-          status: 'failed',
-          executionResult: {
-            errorCode: err?.code || 'HITL_EXECUTION_ERROR',
-            message: String(err?.message || 'Execution failed').slice(0, 400),
-          },
-        }).catch(() => {});
-      }
+      await runWithTenantRls(db, rowOrg, async () => {
+        if (err?.status === 403) {
+          await updateQueueRow(db, repo, row, numericId, {
+            status: 'pending',
+            decidedByUserId: null,
+            decidedByUsername: null,
+            decisionNote: null,
+            decidedAt: null,
+          }).catch(() => {});
+        } else {
+          await updateQueueRow(db, repo, row, numericId, {
+            status: 'failed',
+            executionResult: {
+              errorCode: err?.code || 'HITL_EXECUTION_ERROR',
+              message: String(err?.message || 'Execution failed').slice(0, 400),
+            },
+          }).catch(() => {});
+        }
+      }).catch(() => {});
       await recordAiAuditLog(db, {
         actorUserId: actor.userId,
         actorUsername: actor.username,
@@ -568,10 +589,10 @@ async function decideApproval(db, { actor, approvalId, decision, note = '', exec
     }
 
     const safeResult = sanitizeAuditSummary(execResult ?? { ok: true });
-    await updateQueueRow(db, repo, row, numericId, {
+    await runWithTenantRls(db, rowOrg, () => updateQueueRow(db, repo, row, numericId, {
       status: 'executed',
       executionResult: safeResult,
-    });
+    }));
 
     await recordAiAuditLog(db, {
       actorUserId: actor.userId,

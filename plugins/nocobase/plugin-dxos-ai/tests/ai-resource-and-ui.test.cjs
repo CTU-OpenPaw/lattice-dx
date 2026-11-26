@@ -108,7 +108,7 @@ function makeMockDb() {
   };
 }
 
-test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded keys, saveProfile role-lock, auditLogs, topology, and portalCopilot filtering', async () => {
+test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded keys, saveProfile role-lock, auditLogs, topology, and portalAgents filtering', async () => {
   const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
   const db = makeMockDb();
   const mockFetch = async () => ({ ok: true, status: 200, json: async () => ({ version: '1.8' }) });
@@ -117,9 +117,9 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
     fetchImpl: mockFetch,
   });
 
-  // 1. Unauthenticated caller rejected on portalCopilot
+  // 1. Unauthenticated caller rejected on portalAgents
   await assert.rejects(
-    () => actions.portalCopilot({ state: {}, action: { params: { portalSlug: 'services' } } }, async () => {}),
+    () => actions.portalAgents({ state: {}, action: { params: { portalSlug: 'services' } } }, async () => {}),
     (err) => err.status === 401,
   );
 
@@ -139,11 +139,11 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   });
   const noKeyCtx = adminCtx({});
   await actions.bootstrapDefaults(noKeyCtx, async () => {});
-  assert.equal(noKeyCtx.body.bootstrappedCount, 5);
+  assert.equal(noKeyCtx.body.bootstrappedCount, 7);
   assert.equal(noKeyCtx.body.llm.skipped, true);
   assert.equal(db.stores.llmServices.length, 0);
-  assert.equal(db.stores.latticeAiProfiles.length, 5);
-  assert.equal(db.stores.aiEmployees.length, 5);
+  assert.equal(db.stores.latticeAiProfiles.length, 7);
+  assert.equal(db.stores.aiEmployees.length, 7);
 
   const itOtMcp = db.stores.aiMcpClients.find((m) => m.name === 'dxos-it-ot-mcp');
   assert.ok(itOtMcp, 'dxos-it-ot-mcp must be synced into aiMcpClients');
@@ -167,7 +167,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   assert.equal(db.stores.llmServices[0].name, 'local-9router');
   assert.equal(db.stores.llmServices[0].provider, 'openai-completions');
   assert.equal(db.stores.llmServices[0].options.apiKey, 'sk-test-env-9router');
-  assert.equal(db.stores.latticeAiProfiles.length, 5);
+  assert.equal(db.stores.latticeAiProfiles.length, 7);
 
   // 5. saveProfile creates custom employee hr-ops-ai, syncs 2-way, and forces admin lock when builder tools added
   const customCtx = adminCtx({
@@ -179,7 +179,7 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
     toolPermissions: {
       dxos_search_enterprise_context: 'ALLOW',
       dxos_execute_record_action: 'ASK',
-      dxos_my_tasks_copilot: 'ALLOW',
+      dxos_my_workflow_tasks: 'ALLOW',
     },
     quickPrompts: [{ label: 'Tra cứu phép năm', prompt: 'Kiểm tra phiếu dịch vụ nghỉ phép của tôi.' }],
   });
@@ -200,12 +200,12 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
   const sneakyRoles = db.stores.rolesAiEmployees.filter((r) => r.aiEmployee === 'sneaky-builder').map((r) => r.roleName);
   assert.deepEqual(sneakyRoles.sort(), ['admin', 'root']);
 
-  // 6. portalCopilot for ldx_employee on portal 'services' includes hr-ops-ai, NEVER exposes dxos-architect or sneaky-builder, while root CAN access dxos-architect on any portal
+  // 6. portalAgents for ldx_employee on portal 'services' includes hr-ops-ai, NEVER exposes dxos-architect or sneaky-builder, while root CAN access dxos-architect on any portal
   const portalEmpCtx = {
     state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: [] },
     action: { params: { portalSlug: 'services' } },
   };
-  await actions.portalCopilot(portalEmpCtx, async () => {});
+  await actions.portalAgents(portalEmpCtx, async () => {});
   const visibleUsernames = portalEmpCtx.body.employees.map((e) => e.username);
   assert.ok(visibleUsernames.includes('hr-ops-ai'));
   assert.ok(visibleUsernames.includes('dxos-workspace'));
@@ -217,15 +217,15 @@ test('dxosAi actions enforce admin locks, bootstrapDefaults without hardcoded ke
     state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
     action: { params: { portalSlug: 'services' } },
   };
-  await actions.portalCopilot(portalAdminCtx, async () => {});
+  await actions.portalAgents(portalAdminCtx, async () => {});
   assert.ok(portalAdminCtx.body.employees.some((e) => e.username === 'dxos-architect'));
 
   // 7. listProfiles, auditLogs, enterpriseTopology, and deleteProfile
   const listCtx = adminCtx({});
   await actions.listProfiles(listCtx, async () => {});
-  assert.equal(listCtx.body.profiles.length, 7);
+  assert.equal(listCtx.body.profiles.length, 9);
   assert.ok(Array.isArray(listCtx.body.catalog.availableTools));
-  assert.equal(listCtx.body.catalog.availableTools.length, 15);
+  assert.equal(listCtx.body.catalog.availableTools.length, 20);
 
   const auditCtx = adminCtx({});
   await actions.auditLogs(auditCtx, async () => {});
@@ -327,9 +327,10 @@ test('createDxosAiStudioPage renders 4-tab studio UI & helper utilities, and plu
     assert.ok(registered.resources.includes('dxosAi'));
     assert.ok(registered.middlewares.includes('dxosMcpGateway'));
     assert.ok(registered.snippets.includes('pm.dxosAi'));
-    assert.ok(registered.allowed.includes('dxosAi:portalCopilot:loggedIn'));
+    assert.ok(registered.allowed.includes('dxosAi:portalAgents:loggedIn'));
     assert.ok(registered.allowed.includes('dxosAi:pageSurfaceState:loggedIn'));
-    assert.equal(registered.tools.length, 15);
+    assert.ok(registered.allowed.includes('dxosAi:triageScan:loggedIn'));
+    assert.equal(registered.tools.length, 20);
 
     const ClientPluginMod = require(path.join(PLUGIN_ROOT, 'src/client/index.js'));
     const clientUsedProviders = [];
@@ -514,7 +515,10 @@ test('dxosAi ignores client defaultOrigin bearer forwarding & locks latticeAiPro
     const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
     await new ServerPlugin(pluginApp).load();
     assert.equal(hooks.has('latticeAiProfiles.beforeValidate'), true);
-    const scopeMw = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiProfileScope')?.fn;
+    const scopeEntry = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiProfileScope');
+    assert.equal(scopeEntry?.opts?.after, 'acl');
+    assert.equal(scopeEntry?.opts?.before, 'latticeNativeScope');
+    const scopeMw = scopeEntry?.fn;
     assert.equal(typeof scopeMw, 'function');
 
     // Non-admin direct REST mutation on latticeAiProfiles rejected 403
@@ -847,7 +851,8 @@ test('ai-studio-page renders Tab 5 Quota, readable metric chips, model presets, 
   const dump1 = JSON.stringify(tab1.tree);
   assert.equal(dump1.includes('2.2.55'), true);
   assert.equal(dump1.includes('2.2.38'), false);
-  assert.equal(dump1.includes('rolesCount: 5'), true);
+  assert.equal(dump1.includes('Số vai trò: 5'), true);
+  assert.equal(dump1.includes('rolesCount:'), false);
   assert.equal(dump1.includes('{"rolesCount":5}'), false);
   assert.equal(dump1.includes('5. Hạn mức & Chi phí AI'), true);
   let readyPillStyle = null;
@@ -873,19 +878,22 @@ test('ai-studio-page renders Tab 5 Quota, readable metric chips, model presets, 
   assert.equal(hasPresetSelect, true);
   assert.equal(hasPaddedSaveBox, true);
 
-  // Tab 4: flexWrap wrap, minWidth 0, overflowWrap anywhere, badge nowrap + flexShrink 0
+  // Tab 4: filter bar, structured table, overflowWrap anywhere, Vietnamese status badge nowrap + flexShrink 0
   const tab4 = renderWithTab('audit');
-  let auditRowWrap = false;
+  let hasAuditFilterBar = false;
+  let hasAuditTable = false;
   let auditTextWrap = false;
   let auditBadgeNoClip = false;
   walk(tab4.tree, (n) => {
-    if (n.type === 'div' && n.props?.style?.flexWrap === 'wrap' && JSON.stringify(n.children).includes('dxos_compose_page_blocks')) auditRowWrap = true;
-    if (n.type === 'div' && n.props?.style?.minWidth === 0 && n.props?.style?.overflowWrap === 'anywhere') auditTextWrap = true;
-    if (n.type === 'span' && JSON.stringify(n.children).includes('denied (ROLE_FORBIDDEN)') && n.props?.style?.whiteSpace === 'nowrap' && n.props?.style?.flexShrink === 0) {
+    if (n.props?.['data-testid'] === 'dxos-audit-filter-bar') hasAuditFilterBar = true;
+    if (n.props?.['data-testid'] === 'dxos-audit-table' && JSON.stringify(n.children).includes('dxos_compose_page_blocks')) hasAuditTable = true;
+    if (n.type === 'td' && n.props?.style?.minWidth === 0 && n.props?.style?.overflowWrap === 'anywhere') auditTextWrap = true;
+    if (n.type === 'span' && JSON.stringify(n.children).includes('Từ chối (ROLE_FORBIDDEN)') && n.props?.style?.whiteSpace === 'nowrap' && n.props?.style?.flexShrink === 0) {
       auditBadgeNoClip = true;
     }
   });
-  assert.equal(auditRowWrap, true);
+  assert.equal(hasAuditFilterBar, true);
+  assert.equal(hasAuditTable, true);
   assert.equal(auditTextWrap, true);
   assert.equal(auditBadgeNoClip, true);
 
@@ -913,7 +921,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
   };
 
   // Build tiny stateful React harness supporting useState, useEffect, useMemo, useCallback, useRef
-  const makeHarness = (requestImpl) => {
+  const makeHarness = (requestImpl, appOverride = {}) => {
     const stateSlots = [];
     const refSlots = [];
     const effectSlots = [];
@@ -964,7 +972,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
       },
     };
 
-    const Page = createDxosAiStudioPage({ useAPIClient: () => stableApi }, React, {}, {});
+    const Page = createDxosAiStudioPage({ useAPIClient: () => stableApi }, React, {}, appOverride);
     const render = () => {
       stateIdx = 0;
       refIdx = 0;
@@ -993,7 +1001,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
       return new Promise((resolve) => { deferredResolvers.push({ org: req.params?.organizationId, resolve }); });
     }
     return Promise.resolve({ data: { data: {} } });
-  });
+  }, { defaultOrganizationId: 'native-ui-lab' });
 
   let tree5 = harness5.render();
   const tab5Btn = findAll(tree5, (n) => n.type === 'button' && n.children?.includes('5. Hạn mức & Chi phí AI'))[0];
@@ -1001,7 +1009,10 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
   tree5 = harness5.render();
   assert.deepEqual(quotaRequests, ['native-ui-lab']);
 
-  // Type 'org-x' character by character -> ZERO new requests fired while typing
+  // Switch Org select to __custom__ -> reveals dxos-quota-org-input, and typing 'org-fast' fires ZERO requests per keystroke
+  const orgSelect = findAll(tree5, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-quota-org-select')[0];
+  orgSelect.props.onChange({ target: { value: '__custom__' } });
+  tree5 = harness5.render();
   const orgInput = findAll(tree5, (n) => n.type === 'input' && n.props?.['data-testid'] === 'dxos-quota-org-input')[0];
   orgInput.props.onChange({ target: { value: 'o' } });
   tree5 = harness5.render();
@@ -1052,7 +1063,10 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
 });
 
 test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk badge, reason validation, and approve/reject actions', async () => {
-  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const { createDxosAiStudioPage, DEFAULT_TOOL_NAMES } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  assert.equal(DEFAULT_TOOL_NAMES.length, 20);
+  assert.equal(DEFAULT_TOOL_NAMES.includes('dxos_graph_impact_analysis'), true);
+  assert.equal(DEFAULT_TOOL_NAMES.includes('dxos_alarm_action'), true);
 
   const findAll = (node, pred, acc = []) => {
     if (!node || typeof node !== 'object') return acc;
@@ -1083,6 +1097,8 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
       riskLevel: 'high',
       status: 'pending',
       diffPreview: {
+        summary: 'Tăng mức ưu tiên phiếu xử lý máy nén A1',
+        affectedLots: [{ id: 301, lotCode: 'LOT-VAC-301', sku: 'VAC-01' }],
         before: { priority: 'low' },
         after: { priority: 'critical' },
         changes: [{ field: 'priority', before: 'low', after: 'critical' }],
@@ -1111,6 +1127,7 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
     request: async (req) => {
       apiCalls.push(req);
       if (req.url === 'dxosAi:listApprovals') return { data: { data: { items: pendingItems } } };
+      if (req.url === 'dxosAi:triageScan') return { data: { data: { scannedCount: 2, proposalsCreated: 1, deduplicatedSkipped: 1 } } };
       if (req.url === 'dxosAi:approveAction') return { data: { data: { id: req.data.approvalId, status: 'executed' } } };
       if (req.url === 'dxosAi:rejectAction') return { data: { data: { id: req.data.approvalId, status: 'rejected' } } };
       return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
@@ -1164,7 +1181,21 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
   const dump = JSON.stringify(tree);
   assert.equal(dump.includes('latticeServiceTickets'), true);
   assert.equal(dump.includes('critical'), true);
-  assert.equal(dump.includes('high'), true);
+  assert.equal(dump.includes('Mức rủi ro: Cao'), true);
+  assert.equal(dump.includes('Chờ duyệt'), true);
+  assert.equal(dump.includes('DIFFPREVIEW'), false);
+  assert.equal(dump.includes('Tăng mức ưu tiên phiếu xử lý máy nén A1'), true);
+  assert.equal(dump.includes('LOT-VAC-301 (VAC-01)'), true);
+
+  // Trigger Proactive Triage Scan button -> calls POST dxosAi:triageScan and reloads approvals queue
+  const triageBtn = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-ai-triage-scan-btn')[0];
+  assert.ok(triageBtn, 'Proactive Triage Scan button must render inside Tab 6');
+  const listCallsBefore = apiCalls.filter((c) => c.url === 'dxosAi:listApprovals').length;
+  await triageBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:triageScan' && c.method === 'post'), true);
+  assert.equal(apiCalls.filter((c) => c.url === 'dxosAi:listApprovals').length > listCallsBefore, true);
+  assert.equal(JSON.stringify(tree).includes('tạo mới 1 đề xuất HITL, bỏ qua 1 trùng lặp'), true);
 
   // Reject without >= 3 chars note shows validation notice without calling rejectAction
   const rejectBtn402 = findAll(tree, (n) => n.type === 'button' && n.props?.['data-testid'] === 'dxos-hitl-reject-402')[0];
@@ -1185,4 +1216,1932 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
   assert.ok(approveBtn401);
   await approveBtn401.props.onClick();
   assert.equal(apiCalls.some((c) => c.url === 'dxosAi:approveAction' && c.data?.approvalId === 401), true);
+});
+
+test('Wave 4B: Legacy DB profile toolPermissions backward compatibility normalizes legacy tool key to dxos_my_workflow_tasks', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { resolveEffectiveToolMode } = require(path.join(PLUGIN_ROOT, 'src/server/ai-hitl.js'));
+  const toolsCore = require(path.join(PLUGIN_ROOT, 'src/server/ai-tools-core.js'));
+  assert.equal(typeof toolsCore.normalizeToolPermissionsMap, 'function');
+
+  const legacyToolKey = ['dxos_my_tasks_co', 'pilot'].join('');
+  const db = makeMockDb();
+  // Seed pre-upgrade Docker DB rows with legacy toolPermissions and legacy toolPermissionsJson
+  db.stores.latticeAiProfiles.push(
+    {
+      id: 101,
+      username: 'legacy-ops-agent',
+      nickname: 'Legacy Ops Agent',
+      organizationId: 'native-ui-lab',
+      enabled: true,
+      isAdminBuilder: false,
+      allowedRoles: ['ldx_employee'],
+      portalBindings: ['services'],
+      toolPermissions: { dxos_search_enterprise_context: 'ALLOW', [legacyToolKey]: 'ALLOW' },
+      mcpServers: [],
+      quickPrompts: [],
+    },
+    {
+      id: 102,
+      username: 'legacy-off-agent',
+      nickname: 'Legacy Off Agent',
+      organizationId: 'native-ui-lab',
+      enabled: true,
+      isAdminBuilder: false,
+      allowedRoles: ['ldx_employee'],
+      portalBindings: ['services'],
+      toolPermissionsJson: { dxos_search_enterprise_context: 'ALLOW', [legacyToolKey]: 'OFF' },
+      mcpServers: [],
+      quickPrompts: [],
+    },
+  );
+  db.stores.workflowManualTasks = [
+    { id: 701, userId: 2, status: 0, node: { title: 'Review' }, execution: { context: { data: { code: 'REQ-701' } } } },
+  ];
+
+  const actions = createDxosAiActions(db, { env: {} });
+  const rootCtx = (values = {}) => ({ state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: { values } } });
+
+  // 1. Profile reader (listProfiles) normalizes legacy keys transparently
+  const listCtx = rootCtx({});
+  await actions.listProfiles(listCtx, async () => {});
+  const legacyOpsListed = listCtx.body.profiles.find((p) => p.username === 'legacy-ops-agent');
+  assert.equal(legacyOpsListed.toolPermissions.dxos_my_workflow_tasks, 'ALLOW');
+  assert.equal(Object.hasOwn(legacyOpsListed.toolPermissions, legacyToolKey), false);
+
+  // 2. portalAgents returns legacy profile on portal 'services'
+  const portalEmpCtx = { state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: [] }, action: { params: { portalSlug: 'services' } } };
+  await actions.portalAgents(portalEmpCtx, async () => {});
+  assert.equal(portalEmpCtx.body.employees.some((e) => e.username === 'legacy-ops-agent'), true);
+
+  // 3. resolveEffectiveToolMode & ai-tools-core permission check honor legacy keys as dxos_my_workflow_tasks
+  assert.equal(await resolveEffectiveToolMode(db, { aiEmployee: 'legacy-ops-agent', toolName: 'dxos_my_workflow_tasks' }), 'ALLOW');
+  assert.equal(await resolveEffectiveToolMode(db, { aiEmployee: 'legacy-off-agent', toolName: 'dxos_my_workflow_tasks' }), 'OFF');
+  const myTasksTool = toolsCore.createDxosTools().find((t) => t.definition.name === 'dxos_my_workflow_tasks');
+  assert.ok(myTasksTool);
+  await assert.rejects(
+    () => myTasksTool.invoke({ db, state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: ['ldx_employee'], dxosAiUsername: 'legacy-off-agent' } }, { action: 'list' }),
+    (err) => err.status === 403 && err.code === 'TOOL_PERMISSION_OFF',
+  );
+  const okList = await myTasksTool.invoke({ db, state: { currentUser: { id: 2, username: 'emp1' }, currentRoles: ['ldx_employee'], dxosAiUsername: 'legacy-ops-agent' } }, { action: 'list' });
+  assert.equal(okList.pendingCount, 1);
+
+  // 4. saveProfile normalizes incoming legacy keys to dxos_my_workflow_tasks without keeping legacy keys
+  const saveCtx = rootCtx({
+    username: 'custom-save-compat',
+    nickname: 'Custom Save Compat',
+    allowedRoles: ['ldx_employee'],
+    portalBindings: ['services'],
+    toolPermissionsJson: { dxos_search_enterprise_context: 'ALLOW', [legacyToolKey]: 'ASK' },
+  });
+  await actions.saveProfile(saveCtx, async () => {});
+  assert.equal(saveCtx.body.profile.toolPermissions.dxos_my_workflow_tasks, 'ASK');
+  assert.equal(Object.hasOwn(saveCtx.body.profile.toolPermissions, legacyToolKey), false);
+  const syncedEmp = db.stores.aiEmployees.find((e) => e.username === 'custom-save-compat');
+  assert.equal(syncedEmp.skillSettings.tools.some((t) => t.name === 'dxos_my_workflow_tasks'), true);
+  assert.equal(syncedEmp.skillSettings.tools.some((t) => t.name === legacyToolKey), false);
+
+  // 5. bootstrapDefaults migrates existing non-starter DB rows cleanly
+  const bootCtx = rootCtx({});
+  await actions.bootstrapDefaults(bootCtx, async () => {});
+  const migratedRow = db.stores.latticeAiProfiles.find((p) => p.username === 'legacy-ops-agent');
+  assert.equal(migratedRow.toolPermissions.dxos_my_workflow_tasks, 'ALLOW');
+  assert.equal(Object.hasOwn(migratedRow.toolPermissions, legacyToolKey), false);
+});
+
+test('Flow Studio native agent launcher: path matching, sanitized flowContext, SSE flow-updated sync without banner, and non-admin safety', async () => {
+  const {
+    isFlowStudioPath,
+    readFlowStudioContext,
+    pickDefaultPortalEmployee,
+    buildHiddenPageSystemContext,
+    openNativePortalChat,
+    createPortalAgentLauncher,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+
+  // 1. Path matching (both nested Workflow route and alias route, case-insensitive, strips ?/#)
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/connectors'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation/'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation/rule-123?organizationId=org-a#canvas'), true);
+  assert.equal(isFlowStudioPath('/ADMIN/Settings/Workflow/Automation'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-flow-studio'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-flow-studio/editor?ruleKey=auto_1'), true);
+  assert.equal(isFlowStudioPath('/admin/settings/workflow/automation-extra'), false);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-flow-studio-v2'), false);
+  assert.equal(isFlowStudioPath('/admin/settings/dxos-ai'), false);
+  assert.equal(isFlowStudioPath('/p/services'), false);
+  assert.equal(isFlowStudioPath(''), false);
+
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origCustomEvent = global.CustomEvent;
+  const origMutationObserver = global.MutationObserver;
+  try {
+    // 2. readFlowStudioContext validates presence and strips injection characters / bounds <= 120
+    global.window = { location: { pathname: '/admin/settings/workflow/automation' } };
+    assert.equal(readFlowStudioContext(), null);
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = ['not-an-object'];
+    assert.equal(readFlowStudioContext(), null);
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = { ruleName: 'Missing keys' };
+    assert.equal(readFlowStudioContext(), null);
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = { nodeCount: 0 };
+    assert.deepEqual(readFlowStudioContext(), {
+      organizationId: '',
+      ruleKey: '',
+      ruleName: '',
+      view: '',
+      selectedNodeId: '',
+      selectedNodeType: '',
+      selectedNodeLabel: '',
+      selectedRunUid: '',
+      selectedRunStatus: '',
+      nodeCount: 0,
+      nodeSummary: '',
+    });
+
+    global.window.__LATTICEDX_FLOW_CONTEXT__ = {
+      organizationId: 'native-ui-lab\n\r\t\0<script>',
+      ruleKey: 'auto_coldchain_alert',
+      ruleName: 'Cảnh báo\n<img src=x> ' + 'X'.repeat(160),
+      view: 'editor',
+      selectedNodeId: 'cond_1',
+      selectedNodeType: 'control.if',
+      selectedNodeLabel: 'Kiểm tra\t<tag>',
+      selectedRunUid: 'run_42',
+      selectedRunStatus: 'suspended',
+      nodeCount: 4,
+      nodeSummary: 'trig_1(trigger.event)\ncond_1(control.if)\tstep_1(notify.send) ' + 'N'.repeat(150),
+    };
+    const sanitizedCtx = readFlowStudioContext();
+    assert.ok(sanitizedCtx);
+    assert.equal(sanitizedCtx.organizationId, 'native-ui-lab script');
+    assert.equal(sanitizedCtx.ruleKey, 'auto_coldchain_alert');
+    assert.equal(sanitizedCtx.nodeCount, 4);
+    for (const key of ['organizationId', 'ruleKey', 'ruleName', 'view', 'selectedNodeId', 'selectedNodeType', 'selectedNodeLabel', 'selectedRunUid', 'selectedRunStatus', 'nodeSummary']) {
+      assert.equal(/[\r\n\t\0<>]/.test(sanitizedCtx[key]), false, `${key} must strip control/tag chars`);
+      assert.ok(sanitizedCtx[key].length <= 120, `${key} length must be <= 120`);
+    }
+
+    // 3. buildHiddenPageSystemContext + openNativePortalChat inject flowContext cleanly
+    const plainPortalCtx = buildHiddenPageSystemContext({ portalSlug: 'services', pageTitle: 'Dịch vụ', pathname: '/p/services' });
+    assert.equal(plainPortalCtx.includes('Ngữ cảnh Workflow Automation Studio'), false);
+
+    const flowSysMsg = buildHiddenPageSystemContext({
+      portalSlug: '',
+      pageTitle: 'Workflow Automation',
+      pathname: '/admin/settings/workflow/automation',
+      flowContext: sanitizedCtx,
+    });
+    assert.ok(flowSysMsg.includes('[Ngữ cảnh Workflow Automation Studio:'));
+    assert.ok(flowSysMsg.includes('organizationId="native-ui-lab script"'));
+    assert.ok(flowSysMsg.includes('ruleKey="auto_coldchain_alert"'));
+    assert.ok(flowSysMsg.includes('nodeCount=4'));
+    assert.ok(flowSysMsg.includes('selectedNodeId="cond_1"'));
+    assert.ok(flowSysMsg.includes('selectedRunUid="run_42"'));
+    assert.ok(flowSysMsg.includes('Danh sách node hiện tại:'));
+    assert.ok(flowSysMsg.includes('dxos_configure_workflow'));
+
+    const triggered = [];
+    const mockApp = {
+      flowEngine: { context: { ai: { async triggerTask(payload) { triggered.push(payload); } } } },
+    };
+    const opened = await openNativePortalChat(mockApp, {
+      employee: { username: 'dxos-architect' },
+      portalSlug: '',
+      pageTitle: 'Workflow Automation',
+      pathname: '/admin/settings/workflow/automation',
+      flowContext: sanitizedCtx,
+    });
+    assert.equal(opened.opened, true);
+    assert.equal(triggered[0].aiEmployee, 'dxos-architect');
+    assert.ok(triggered[0].tasks[0].message.system.includes('auto_coldchain_alert'));
+
+    // 4. Non-admin safety: pickDefaultPortalEmployee never picks dxos-architect when isAdmin=false,
+    //    and DxosPortalAgentProvider clears non-admin employees & hides button on Flow Studio routes
+    assert.equal(pickDefaultPortalEmployee([{ username: 'dxos-architect' }], false), null);
+    assert.equal(pickDefaultPortalEmployee([{ username: 'dxos-architect' }, { username: 'dxos-workspace' }], false).username, 'dxos-workspace');
+
+    const findBtn = (node) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.props?.['data-testid'] === 'dxos-portal-ai-float-btn') return node;
+      const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+      for (const k of kids) {
+        const hit = findBtn(k);
+        if (hit) return hit;
+      }
+      return null;
+    };
+
+    const makeStatefulReact = () => {
+      const stateSlots = [];
+      const effectSlots = [];
+      let sIdx = 0;
+      let eIdx = 0;
+      const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+      const React = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => {
+          const i = sIdx++;
+          if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+          return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+        },
+        useEffect: (fn, deps) => {
+          const i = eIdx++;
+          effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+        },
+      };
+      const cleanups = [];
+      const render = (Comp) => {
+        sIdx = 0;
+        eIdx = 0;
+        const tree = Comp({ children: 'studio-body' });
+        for (const eff of effectSlots) {
+          if (eff.changed) {
+            eff.changed = false;
+            const cln = eff.fn();
+            if (typeof cln === 'function') cleanups.push(cln);
+          }
+        }
+        return tree;
+      };
+      return { React, render, getStates: () => stateSlots, cleanup: () => cleanups.forEach((fn) => fn()) };
+    };
+
+    class FakeCustomEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        this.detail = init.detail;
+      }
+    }
+    global.CustomEvent = FakeCustomEvent;
+
+    // 4a. Non-admin on /admin/settings/workflow/automation -> portalAgents returns isAdmin=false -> zero float button
+    const nonAdminApiCalls = [];
+    const dispatchedNonAdmin = [];
+    global.window = {
+      location: { pathname: '/admin/settings/workflow/automation' },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: (ev) => dispatchedNonAdmin.push(ev),
+    };
+    global.document = { visibilityState: 'hidden', title: 'Workflow Automation', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+    const nonAdminHarness = makeStatefulReact();
+    const NonAdminLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'test-emp-token' },
+        request: async (req) => {
+          nonAdminApiCalls.push(req);
+          return { data: { data: { isAdmin: false, employees: [{ username: 'dxos-workspace', nickname: 'Workspace' }] } } };
+        },
+      }),
+    }, nonAdminHarness.React, {}, mockApp);
+    nonAdminHarness.render(NonAdminLauncher);
+    await new Promise((r) => setTimeout(r, 15));
+    const nonAdminTree = nonAdminHarness.render(NonAdminLauncher);
+    assert.equal(nonAdminApiCalls.some((r) => r.url === 'dxosAi:portalAgents' && r.params?.portalSlug === 'services'), true);
+    assert.equal(findBtn(nonAdminTree), null, 'Non-admin must NOT get a Flow Studio floating chat button');
+    nonAdminHarness.cleanup();
+
+    // 5. Admin on /admin/settings/dxos-flow-studio -> connects SSE to portalSlug=flow-studio,
+    //    ignores initial snapshot, dispatches latticedx:flow-updated on update WITHOUT pendingUpdate banner,
+    //    passes readFlowStudioContext() on float button click, and MutationObserver ignores own button
+    const dispatchedEvents = [];
+    const fetchUrls = [];
+    const observerCallbacks = [];
+    global.MutationObserver = class {
+      constructor(cb) { observerCallbacks.push(cb); }
+      observe() {}
+      disconnect() {}
+    };
+    global.window = {
+      location: { pathname: '/admin/settings/dxos-flow-studio' },
+      __LATTICEDX_FLOW_CONTEXT__: { organizationId: 'native-ui-lab', ruleKey: 'auto_1', nodeCount: 2, view: 'editor' },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: (ev) => dispatchedEvents.push(ev),
+    };
+    global.document = {
+      visibilityState: 'visible',
+      title: 'Workflow Automation',
+      body: {},
+      querySelector: () => null,
+      addEventListener() {},
+      removeEventListener() {},
+    };
+
+    const encoder = new TextEncoder();
+    const sseChunks = [
+      'event: snapshot\ndata: {"portalSlug":"flow-studio","revision":1,"blockCount":0,"layoutSignature":""}\n\n',
+      'event: update\ndata: {"portalSlug":"flow-studio","type":"flow-updated","revision":1795515200000,"organizationId":"native-ui-lab","operation":"draftAutomation","ruleKey":"auto_1","applied":false,"message":"Đã phác thảo flow"}\n\n',
+    ];
+    let chunkIdx = 0;
+    global.fetch = async (url) => {
+      fetchUrls.push(url);
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (chunkIdx < sseChunks.length) {
+                return { done: false, value: encoder.encode(sseChunks[chunkIdx++]) };
+              }
+              return { done: true };
+            },
+          }),
+        },
+      };
+    };
+
+    const triggeredAdmin = [];
+    const adminMockApp = {
+      flowEngine: { context: { ai: { async triggerTask(payload) { triggeredAdmin.push(payload); } } } },
+    };
+    const adminHarness = makeStatefulReact();
+    const AdminLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'test-token' },
+        getBaseURL: () => '/api/',
+        request: async () => ({
+          data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect', nickname: 'Kiến trúc sư' }] } },
+        }),
+      }),
+    }, adminHarness.React, {}, adminMockApp);
+
+    adminHarness.render(AdminLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    const adminTree = adminHarness.render(AdminLauncher);
+
+    assert.equal(fetchUrls.some((u) => u.includes('dxosAi:surfaceEvents?portalSlug=flow-studio')), true);
+    assert.equal(dispatchedEvents.length, 1, 'Initial snapshot must not dispatch; only update frame dispatches');
+    assert.equal(dispatchedEvents[0].type, 'latticedx:flow-updated');
+    assert.equal(dispatchedEvents[0].detail.ruleKey, 'auto_1');
+    assert.equal(dispatchedEvents[0].detail.operation, 'draftAutomation');
+    assert.equal(adminHarness.getStates()[4], null, 'Flow Studio SSE must NOT set pendingUpdate reload banner');
+    assert.equal(JSON.stringify(adminTree).includes('dxos-surface-update-banner'), false);
+
+    // Non-overlapping AI launcher: portal-agent-launcher must NOT render bottom-right float button on /admin/settings/workflow/* or /admin/settings/dxos-flow-studio
+    assert.equal(findBtn(adminTree), null, 'Flow Studio must NOT render floating dxos-portal-ai-float-btn over native NocoBase button');
+    assert.equal(triggeredAdmin.length, 0);
+
+    // MutationObserver ignores mutations inside dxos-portal-ai-float-btn cleanly
+    assert.ok(observerCallbacks.length >= 1);
+    global.window.location.pathname = '/admin/settings/other';
+    observerCallbacks[0]([{
+      target: {
+        closest: (sel) => (sel.includes('dxos-portal-ai-float-btn') ? { dataset: {} } : null),
+      },
+    }]);
+    assert.equal(adminHarness.getStates()[0], '/admin/settings/dxos-flow-studio', 'Own float button mutation must be ignored');
+
+    adminHarness.cleanup();
+
+    // 6. Normal /p/services portal SSE still dispatches latticedx:surface-updated and shows reload banner
+    const portalEvents = [];
+    let pChunkIdx = 0;
+    const portalChunks = [
+      'event: snapshot\ndata: {"portalSlug":"services","revision":1,"blockCount":2,"layoutSignature":"a,b"}\n\n',
+      'event: update\ndata: {"portalSlug":"services","revision":2,"blockCount":3,"layoutSignature":"a,b,c","message":"Đã thêm khối mới"}\n\n',
+    ];
+    global.window = {
+      location: { pathname: '/p/services' },
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: (ev) => portalEvents.push(ev),
+    };
+    global.fetch = async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => (pChunkIdx < portalChunks.length
+            ? { done: false, value: encoder.encode(portalChunks[pChunkIdx++]) }
+            : { done: true }),
+        }),
+      },
+    });
+    const portalHarness = makeStatefulReact();
+    const PortalLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'test-token' },
+        getBaseURL: () => '/api/',
+        request: async () => ({ data: { data: { isAdmin: false, employees: [{ username: 'dxos-workspace' }] } } }),
+      }),
+    }, portalHarness.React, {}, mockApp);
+    portalHarness.render(PortalLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    const portalTree = portalHarness.render(PortalLauncher);
+    const portalBtn = findBtn(portalTree);
+    assert.ok(portalBtn, 'Portal launcher button must render on /p/services');
+    assert.equal(portalBtn.props.style.zIndex, 1050, 'Portal launcher keeps standard 1050 zIndex');
+    assert.equal(portalEvents.some((e) => e.type === 'latticedx:surface-updated'), true);
+    assert.equal(JSON.stringify(portalTree).includes('dxos-surface-update-banner'), true);
+    portalHarness.cleanup();
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.CustomEvent = origCustomEvent;
+    global.MutationObserver = origMutationObserver;
+  }
+});
+
+test('Task 4: SUPPORTED_HITL_TOOLS includes latticeflow.approval, Approve/Reject call resumeFlowRun, and latticeDelegations is enforced', async () => {
+  const aiResource = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { createDxosAiActions, SUPPORTED_HITL_TOOLS } = aiResource;
+  assert.ok(SUPPORTED_HITL_TOOLS instanceof Set, 'SUPPORTED_HITL_TOOLS must be exported');
+  assert.equal(SUPPORTED_HITL_TOOLS.has('latticeflow.approval'), true);
+
+  const db = makeMockDb();
+  db.stores.rolesUsers = [
+    { userId: 1, roleName: 'root' },
+    { userId: 2, roleName: 'ldx_employee' },
+    { userId: 3, roleName: 'ldx_employee' },
+    { userId: 4, roleName: 'ldx_manager' },
+  ];
+  db.stores.latticeEmployees = [
+    { id: 20, userId: 2, organizationId: 'org-a', active: true },
+    { id: 30, userId: 3, organizationId: 'org-a', active: true },
+    { id: 40, userId: 4, organizationId: 'org-a', active: true },
+  ];
+  db.stores.latticeServiceTickets = [];
+  db.stores.latticeNotifications = [];
+  db.stores.latticeDelegations = [];
+
+  const flowRule = {
+    id: 1,
+    organizationId: 'org-a',
+    ruleKey: 'hitl_bridge_flow',
+    name: 'HITL Bridge Flow',
+    schemaVersion: 2,
+    active: true,
+    graphJson: {
+      version: 2,
+      nodes: [
+        { id: 't1', type: 'trigger.manual', config: {} },
+        { id: 'ap1', type: 'control.approval', config: { approverRole: 'ldx_manager', title: 'Approve ticket' } },
+        { id: 'ok1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'HITL-OK-{{data.code}}', name: 'Approved Flow' } } },
+        { id: 'rej1', type: 'data.create', config: { collection: 'latticeServiceTickets', values: { code: 'HITL-NO-{{data.code}}', name: 'Rejected Flow' } } },
+      ],
+      edges: [
+        { id: 'e1', source: 't1', sourceHandle: 'main', target: 'ap1', targetHandle: 'in' },
+        { id: 'e2', source: 'ap1', sourceHandle: 'approved', target: 'ok1', targetHandle: 'in' },
+        { id: 'e3', source: 'ap1', sourceHandle: 'rejected', target: 'rej1', targetHandle: 'in' },
+      ],
+    },
+  };
+  db.stores.latticeAutomationRules = [flowRule];
+  db.stores.latticeAutomationRuns = [];
+  db.stores.latticeAiApprovalQueue = [];
+
+  // Add update() on makeRepo for latticeAutomationRuns and latticeAiApprovalQueue
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo) return null;
+    if (typeof repo.update === 'function') return repo;
+    return {
+      ...repo,
+      async update({ filter = {}, filterByTk, values = {} } = {}) {
+        const arr = db.stores[name] || [];
+        let updated = 0;
+        for (const row of arr) {
+          const idMatch = filterByTk == null || String(row.id) === String(filterByTk);
+          const fMatch = Object.entries(filter).every(([k, v]) => String(row[k]) === String(v));
+          if (idMatch && fMatch) {
+            Object.assign(row, values);
+            updated += 1;
+          }
+        }
+        return [updated];
+      },
+    };
+  };
+
+  // Start two suspended flow runs via plugin-dxos-studio executor
+  const origLoad = Module._load;
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: class {}, Migration: class {} };
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  let executeFlowGraph;
+  try {
+    ({ executeFlowGraph } = require(path.resolve(PLUGIN_ROOT, '../plugin-dxos-studio/src/server/flow/executor.js')));
+  } finally {
+    Module._load = origLoad;
+  }
+
+  const runApprove = await executeFlowGraph(db, flowRule, { organizationId: 'org-a', data: { code: 'A1' } }, { actor: { userId: 2, username: 'emp2' } });
+  const runReject = await executeFlowGraph(db, flowRule, { organizationId: 'org-a', data: { code: 'R1' } }, { actor: { userId: 2, username: 'emp2' } });
+  assert.equal(runApprove.status, 'suspended');
+  assert.equal(runReject.status, 'suspended');
+  assert.equal(db.stores.latticeAiApprovalQueue.length, 2);
+
+  const actions = createDxosAiActions(db, { env: {} });
+
+  // 1. Un-delegated employee (userId 3) denied 403
+  await assert.rejects(
+    () => actions.approveAction({
+      method: 'POST',
+      state: { currentUser: { id: 3, username: 'emp3' }, currentRole: 'ldx_employee' },
+      action: { params: { values: { approvalId: runApprove.approvalId, note: 'Try without delegation' } } },
+    }, async () => {}),
+    (err) => err.status === 403,
+  );
+
+  // 2. Wrong-scope delegation (scopeCollection: 'latticeOrders') still denied 403 on latticeAutomationRuns HITL
+  db.stores.latticeDelegations.push({
+    id: 1,
+    organizationId: 'org-a',
+    delegationUid: 'DLG-WRONG-SCOPE',
+    delegatorUserId: 4,
+    delegateUserId: 3,
+    roleName: 'ldx_manager',
+    scopeCollection: 'latticeOrders',
+    startsAt: new Date(Date.now() - 60_000),
+    endsAt: new Date(Date.now() + 3600_000),
+    status: 'active',
+    active: true,
+  });
+  await assert.rejects(
+    () => actions.approveAction({
+      method: 'POST',
+      state: { currentUser: { id: 3, username: 'emp3' }, currentRole: 'ldx_employee' },
+      action: { params: { values: { approvalId: runApprove.approvalId, note: 'Wrong scope delegation' } } },
+    }, async () => {}),
+    (err) => err.status === 403,
+  );
+
+  // 3. Valid delegation for latticeAutomationRuns allows userId 3 to APPROVE and resumes flow run approved branch
+  db.stores.latticeDelegations.push({
+    id: 2,
+    organizationId: 'org-a',
+    delegationUid: 'DLG-HITL-001',
+    delegatorUserId: 4,
+    delegateUserId: 3,
+    roleName: 'ldx_manager',
+    scopeCollection: 'latticeAutomationRuns',
+    startsAt: new Date(Date.now() - 60_000),
+    endsAt: new Date(Date.now() + 3600_000),
+    status: 'active',
+    active: true,
+  });
+
+  const approveCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 3, username: 'emp3' }, currentRole: 'ldx_employee' },
+    action: { params: { values: { approvalId: runApprove.approvalId, note: 'Approved via delegation' } } },
+  };
+  await actions.approveAction(approveCtx, async () => {});
+  assert.equal(approveCtx.body.status, 'executed');
+  assert.equal(approveCtx.body.executionResult.status, 'completed');
+  assert.ok(db.stores.latticeServiceTickets.some((t) => t.code === 'HITL-OK-A1'));
+  assert.ok(
+    db.stores.latticeAiAuditLogs.some((l) => l.argsSummary?.delegationUid === 'DLG-HITL-001' && Number(l.argsSummary?.delegatedFromUserId) === 4),
+    'Audit log must capture delegatedFromUserId and delegationUid',
+  );
+
+  // 4. Reject via direct manager (userId 4) resumes flow run rejected branch cleanly
+  const rejectCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 4, username: 'mgr4' }, currentRole: 'ldx_manager' },
+    action: { params: { values: { approvalId: runReject.approvalId, note: 'Budget rejected' } } },
+  };
+  await actions.rejectAction(rejectCtx, async () => {});
+  assert.equal(rejectCtx.body.status, 'rejected');
+  assert.equal(rejectCtx.body.flowRun?.status, 'completed');
+  assert.ok(db.stores.latticeServiceTickets.some((t) => t.code === 'HITL-NO-R1'));
+});
+
+test('Task 16: multi-tenant non-native-ui-lab org resolution works dynamically across server actions, actor scope, and ai-studio-page UI', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { resolveActorScope } = require(path.join(PLUGIN_ROOT, 'src/server/ai-tools-core.js'));
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+
+  const db = makeMockDb();
+  db.stores.latticeOrganizations = [
+    { id: 1, organizationId: 'acme-pharma', active: true, status: 'active' },
+  ];
+  const actions = createDxosAiActions(db, {
+    env: {},
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ version: '1.8' }) }),
+  });
+
+  // 1. resolveActorScope for root without latticeEmployees resolves first active latticeOrganizations ('acme-pharma')
+  const actor = await resolveActorScope({ state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] } }, db);
+  assert.equal(actor.organizationId, 'acme-pharma');
+
+  // 2. bootstrapDefaults & listProfiles & quotaSummary resolve 'acme-pharma' without 'native-ui-lab'
+  const rootCtx = { state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.bootstrapDefaults(rootCtx, async () => {});
+  assert.ok(db.stores.latticeAiProfiles.every((p) => p.organizationId === 'acme-pharma'));
+
+  const listCtx = { state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.listProfiles(listCtx, async () => {});
+  assert.equal(listCtx.body.defaultOrganizationId, 'acme-pharma');
+  assert.deepEqual(listCtx.body.organizations, ['acme-pharma']);
+
+  const quotaCtx = { state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions.quotaSummary(quotaCtx, async () => {});
+  assert.equal(quotaCtx.body.organizationId, 'acme-pharma');
+
+  // Empty latticeOrganizations & no explicit org fails cleanly on quotaSummary
+  db.stores.latticeOrganizations.length = 0;
+  await assert.rejects(
+    () => actions.quotaSummary({ state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } }, async () => {}),
+    (err) => err.status === 400 && err.code === 'AI_ORG_REQUIRED',
+  );
+
+  // 3. ai-studio-page initializes quotaOrg & orgOptions dynamically from loaded topology/profiles without 'native-ui-lab'
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let refIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const quotaReqs = [];
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+  const api = {
+    request: async (req) => {
+      if (req.url === 'dxosAi:listProfiles') {
+        return {
+          data: {
+            data: {
+              profiles: [{ username: 'pharma-ops', nickname: 'Pharma Ops', organizationId: 'acme-pharma', allowedRoles: ['ops_manager'], portalBindings: ['incidents'] }],
+              organizations: ['acme-pharma'],
+              defaultOrganizationId: 'acme-pharma',
+              catalog: { availableTools: ['dxos_search_enterprise_context'], organizations: ['acme-pharma'], defaultOrganizationId: 'acme-pharma' },
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:enterpriseTopology') {
+        return { data: { data: { organizations: ['acme-pharma'], defaultOrganizationId: 'acme-pharma', planes: [] } } };
+      }
+      if (req.url === 'dxosAi:quotaSummary') {
+        quotaReqs.push(req.params?.organizationId);
+        return { data: { data: { organizationId: req.params?.organizationId, day: '2026-11-24', limits: {}, dayUsage: {}, usage: {}, allTimeTotals: {} } } };
+      }
+      return { data: { data: { items: [] } } };
+    },
+  };
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => {
+      const i = refIdx++;
+      if (!(i in refSlots)) refSlots[i] = { current: init };
+      return refSlots[i];
+    },
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, {});
+  const render = () => {
+    stateIdx = 0; refIdx = 0; effectIdx = 0; memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+  const findAll = (node, pred, acc = []) => {
+    if (!node || typeof node !== 'object') return acc;
+    if (pred(node)) acc.push(node);
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) findAll(k, pred, acc);
+    return acc;
+  };
+
+  let tree = render();
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render();
+  const quotaTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('5. Hạn mức & Chi phí AI'))[0];
+  quotaTabBtn.props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 15));
+  tree = render();
+
+  assert.deepEqual(quotaReqs, ['acme-pharma']);
+  const selectEl = findAll(tree, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-quota-org-select')[0];
+  assert.equal(selectEl.props.value, 'acme-pharma');
+  const dump = JSON.stringify(selectEl);
+  assert.equal(dump.includes('acme-pharma'), true);
+  assert.equal(dump.includes('native-ui-lab'), false);
+});
+
+test('Task 4: unauthenticated SSE skip, non-overlapping Flow Studio launcher, nickname & entity fix, checkLlmHealth 502/503, and health warning banner', async () => {
+  const { STARTER_AI_BLUEPRINTS } = require(path.join(PLUGIN_ROOT, 'src/server/ai-schemas.js'));
+  const { createDxosAiActions, probeLlmHealth } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const serverIndexSrc = require('node:fs').readFileSync(path.join(PLUGIN_ROOT, 'src/server/index.js'), 'utf8');
+
+  // 1. Nicknames in STARTER_AI_BLUEPRINTS contain zero '&' characters
+  for (const bp of STARTER_AI_BLUEPRINTS) {
+    assert.equal(String(bp.nickname || '').includes('&'), false, `Nickname for ${bp.username} must not contain '&'`);
+  }
+
+  // 2. server/index.js allows loggedIn access to dxosAi:checkLlmHealth
+  assert.match(serverIndexSrc, /acl\.allow\(['"]dxosAi['"],\s*['"]checkLlmHealth['"],\s*['"]loggedIn['"]\)/);
+
+  // 3. probeLlmHealth & dxosAi:checkLlmHealth handle NO_LLM_SERVICE, 502, 503, timeout, 401, 200, and omit baseURL/apiKey for non-admin callers
+  assert.equal(typeof probeLlmHealth, 'function', 'probeLlmHealth must be exported for Task 9 reuse');
+  const db = makeMockDb();
+  db.stores.rolesUsers = [
+    { userId: 1, roleName: 'root' },
+    { userId: 2, roleName: 'ldx_employee' },
+  ];
+  db.stores.latticeEmployees = [{ id: 20, userId: 2, organizationId: 'org-a', active: true }];
+  db.stores.latticeAiProfiles = [{ username: 'dxos-architect', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash' }];
+  db.stores.llmServices = [];
+
+  const noSvc = await probeLlmHealth(db, { fetchImpl: async () => assert.fail('Must not fetch when no llmServices row') });
+  assert.equal(noSvc.ok, false);
+  assert.equal(noSvc.status, 503);
+  assert.equal(noSvc.code, 'NO_LLM_SERVICE');
+
+  db.stores.llmServices.push({
+    name: 'local-9router',
+    provider: 'openai-completions',
+    enabled: true,
+    options: { baseURL: 'http://127.0.0.1:20128/v1', apiKey: 'sk-secret-do-not-leak' },
+  });
+
+  // 502 Bad Gateway
+  const actions502 = createDxosAiActions(db, {
+    fetchImpl: async () => ({ ok: false, status: 502 }),
+  });
+  const nonAdminCtx = { method: 'GET', state: { currentUser: { id: 2, username: 'emp2' }, currentRole: 'ldx_employee' }, action: { params: {} } };
+  await actions502.checkLlmHealth(nonAdminCtx, async () => {});
+  assert.equal(nonAdminCtx.body.ok, false);
+  assert.equal(nonAdminCtx.body.status, 502);
+  assert.equal(nonAdminCtx.body.code, 'LLM_BAD_GATEWAY');
+  assert.equal(Object.hasOwn(nonAdminCtx.body, 'baseURL'), false, 'Non-admin caller must omit baseURL');
+  assert.equal(JSON.stringify(nonAdminCtx.body).includes('sk-secret-do-not-leak'), false);
+  assert.equal(Object.hasOwn(nonAdminCtx.body, 'options'), false);
+
+  // 503 Service Unavailable
+  const actions503 = createDxosAiActions(db, {
+    fetchImpl: async () => ({ ok: false, status: 503 }),
+  });
+  const adminCtx = { method: 'GET', state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: {} } };
+  await actions503.checkLlmHealth(adminCtx, async () => {});
+  assert.equal(adminCtx.body.ok, false);
+  assert.equal(adminCtx.body.status, 503);
+  assert.equal(adminCtx.body.code, 'LLM_UNAVAILABLE');
+  assert.equal(adminCtx.body.baseURL, 'http://127.0.0.1:20128/v1');
+  assert.equal(JSON.stringify(adminCtx.body).includes('sk-secret-do-not-leak'), false);
+
+  // Timeout classification
+  const timeoutRes = await probeLlmHealth(db, {
+    fetchImpl: async () => { throw Object.assign(new Error('The operation timed out'), { name: 'TimeoutError' }); },
+  });
+  assert.equal(timeoutRes.ok, false);
+  assert.equal(timeoutRes.status, 504);
+  assert.equal(timeoutRes.code, 'LLM_TIMEOUT');
+
+  // Healthy 200
+  const okRes = await probeLlmHealth(db, {
+    isAdmin: true,
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'http://127.0.0.1:20128/v1/models');
+      assert.equal(init.headers.Authorization, 'Bearer sk-secret-do-not-leak');
+      return { ok: true, status: 200 };
+    },
+  });
+  assert.equal(okRes.ok, true);
+  assert.equal(okRes.status, 200);
+  assert.equal(okRes.code, 'OK');
+
+  // 401 LLM_AUTH_ERROR, unauthenticated 401, POST 405, Ollama /api/tags, Gemini x-goog-api-key
+  const authErrRes = await probeLlmHealth(db, { fetchImpl: async () => ({ ok: false, status: 401 }) });
+  assert.equal(authErrRes.ok, false);
+  assert.equal(authErrRes.status, 401);
+  assert.equal(authErrRes.code, 'LLM_AUTH_ERROR');
+  await assert.rejects(() => actions502.checkLlmHealth({ method: 'GET', state: {}, action: { params: {} } }), (e) => e.status === 401);
+  await assert.rejects(() => actions502.checkLlmHealth({ method: 'POST', state: { currentUser: { id: 1 } }, action: { params: {} } }), (e) => e.status === 405);
+
+  db.stores.llmServices.push(
+    { name: 'ollama-local', provider: 'ollama', enabled: true, options: { baseURL: 'http://127.0.0.1:11434/v1' } },
+    { name: 'gemini-cloud', provider: 'gemini', enabled: true, options: { apiKey: 'AIza-secret' } },
+  );
+  const ollamaRes = await probeLlmHealth(db, {
+    llmServiceName: 'ollama-local',
+    fetchImpl: async (url) => { assert.equal(url, 'http://127.0.0.1:11434/api/tags'); return { ok: true, status: 200 }; },
+  });
+  assert.equal(ollamaRes.ok, true);
+  const geminiRes = await probeLlmHealth(db, {
+    llmServiceName: 'gemini-cloud',
+    fetchImpl: async (url, init) => {
+      assert.equal(url, 'https://generativelanguage.googleapis.com/v1beta/models');
+      assert.equal(init.headers['x-goog-api-key'], 'AIza-secret');
+      return { ok: true, status: 200 };
+    },
+  });
+  assert.equal(geminiRes.ok, true);
+  assert.equal(JSON.stringify(geminiRes).includes('AIza-secret'), false);
+
+  // 4. portal-agent-launcher skips SSE when unauthenticated, hides float btn on /admin/settings/workflow/*, and renders dxos-ai-health-warning when unhealthy
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    const fetchCalls = [];
+    global.fetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return { ok: true, body: null };
+    };
+    global.localStorage = { getItem: () => '' };
+    global.window = { location: { pathname: '/p/services' }, addEventListener() {}, removeEventListener() {} };
+    global.document = { visibilityState: 'visible', title: 'Services', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+
+    const makeHarness = () => {
+      const stateSlots = [];
+      const effectSlots = [];
+      let sIdx = 0;
+      let eIdx = 0;
+      const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+      const cleanups = [];
+      const React = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => {
+          const i = sIdx++;
+          if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+          return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+        },
+        useEffect: (fn, deps) => {
+          const i = eIdx++;
+          effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+        },
+      };
+      const render = (Comp) => {
+        sIdx = 0; eIdx = 0;
+        const tree = Comp({ children: 'body' });
+        for (const eff of effectSlots) {
+          if (eff.changed) {
+            eff.changed = false;
+            const cln = eff.fn();
+            if (typeof cln === 'function') cleanups.push(cln);
+          }
+        }
+        return tree;
+      };
+      return { React, render, cleanup: () => cleanups.forEach((fn) => fn()) };
+    };
+
+    const unauthHarness = makeHarness();
+    const UnauthLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => '' },
+        getBaseURL: () => '/api/',
+        request: async () => ({ data: { data: { isAdmin: false, employees: [] } } }),
+      }),
+    }, unauthHarness.React, {}, {});
+    unauthHarness.render(UnauthLauncher);
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(fetchCalls.length, 0, 'Unauthenticated portal-agent-launcher must NOT open /api/dxosAi:surfaceEvents');
+    unauthHarness.cleanup();
+
+    // Authenticated on /admin/settings/workflow/automation with 502 health check -> no float button AND dxos-ai-health-warning banner visible
+    global.window.location.pathname = '/admin/settings/workflow/automation';
+    const warnHarness = makeHarness();
+    const WarnLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-admin' },
+        getBaseURL: () => '/api/',
+        request: async (req) => {
+          if (req.url === 'dxosAi:checkLlmHealth') {
+            return { data: { data: { ok: false, status: 502, code: 'LLM_BAD_GATEWAY', message: 'Upstream LLM gateway lỗi 502 Bad Gateway.' } } };
+          }
+          return { data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect', nickname: 'Kiến trúc sư Hệ thống - Block AI' }] } } };
+        },
+      }),
+    }, warnHarness.React, {}, {});
+    warnHarness.render(WarnLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    warnHarness.render(WarnLauncher);
+    await new Promise((r) => setTimeout(r, 20));
+    let warnTree = warnHarness.render(WarnLauncher);
+    const findByTestId = (node, tid) => {
+      if (!node || typeof node !== 'object') return null;
+      if (node.props?.['data-testid'] === tid) return node;
+      const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+      for (const k of kids) {
+        const hit = findByTestId(k, tid);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    assert.equal(findByTestId(warnTree, 'dxos-portal-ai-float-btn'), null, 'Must not render float button on /admin/settings/workflow/*');
+    const warnBanner = findByTestId(warnTree, 'dxos-ai-health-warning');
+    assert.ok(warnBanner, 'Must render dxos-ai-health-warning when checkLlmHealth returns !ok');
+    assert.ok(JSON.stringify(warnBanner).includes('502'));
+    findByTestId(warnTree, 'dxos-ai-health-dismiss-btn').props.onClick();
+    warnTree = warnHarness.render(WarnLauncher);
+    assert.equal(findByTestId(warnTree, 'dxos-ai-health-warning'), null, 'Dismissing health warning must hide banner');
+    warnHarness.cleanup();
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
+});
+
+test('Task 8 (Review Focus #4): DxosAiPlugin.install() & afterEnable() auto-bootstrap dxos-architect + starter workforce with 0 llmServices, handle REPOS_NOT_READY, and preserve customized bindings', async () => {
+  const { ensureDefaultAiWorkforce } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  assert.equal(typeof ensureDefaultAiWorkforce, 'function', 'ensureDefaultAiWorkforce must be exported from ai-resource.js');
+
+  // 1. Safely no-ops with REPOS_NOT_READY when latticeAiProfiles repository is absent
+  const notReadyRes = await ensureDefaultAiWorkforce({ getRepository: () => null }, { env: {} });
+  assert.deepEqual(notReadyRes, { seeded: [], skipped: true, reason: 'REPOS_NOT_READY' });
+
+  // 2. DxosAiPlugin.install() and afterEnable() auto-bootstrap 5 starter profiles with 0 llmServices and no AGENT_API_KEY
+  const origLoad = Module._load;
+  const origApiKey = process.env.AGENT_API_KEY;
+  const origNineKey = process.env.NINE_ROUTER_API_KEY;
+  delete process.env.AGENT_API_KEY;
+  delete process.env.NINE_ROUTER_API_KEY;
+  class MockPlugin {
+    constructor(app) {
+      this.app = app;
+      this.db = app?.db;
+    }
+  }
+  Module._load = function (request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const db = makeMockDb();
+    db.stores.llmServices = [];
+    const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+    const plugin = new ServerPlugin({ db });
+    assert.equal(typeof plugin.install, 'function', 'DxosAiPlugin must define install()');
+    assert.equal(typeof plugin.afterEnable, 'function', 'DxosAiPlugin must define afterEnable()');
+
+    await plugin.install();
+    await plugin.afterEnable();
+
+    assert.equal(db.stores.llmServices.length, 0);
+    assert.equal(db.stores.latticeAiProfiles.length, 7);
+    assert.equal(db.stores.aiEmployees.length, 7);
+    const archProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
+    const archEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
+    assert.ok(archProfile, 'dxos-architect must be auto-bootstrapped in latticeAiProfiles');
+    assert.ok(archEmp, 'dxos-architect must be synced into aiEmployees');
+    const archRoles = db.stores.rolesAiEmployees
+      .filter((r) => r.aiEmployee === 'dxos-architect')
+      .map((r) => r.roleName)
+      .sort();
+    assert.deepEqual(archRoles, ['admin', 'root']);
+
+    // 3. Customize dxos-architect binding, remove one non-architect starter, and re-run afterEnable()
+    archProfile.llmService = 'user-openai';
+    archProfile.modelName = 'gpt-4o';
+    archEmp.modelSettings = { enabled: true, models: [{ llmService: 'user-openai', model: 'gpt-4o' }] };
+    const opsIdx = db.stores.latticeAiProfiles.findIndex((p) => p.username === 'dxos-ops');
+    if (opsIdx >= 0) db.stores.latticeAiProfiles.splice(opsIdx, 1);
+
+    await plugin.afterEnable();
+
+    const afterProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
+    const afterEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
+    assert.equal(afterProfile.llmService, 'user-openai', 'afterEnable must preserve customized llmService');
+    assert.equal(afterProfile.modelName, 'gpt-4o', 'afterEnable must preserve customized modelName');
+    assert.equal(afterEmp.modelSettings.models[0].llmService, 'user-openai', 'afterEnable must not overwrite aiEmployees.modelSettings');
+    assert.ok(db.stores.latticeAiProfiles.some((p) => p.username === 'dxos-ops'), 'afterEnable must still seed missing starter profiles');
+  } finally {
+    Module._load = origLoad;
+    if (origApiKey === undefined) delete process.env.AGENT_API_KEY;
+    else process.env.AGENT_API_KEY = origApiKey;
+    if (origNineKey === undefined) delete process.env.NINE_ROUTER_API_KEY;
+    else process.env.NINE_ROUTER_API_KEY = origNineKey;
+  }
+});
+
+test('Task 9 (Review Focus #4): dxosAi:quickConnectLlm enforces admin/POST/SSRF, upserts llmServices, auto-binds starters without leaking apiKey, and llmServices.afterSave auto-binds safely', async () => {
+  const { createDxosAiActions, ensureDefaultAiWorkforce } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+
+  const db = makeMockDb();
+  await ensureDefaultAiWorkforce(db, { env: {}, forceUpdate: false });
+  assert.equal(db.stores.llmServices.length, 0);
+
+  const probeCalls = [];
+  const actions = createDxosAiActions(db, {
+    env: {},
+    fetchImpl: async (url, init) => {
+      probeCalls.push({ url, headers: init?.headers || {} });
+      return { ok: true, status: 200 };
+    },
+  });
+
+  assert.equal(typeof actions.quickConnectLlm, 'function', 'dxosAi:quickConnectLlm action must exist');
+
+  // 1. Non-POST rejected 405, non-admin rejected 403
+  await assert.rejects(
+    () => actions.quickConnectLlm({
+      method: 'GET',
+      state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+      action: { params: { values: { provider: 'openai', apiKey: 'sk-test-123456', modelName: 'gpt-4o' } } },
+    }, async () => {}),
+    (err) => err.status === 405 && err.code === 'METHOD_NOT_ALLOWED',
+  );
+  await assert.rejects(
+    () => actions.quickConnectLlm({
+      method: 'POST',
+      state: { currentUser: { id: 2, username: 'emp2' }, currentRoles: [] },
+      action: { params: { values: { provider: 'openai', apiKey: 'sk-test-123456', modelName: 'gpt-4o' } } },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ADMIN_REQUIRED',
+  );
+
+  // 2. SSRF metadata/private/non-http URLs & unsupported provider blocked 400
+  const postAdmin = (values) => ({
+    method: 'POST',
+    state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+    action: { params: { values } },
+  });
+  for (const badUrl of [
+    'http://169.254.169.254/latest/meta-data',
+    'file:///etc/passwd',
+    'http://10.0.0.8:8080/v1',
+    'https://user:pass@api.openai.com/v1',
+    'http://plain-external.example.com/v1',
+  ]) {
+    await assert.rejects(
+      () => actions.quickConnectLlm(postAdmin({ provider: 'openai', apiKey: 'sk-test-123456', baseURL: badUrl, modelName: 'gpt-4o' }), async () => {}),
+      (err) => err.status === 400,
+    );
+  }
+  await assert.rejects(
+    () => actions.quickConnectLlm(postAdmin({ provider: 'unknown-llm', apiKey: 'sk-test-123456', modelName: 'x' }), async () => {}),
+    (err) => err.status === 400,
+  );
+  await assert.rejects(
+    () => actions.quickConnectLlm(postAdmin({ provider: 'openai', apiKey: '', modelName: 'gpt-4o' }), async () => {}),
+    (err) => err.status === 400,
+  );
+
+  // 3. Admin quickConnectLlm with OpenAI key upserts llmServices, binds dxos-architect + unbound starters, probes health, and NEVER leaks apiKey
+  const secretKey = 'sk-live-secret-987654321';
+  const openaiCtx = postAdmin({
+    provider: 'openai',
+    apiKey: secretKey,
+    modelName: 'gpt-4o',
+    testConnection: true,
+  });
+  await actions.quickConnectLlm(openaiCtx, async () => {});
+  assert.equal(openaiCtx.body.service.provider, 'openai');
+  assert.equal(openaiCtx.body.service.modelName, 'gpt-4o');
+  assert.equal(openaiCtx.body.service.enabled, true);
+  assert.ok(openaiCtx.body.reboundAgents.includes('dxos-architect'));
+  assert.equal(openaiCtx.body.health.ok, true);
+  assert.equal(probeCalls[0].url, 'https://api.openai.com/v1/models');
+  assert.equal(JSON.stringify(openaiCtx.body).includes(secretKey), false, 'Response must NEVER contain apiKey');
+  assert.equal(Object.hasOwn(openaiCtx.body.service, 'options'), false);
+
+  const savedSvc = db.stores.llmServices.find((s) => s.name === openaiCtx.body.service.name);
+  assert.ok(savedSvc, 'llmServices row must be created');
+  assert.equal(savedSvc.options.apiKey, secretKey);
+  assert.equal(savedSvc.enabledModels.mode, 'custom');
+  assert.ok(savedSvc.enabledModels.models.some((m) => m.value === 'gpt-4o'));
+
+  const archProfile = db.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect');
+  const archEmp = db.stores.aiEmployees.find((e) => e.username === 'dxos-architect');
+  assert.equal(archProfile.llmService, savedSvc.name);
+  assert.equal(archProfile.modelName, 'gpt-4o');
+  assert.deepEqual(archEmp.modelSettings.models, [{ llmService: savedSvc.name, model: 'gpt-4o' }]);
+
+  const auditStr = JSON.stringify(db.stores.latticeAiAuditLogs);
+  assert.equal(auditStr.includes(secretKey), false, 'Audit logs must NEVER contain apiKey');
+
+  // 4. Loopback & host.docker.internal & other supported providers (google-genai, anthropic, deepseek, ollama, 9router) work cleanly
+  const nineCtx = postAdmin({
+    provider: '9router',
+    apiKey: 'sk-9router-secret-abc',
+    baseURL: 'http://127.0.0.1:20128/v1',
+    modelName: 'ag/gemini-3.8-flash',
+    testConnection: true,
+  });
+  await actions.quickConnectLlm(nineCtx, async () => {});
+  assert.equal(nineCtx.body.service.name, 'local-9router');
+  assert.equal(nineCtx.body.service.provider, 'openai-completions');
+  assert.ok(nineCtx.body.reboundAgents.includes('dxos-architect'));
+  assert.equal(JSON.stringify(nineCtx.body).includes('sk-9router-secret-abc'), false);
+
+  const ollamaCtx = postAdmin({
+    provider: 'ollama',
+    apiKey: '',
+    baseURL: 'http://host.docker.internal:11434',
+    modelName: 'llama3.1',
+    testConnection: true,
+  });
+  await actions.quickConnectLlm(ollamaCtx, async () => {});
+  assert.equal(ollamaCtx.body.service.provider, 'ollama');
+  assert.equal(ollamaCtx.body.health.ok, true);
+
+  for (const [prov, model] of [
+    ['google-genai', 'gemini-2.5-flash'],
+    ['anthropic', 'claude-3-5-sonnet-latest'],
+    ['deepseek', 'deepseek-chat'],
+  ]) {
+    const pCtx = postAdmin({
+      provider: prov,
+      apiKey: `key-${prov}-supersecret`,
+      modelName: model,
+      testConnection: true,
+    });
+    await actions.quickConnectLlm(pCtx, async () => {});
+    assert.equal(pCtx.body.service.provider, prov);
+    assert.equal(pCtx.body.health.ok, true);
+    assert.equal(JSON.stringify(pCtx.body).includes(`key-${prov}-supersecret`), false);
+  }
+
+  // 5. DxosAiPlugin.load() registers llmServices.afterSave with re-entry & missing-repo guards and preserves active starter bindings
+  const hooks = new Map();
+  const origLoad = Module._load;
+  class MockPlugin { constructor(app) { this.app = app; this.db = app?.db; } }
+  Module._load = function (request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin };
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const hookDb = makeMockDb();
+    await ensureDefaultAiWorkforce(hookDb, { env: {}, forceUpdate: false });
+    // Customize dxos-ops to an active enabled service while dxos-architect points to missing local-9router
+    hookDb.stores.llmServices.push({ name: 'custom-active', provider: 'anthropic', enabled: true });
+    const opsProf = hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-ops');
+    opsProf.llmService = 'custom-active';
+    opsProf.modelName = 'claude-3-5-sonnet-latest';
+
+    hookDb.on = (evt, fn) => hooks.set(evt, fn);
+    const ServerPlugin = require(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+    await new ServerPlugin({
+      db: hookDb,
+      use: () => {},
+      resourceManager: { define: () => {}, use: () => {} },
+      acl: { registerSnippet: () => {}, allow: () => {} },
+    }).load();
+
+    const afterSave = hooks.get('llmServices.afterSave');
+    assert.equal(typeof afterSave, 'function', 'DxosAiPlugin.load() must register llmServices.afterSave hook');
+
+    // Disabled service does not rebind
+    await afterSave({
+      get: (k) => ({ name: 'disabled-svc', enabled: false, enabledModels: { mode: 'custom', models: [{ value: 'gpt-4o' }] } })[k],
+    });
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect').llmService, 'local-9router');
+
+    // Enabled service auto-binds dxos-architect + unbound starters while preserving dxos-ops (custom-active)
+    await afterSave({
+      get: (k) => ({
+        name: 'saved-gemini',
+        provider: 'google-genai',
+        enabled: true,
+        enabledModels: { mode: 'custom', models: [{ value: 'gemini-2.5-flash' }] },
+      })[k],
+    });
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect').llmService, 'saved-gemini');
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-architect').modelName, 'gemini-2.5-flash');
+    assert.equal(hookDb.stores.latticeAiProfiles.find((p) => p.username === 'dxos-ops').llmService, 'custom-active');
+
+    // Missing repos guard does not throw
+    const bareHooks = new Map();
+    await new ServerPlugin({
+      db: { on: (evt, fn) => bareHooks.set(evt, fn), getRepository: () => null },
+      use: () => {},
+      resourceManager: { define: () => {}, use: () => {} },
+      acl: { registerSnippet: () => {}, allow: () => {} },
+    }).load();
+    await bareHooks.get('llmServices.afterSave')({ get: (k) => ({ name: 'x', enabled: true })[k] });
+  } finally {
+    Module._load = origLoad;
+  }
+});
+
+test('Task 9 (Review Focus #4): ai-studio-page renders Quick-Connect LLM Key card (dxos-quick-connect-llm-card) and Health Check button (dxos-llm-health-btn)', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const apiCalls = [];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let refIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:checkLlmHealth') {
+        return { data: { data: { ok: true, status: 200, code: 'OK', llmService: 'quick-openai', modelName: 'gpt-4o', message: 'Dịch vụ LLM "quick-openai" sẵn sàng.' } } };
+      }
+      if (req.url === 'dxosAi:quickConnectLlm') {
+        return {
+          data: {
+            data: {
+              service: { name: 'quick-openai', title: 'OpenAI', provider: 'openai', modelName: 'gpt-4o', enabled: true },
+              reboundAgents: ['dxos-architect', 'dxos-coordinator'],
+              health: { ok: true, status: 200, code: 'OK', message: 'Sẵn sàng' },
+            },
+          },
+        };
+      }
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => {
+      const i = refIdx++;
+      if (!(i in refSlots)) refSlots[i] = { current: init };
+      return refSlots[i];
+    },
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, {});
+  const render = () => {
+    stateIdx = 0; refIdx = 0; effectIdx = 0; memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+  const findByTestId = (node, tid) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.props?.['data-testid'] === tid) return node;
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) {
+      const hit = findByTestId(k, tid);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  let tree = render();
+  const card = findByTestId(tree, 'dxos-quick-connect-llm-card');
+  assert.ok(card, 'ai-studio-page must render dxos-quick-connect-llm-card');
+  const healthBtn = findByTestId(tree, 'dxos-llm-health-btn');
+  assert.ok(healthBtn, 'ai-studio-page must render dxos-llm-health-btn');
+
+  // Click health check button
+  await healthBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:checkLlmHealth'), true);
+
+  // Fill Quick-Connect form and submit
+  findByTestId(tree, 'dxos-qc-provider-select').props.onChange({ target: { value: 'openai' } });
+  findByTestId(tree, 'dxos-qc-apikey-input').props.onChange({ target: { value: 'sk-ui-test-key-123' } });
+  findByTestId(tree, 'dxos-qc-model-input').props.onChange({ target: { value: 'gpt-4o' } });
+  tree = render();
+  const form = findByTestId(tree, 'dxos-quick-connect-llm-form');
+  assert.ok(form, 'Quick-Connect card must contain form');
+  await form.props.onSubmit({ preventDefault() {} });
+  tree = render();
+
+  const qcReq = apiCalls.find((c) => c.url === 'dxosAi:quickConnectLlm' && c.method === 'post');
+  assert.ok(qcReq, 'Submitting Quick-Connect form must POST dxosAi:quickConnectLlm');
+  assert.equal(qcReq.data.provider, 'openai');
+  assert.equal(qcReq.data.apiKey, 'sk-ui-test-key-123');
+  assert.equal(qcReq.data.modelName, 'gpt-4o');
+  assert.equal(qcReq.data.testConnection, true);
+  assert.equal(findByTestId(tree, 'dxos-qc-apikey-input').props.value, '', 'API key input must clear after connect');
+});
+
+test('Task 11: ai-studio-page renders Tab 7 Built Apps Manager (dxos-tab-built-apps, dxos-built-apps-panel) with View, Rebuild, Export Bundle v3, Verify, and Teardown keepData: true', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const apiCalls = [];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let stateIdx = 0;
+  let refIdx = 0;
+  let effectIdx = 0;
+  let memoIdx = 0;
+  const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, idx) => d !== prev[idx]);
+
+  let builtAppsList = [
+    {
+      id: 1,
+      organizationId: 'native-ui-lab',
+      appKey: 'cold-fleet-suite',
+      name: 'Quản lý Đội xe Lạnh Đa thực thể',
+      version: 1,
+      status: 'active',
+      bundleSnapshotUid: 'snap-pre-101',
+      sourceSpecJson: {
+        appKey: 'cold-fleet-suite',
+        collections: [{ collectionName: 'latticeCustomFleetTrips' }, { collectionName: 'latticeCustomFleetStops' }],
+      },
+      artifactRefsJson: {
+        collections: ['latticeCustomFleetTrips', 'latticeCustomFleetStops'],
+        roles: ['ldx_fleet_ops'],
+        portals: [{ portalSlug: 'cold-fleet', pageTitle: 'Đội xe Lạnh', blockUids: ['blk-1'] }],
+        dmnTableKeys: ['fleet_sla_v1'],
+        flowRuleKeys: ['auto_fleet_alert_v2'],
+        n8nWorkflowIds: ['wf-fleet-1'],
+      },
+      lastVerifiedAt: '2026-11-25T06:00:00Z',
+      lastVerificationJson: { ok: true, passedCount: 8, totalCount: 8, checks: [{ id: 'pg_rls_enforced', ok: true }] },
+    },
+  ];
+
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:listBuiltApps') {
+        return { data: { data: { organizationId: 'native-ui-lab', apps: builtAppsList, total: builtAppsList.length } } };
+      }
+      if (req.url === 'dxosAi:rebuildBuiltApp') {
+        builtAppsList = builtAppsList.map((a) => (a.appKey === req.data.appKey ? { ...a, version: a.version + 1, status: 'active' } : a));
+        return { data: { data: { rebuilt: true, ok: true, appKey: req.data.appKey, appVersion: 2 } } };
+      }
+      if (req.url === 'dxosAi:exportBuiltAppBundle') {
+        return {
+          data: {
+            data: {
+              metadata: {
+                schemaVersion: 'latticedx.solution-bundle/v3',
+                appKey: req.params?.appKey || req.data?.appKey,
+                appVersion: 2,
+                contentSha256: 'abc123',
+              },
+              customCollections: [{ name: 'latticeCustomFleetTrips' }, { name: 'latticeCustomFleetStops' }],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomFleetTrips', isCustom: true, fields: [{ name: 'status' }] },
+                { name: 'latticeCustomFleetStops', isCustom: true, fields: [{ name: 'status' }] },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:teardownBuiltApp') {
+        builtAppsList = builtAppsList.map((a) => (a.appKey === req.data.appKey ? { ...a, status: 'torndown' } : a));
+        return {
+          data: {
+            data: {
+              torndown: true,
+              appKey: req.data.appKey,
+              keepData: req.data.keepData,
+              preservedCollections: ['latticeCustomFleetTrips', 'latticeCustomFleetStops'],
+              droppedCollections: [],
+            },
+          },
+        };
+      }
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const i = stateIdx++;
+      if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+      return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+    },
+    useRef: (init) => {
+      const i = refIdx++;
+      if (!(i in refSlots)) refSlots[i] = { current: init };
+      return refSlots[i];
+    },
+    useEffect: (fn, deps) => {
+      const i = effectIdx++;
+      effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+    },
+    useMemo: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps };
+      return memoSlots[i].value;
+    },
+    useCallback: (fn, deps) => {
+      const i = memoIdx++;
+      if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps };
+      return memoSlots[i].value;
+    },
+  };
+
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, { defaultOrganizationId: 'native-ui-lab' });
+  const render = () => {
+    stateIdx = 0; refIdx = 0; effectIdx = 0; memoIdx = 0;
+    const tree = Page();
+    for (const eff of effectSlots) {
+      if (eff.changed) { eff.changed = false; eff.fn(); }
+    }
+    return tree;
+  };
+  const findByTestId = (node, tid) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.props?.['data-testid'] === tid) return node;
+    const kids = Array.isArray(node.children) ? node.children.flat(Infinity) : [];
+    for (const k of kids) {
+      const hit = findByTestId(k, tid);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  let tree = render();
+  const builtAppsTabBtn = findByTestId(tree, 'dxos-tab-built-apps');
+  assert.ok(builtAppsTabBtn, 'Built Apps tab button (dxos-tab-built-apps) must exist');
+  builtAppsTabBtn.props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+
+  const panel = findByTestId(tree, 'dxos-built-apps-panel');
+  assert.ok(panel, 'Built Apps panel (dxos-built-apps-panel) must render when tab active');
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:listBuiltApps'), true);
+  assert.equal(JSON.stringify(panel).includes('cold-fleet-suite'), true);
+  assert.equal(JSON.stringify(panel).includes('latticeCustomFleetTrips'), true);
+
+  // View details
+  const viewBtn = findByTestId(tree, 'dxos-built-app-view-cold-fleet-suite');
+  assert.ok(viewBtn, 'View button must exist');
+  viewBtn.props.onClick();
+  tree = render();
+  const detailBox = findByTestId(tree, 'dxos-built-app-detail-cold-fleet-suite');
+  assert.ok(detailBox, 'Clicking View must render built app detail inspector');
+  assert.equal(JSON.stringify(detailBox).includes('auto_fleet_alert_v2'), true);
+
+  // Verify
+  const verifyBtn = findByTestId(tree, 'dxos-built-app-verify-cold-fleet-suite');
+  assert.ok(verifyBtn, 'Verify button must exist');
+  await verifyBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosBlocks:collectionsMeta'), true);
+  const verifyBadge = findByTestId(tree, 'dxos-built-app-verify-result-cold-fleet-suite');
+  assert.ok(verifyBadge, 'Verify result badge/summary must render');
+  assert.equal(JSON.stringify(verifyBadge).includes('8/8') || JSON.stringify(verifyBadge).includes('PASS'), true);
+
+  // Rebuild
+  const rebuildBtn = findByTestId(tree, 'dxos-built-app-rebuild-cold-fleet-suite');
+  assert.ok(rebuildBtn, 'Rebuild button must exist');
+  await rebuildBtn.props.onClick();
+  tree = render();
+  const rebuildReq = apiCalls.find((c) => c.url === 'dxosAi:rebuildBuiltApp' && c.method === 'post');
+  assert.ok(rebuildReq, 'Rebuild must POST dxosAi:rebuildBuiltApp');
+  assert.equal(rebuildReq.data.appKey, 'cold-fleet-suite');
+  assert.equal(JSON.stringify(tree).includes('v2'), true);
+
+  // Export Bundle v3
+  const exportBtn = findByTestId(tree, 'dxos-built-app-export-cold-fleet-suite');
+  assert.ok(exportBtn, 'Export Bundle v3 button must exist');
+  await exportBtn.props.onClick();
+  tree = render();
+  const exportReq = apiCalls.find((c) => c.url === 'dxosAi:exportBuiltAppBundle');
+  assert.ok(exportReq, 'Export must call dxosAi:exportBuiltAppBundle');
+  const bundleBox = findByTestId(tree, 'dxos-built-app-bundle-preview');
+  assert.ok(bundleBox, 'Export must display bundle v3 preview');
+  assert.equal(JSON.stringify(bundleBox).includes('latticedx.solution-bundle/v3'), true);
+
+  // Teardown (keepData: true default)
+  const teardownBtn = findByTestId(tree, 'dxos-built-app-teardown-cold-fleet-suite');
+  assert.ok(teardownBtn, 'Teardown button must exist');
+  await teardownBtn.props.onClick();
+  tree = render();
+  const tdReq = apiCalls.find((c) => c.url === 'dxosAi:teardownBuiltApp' && c.method === 'post');
+  assert.ok(tdReq, 'Teardown must POST dxosAi:teardownBuiltApp');
+  assert.equal(tdReq.data.appKey, 'cold-fleet-suite');
+  assert.equal(tdReq.data.keepData, true);
+  assert.equal(JSON.stringify(tree).includes('torndown'), true);
+});
+
+test('probeLlmHealth verifyCompletion catches upstream 503 on /chat/completions even when GET /models returns 200', async () => {
+  const { probeLlmHealth, createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const db = makeMockDb();
+  db.stores.llmServices.push({
+    name: 'local-9router',
+    provider: 'openai-completions',
+    enabled: true,
+    options: { baseURL: 'http://127.0.0.1:20128/v1', apiKey: 'sk-9router-hidden' },
+  });
+  db.stores.latticeAiProfiles.push({
+    username: 'dxos-architect',
+    llmService: 'local-9router',
+    modelName: 'ag/gemini-3.8-flash',
+    enabled: true,
+  });
+
+  const failingCompletionFetch = async (url) => {
+    if (String(url).endsWith('/models')) return { ok: true, status: 200 };
+    if (String(url).endsWith('/chat/completions')) return { ok: false, status: 503 };
+    return { ok: false, status: 404 };
+  };
+
+  // Without verifyCompletion -> /models 200 is OK
+  const shallow = await probeLlmHealth(db, { fetchImpl: failingCompletionFetch, isAdmin: true });
+  assert.equal(shallow.ok, true);
+
+  // With verifyCompletion=true -> /chat/completions 503 is caught cleanly without leaking apiKey
+  const deepFail = await probeLlmHealth(db, { fetchImpl: failingCompletionFetch, isAdmin: true, verifyCompletion: true });
+  assert.equal(deepFail.ok, false);
+  assert.equal(deepFail.status, 503);
+  assert.equal(deepFail.code, 'LLM_UNAVAILABLE');
+  assert.equal(deepFail.completionChecked, true);
+  assert.equal(JSON.stringify(deepFail).includes('sk-9router-hidden'), false);
+
+  // Action checkLlmHealth forwards verifyCompletion=1 and returns ok=true when completion succeeds
+  const actions = createDxosAiActions(db, {
+    fetchImpl: async (url) => (String(url).endsWith('/models') || String(url).endsWith('/chat/completions')
+      ? { ok: true, status: 200 }
+      : { ok: false, status: 404 }),
+  });
+  const ctx = { method: 'GET', state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] }, action: { params: { verifyCompletion: '1' } }, body: null };
+  await actions.checkLlmHealth(ctx, async () => {});
+  assert.equal(ctx.body.ok, true);
+  assert.equal(ctx.body.completionChecked, true);
+});
+
+test('Frontend hygiene patch: unauthenticated portalAgents gate, activeReader cancel, empty lastVerificationJson fails verify, and external ai-chat-opening re-probes health', async () => {
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    const apiReqs = [];
+    const listeners = new Map();
+    let readerCancelled = false;
+    global.localStorage = { getItem: () => '' };
+    global.window = {
+      location: { pathname: '/p/services' },
+      addEventListener: (k, fn) => listeners.set(k, fn),
+      removeEventListener: (k) => listeners.delete(k),
+      dispatchEvent: () => {},
+    };
+    global.document = { visibilityState: 'visible', title: 'Services', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+
+    const makeHarness = () => {
+      const stateSlots = [];
+      const effectSlots = [];
+      let sIdx = 0;
+      let eIdx = 0;
+      const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+      const cleanups = [];
+      const React = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => {
+          const i = sIdx++;
+          if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init;
+          return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }];
+        },
+        useEffect: (fn, deps) => {
+          const i = eIdx++;
+          effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) };
+        },
+      };
+      const render = (Comp) => {
+        sIdx = 0; eIdx = 0;
+        const tree = Comp({ children: 'body' });
+        for (const eff of effectSlots) {
+          if (eff.changed) { eff.changed = false; const cln = eff.fn(); if (typeof cln === 'function') cleanups.push(cln); }
+        }
+        return tree;
+      };
+      return { React, render, cleanup: () => cleanups.forEach((fn) => fn()) };
+    };
+
+    // 1. Unauthenticated /p/services skips dxosAi:portalAgents completely
+    const unauthH = makeHarness();
+    const UnauthComp = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => '' },
+        request: async (req) => { apiReqs.push(req); return { data: { data: {} } }; },
+      }),
+    }, unauthH.React, {}, {});
+    unauthH.render(UnauthComp);
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(apiReqs.length, 0, 'Unauthenticated /p/* must NOT fetch dxosAi:portalAgents');
+    unauthH.cleanup();
+
+    // 2. Authenticated Flow Studio cancels activeReader on cleanup and re-probes health on external latticedx:ai-chat-opening
+    global.window.location.pathname = '/admin/settings/workflow/automation';
+    let healthCalls = 0;
+    global.fetch = async () => ({
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: () => new Promise(() => {}),
+          cancel: async () => { readerCancelled = true; },
+        }),
+      },
+    });
+    const authH = makeHarness();
+    const AuthComp = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-admin' },
+        getBaseURL: () => '/api/',
+        request: async (req) => {
+          if (req.url === 'dxosAi:checkLlmHealth') { healthCalls += 1; return { data: { data: { ok: true, status: 200 } } }; }
+          return { data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect' }] } } };
+        },
+      }),
+    }, authH.React, {}, {});
+    authH.render(AuthComp);
+    await new Promise((r) => setTimeout(r, 20));
+    authH.render(AuthComp);
+    await new Promise((r) => setTimeout(r, 20));
+    const beforeExternal = healthCalls;
+    await listeners.get('latticedx:ai-chat-opening')?.({ detail: { fromLauncher: false } });
+    assert.equal(healthCalls > beforeExternal, true, 'External latticedx:ai-chat-opening must re-probe health');
+    authH.cleanup();
+    assert.equal(readerCancelled, true, 'SSE cleanup must call activeReader.cancel()');
+
+    // 3. handleVerifyBuiltApp rejects empty lastVerificationJson (ver.ok !== true)
+    const stateSlots = [];
+    const refSlots = [];
+    const effectSlots = [];
+    const memoSlots = [];
+    let sIdx = 0; let rIdx = 0; let eIdx = 0; let mIdx = 0;
+    const depsChanged = (prev, next) => !prev || !next || prev.length !== next.length || next.some((d, i) => d !== prev[i]);
+    const pageReact = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState: (init) => { const i = sIdx++; if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init; return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }]; },
+      useRef: (init) => { const i = rIdx++; if (!(i in refSlots)) refSlots[i] = { current: init }; return refSlots[i]; },
+      useEffect: (fn, deps) => { const i = eIdx++; effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) }; },
+      useMemo: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps }; return memoSlots[i].value; },
+      useCallback: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps }; return memoSlots[i].value; },
+    };
+    const Page = createDxosAiStudioPage({
+      useAPIClient: () => ({
+        request: async (req) => {
+          if (req.url === 'dxosAi:listBuiltApps') return { data: { data: { apps: [{ id: 1, appKey: 'unverified-app', status: 'active', artifactRefsJson: { collections: ['latticeCustomX'] }, lastVerificationJson: null }] } } };
+          if (req.url === 'dxosBlocks:collectionsMeta') return { data: { data: { collections: [{ name: 'latticeCustomX', isCustom: true, fields: [] }] } } };
+          return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+        },
+      }),
+    }, pageReact, {}, { defaultOrganizationId: 'org-a' });
+    const renderPage = () => { sIdx = 0; rIdx = 0; eIdx = 0; mIdx = 0; const t = Page(); for (const ef of effectSlots) if (ef.changed) { ef.changed = false; ef.fn(); } return t; };
+    const findTid = (n, id) => { if (!n || typeof n !== 'object') return null; if (n.props?.['data-testid'] === id) return n; for (const k of (Array.isArray(n.children) ? n.children.flat(Infinity) : [])) { const h = findTid(k, id); if (h) return h; } return null; };
+    let pt = renderPage();
+    findTid(pt, 'dxos-tab-built-apps').props.onClick();
+    pt = renderPage();
+    await new Promise((r) => setTimeout(r, 20));
+    pt = renderPage();
+    await findTid(pt, 'dxos-built-app-verify-unverified-app').props.onClick();
+    pt = renderPage();
+    const badge = findTid(pt, 'dxos-built-app-verify-result-unverified-app');
+    assert.ok(badge);
+    assert.equal(JSON.stringify(badge).includes('PASS'), false, 'Empty lastVerificationJson must NOT show PASS');
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
+});
+
+test('UI & SSE remediation: left-rail sidebar, Vietnamese plane metrics, Audit filter bar, Tab 7 Quick-Start planBuiltApp/buildBuiltApp, and AbortError-safe SSE hub', async () => {
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+
+  // 1. Server planBuiltApp with NL prompt only (no appKey/spec) & buildBuiltApp action
+  const db = makeMockDb();
+  db.stores.latticeBuiltApps = [];
+  db.stores.latticeUiSnapshots = [];
+  db.stores.collections = [];
+  db.stores.fields = [];
+  db.stores.roles = [{ name: 'root', allowConfigure: true }];
+  db.stores.rolesUsers = [{ userId: 1, roleName: 'root' }];
+  db.stores.uiLayouts = [];
+  db.stores.desktopRoutes = [];
+  db.stores.rolesDesktopRoutes = [];
+  db.stores.dataSourcesRoles = [];
+  db.stores.dataSourcesRolesResources = [];
+  db.stores.dataSourcesRolesResourcesActions = [];
+  const actions = createDxosAiActions(db);
+  const planCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 1, username: 'root' }, currentRoles: ['root'] },
+    request: { body: { organizationId: 'org-a', prompt: 'Tạo ứng dụng Phòng khám Đa khoa' } },
+    action: { params: {} },
+  };
+  await actions.planBuiltApp(planCtx, async () => {});
+  assert.equal(planCtx.body.ok, true);
+  assert.equal(planCtx.body.dryRun, true);
+  assert.equal(planCtx.body.appKey, 'clinic-suite');
+  assert.ok(planCtx.body.erGraph.nodes.length >= 3);
+
+  // 2. UI checks: sidebar, Vietnamese metrics, audit filters, Tab 7 empty Quick-Start
+  const apiCalls = [];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let sIdx = 0; let rIdx = 0; let eIdx = 0; let mIdx = 0;
+  const depsChanged = (p, n) => !p || !n || p.length !== n.length || n.some((d, i) => d !== p[i]);
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => { const i = sIdx++; if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init; return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }]; },
+    useRef: (init) => { const i = rIdx++; if (!(i in refSlots)) refSlots[i] = { current: init }; return refSlots[i]; },
+    useEffect: (fn, deps) => { const i = eIdx++; effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) }; },
+    useMemo: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps }; return memoSlots[i].value; },
+    useCallback: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps }; return memoSlots[i].value; },
+  };
+  const builtAppsList = [];
+  const api = {
+    request: async (req) => {
+      apiCalls.push(req);
+      if (req.url === 'dxosAi:enterpriseTopology') {
+        return {
+          data: {
+            data: {
+              defaultOrganizationId: 'org-a',
+              organizations: ['org-a'],
+              planes: [
+                { key: 'identitySecurity', order: 1, name: 'Identity', healthy: true, metrics: { rolesCount: 9 } },
+                { key: 'integrationEventBus', order: 3, name: 'Bus', healthy: true, metrics: { activeWorkflowsCount: 8 } },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:auditLogs') {
+        return {
+          data: {
+            data: {
+              items: [
+                { id: 1, toolName: 'dxos_alarm_action', channel: 'mcp', aiEmployee: 'dxos-ops', status: 'allowed', resultSummary: 'Ack ALM-1' },
+                { id: 2, toolName: 'dxos_compose_page_blocks', channel: 'studio', aiEmployee: 'dxos-architect', status: 'denied', errorCode: 'FORBIDDEN', resultSummary: 'Denied' },
+              ],
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosAi:listBuiltApps') return { data: { data: { apps: builtAppsList } } };
+      if (req.url === 'dxosAi:planBuiltApp') return { data: { data: planCtx.body } };
+      if (req.url === 'dxosAi:buildBuiltApp') {
+        builtAppsList.push({ id: 99, appKey: 'clinic-suite', name: 'Phòng khám Đa khoa', status: 'active', version: 1, organizationId: 'org-a', artifactRefsJson: { collections: ['latticeCustomClinicPatients'], roles: ['ldx_clinic_staff'], portals: [{ portalSlug: 'clinic-ops' }] } });
+        return { data: { data: { ok: true, built: true, appKey: 'clinic-suite', collections: ['latticeCustomClinicPatients'], portalSlug: 'clinic-ops' } } };
+      }
+      return { data: { data: { profiles: [], catalog: { availableTools: [] } } } };
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, { defaultOrganizationId: 'org-a' });
+  const render = () => { sIdx = 0; rIdx = 0; eIdx = 0; mIdx = 0; const t = Page(); for (const ef of effectSlots) if (ef.changed) { ef.changed = false; ef.fn(); } return t; };
+  const findTid = (n, id) => { if (!n || typeof n !== 'object') return null; if (n.props?.['data-testid'] === id) return n; for (const k of (Array.isArray(n.children) ? n.children.flat(Infinity) : [])) { const h = findTid(k, id); if (h) return h; } return null; };
+
+  let tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-studio-sidebar'), 'Must render categorized left-rail sidebar');
+  const topoDump = JSON.stringify(tree);
+  assert.ok(topoDump.includes('Số vai trò: 9'));
+  assert.ok(topoDump.includes('Luồng tự động hóa hoạt động: 8'));
+  assert.equal(topoDump.includes('rolesCount:'), false);
+  assert.equal(topoDump.includes('activeWorkflowsCount:'), false);
+
+  // Audit filter bar filters rows
+  findTid(tree, 'dxos-tab-audit').props.onClick();
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-audit-filter-bar'));
+  findTid(tree, 'dxos-audit-status-filter').props.onChange({ target: { value: 'denied' } });
+  tree = render();
+  const auditDump = JSON.stringify(findTid(tree, 'dxos-audit-table'));
+  assert.ok(auditDump.includes('dxos_compose_page_blocks'));
+  assert.equal(auditDump.includes('dxos_alarm_action'), false);
+
+  // Tab 7 empty state Quick-Start -> preset -> planBuiltApp -> buildBuiltApp
+  findTid(tree, 'dxos-tab-built-apps').props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-built-apps-quickstart'));
+  assert.equal(JSON.stringify(findTid(tree, 'dxos-built-apps-panel')).includes('latticeBuiltApps'), false);
+  findTid(tree, 'dxos-quickstart-preset-clinic').props.onClick();
+  tree = render();
+  await findTid(tree, 'dxos-quickstart-plan-btn').props.onClick();
+  tree = render();
+  assert.ok(findTid(tree, 'dxos-quickstart-plan-preview'));
+  assert.ok(findTid(tree, 'dxos-quickstart-er-panel'));
+  await findTid(tree, 'dxos-quickstart-build-btn').props.onClick();
+  tree = render();
+  assert.ok(apiCalls.some((c) => c.url === 'dxosAi:buildBuiltApp'));
+  assert.ok(findTid(tree, 'dxos-built-app-card-clinic-suite'));
+
+  // 3. PortalAgentLauncher: AbortError caught cleanly, shared __LATTICEDX_SSE_HUB__ prevents duplicate streams, drawer/inspector hides button
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    let fetchCount = 0;
+    global.localStorage = { getItem: () => '' };
+    global.window = { location: { pathname: '/p/services' }, addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
+    global.document = {
+      visibilityState: 'visible',
+      title: 'Services',
+      querySelector: (sel) => (String(sel).includes('lf-node-inspector') ? { className: 'lf-node-inspector' } : null),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    global.fetch = async () => {
+      fetchCount += 1;
+      return {
+        ok: true,
+        body: {
+          getReader: () => ({
+            read: () => Promise.reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' })),
+            cancel: () => Promise.reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' })),
+          }),
+        },
+      };
+    };
+    const makeLauncherHarness = () => {
+      const slots = []; const effects = []; let si = 0; let ei = 0; const cleanups = [];
+      const R = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => { const i = si++; if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init; return [slots[i], (v) => { slots[i] = typeof v === 'function' ? v(slots[i]) : v; }]; },
+        useEffect: (fn, deps) => { const i = ei++; effects[i] = { fn, deps, changed: !effects[i] || depsChanged(effects[i].deps, deps) }; },
+      };
+      const r = (Comp) => { si = 0; ei = 0; const t = Comp({ children: 'b' }); for (const ef of effects) if (ef.changed) { ef.changed = false; const c = ef.fn(); if (typeof c === 'function') cleanups.push(c); } return t; };
+      return { R, r, clean: () => cleanups.forEach((f) => f()) };
+    };
+    const sharedClient = {
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-shared' },
+        getBaseURL: () => '/api/',
+        request: async () => ({ data: { data: { isAdmin: true, employees: [{ username: 'dxos-architect' }] } } }),
+      }),
+    };
+    const h1 = makeLauncherHarness();
+    const h2 = makeLauncherHarness();
+    const L1 = createPortalAgentLauncher(sharedClient, h1.R, {}, {});
+    const L2 = createPortalAgentLauncher(sharedClient, h2.R, {}, {});
+    const tree1 = h1.r(L1);
+    h2.r(L2);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fetchCount, 1, 'Shared __LATTICEDX_SSE_HUB__ must prevent duplicate concurrent SSE streams');
+    assert.ok(global.window.__LATTICEDX_SSE_HUB__);
+    assert.equal(findTid(tree1, 'dxos-portal-ai-float-btn'), null, 'Must hide float button when .lf-node-inspector / .ant-drawer-open is visible');
+    h1.clean();
+    h2.clean();
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
 });

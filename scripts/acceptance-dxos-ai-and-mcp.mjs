@@ -29,8 +29,10 @@ const ADMIN_TOOLS = [
 const OPERATIONAL_TOOLS = [
   'dxos_search_enterprise_context',
   'dxos_execute_record_action',
-  'dxos_my_tasks_copilot',
+  'dxos_my_workflow_tasks',
   'dxos_orchestrate_enterprise_case',
+  'dxos_graph_impact_analysis',
+  'dxos_alarm_action',
 ];
 
 export function parseAiMcpAcceptanceArgs(argv) {
@@ -50,16 +52,27 @@ export function parseAiMcpAcceptanceArgs(argv) {
 }
 
 export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
+  const organizationId = 'native-ui-lab';
   const suffix = Date.now().toString(36).slice(-5);
   const customUsername = `dxos-e2e-custom-${suffix}`;
+  const tempDmnKey = `acc_mcp_dmn_${suffix}`;
+  const tempHitlRuleKey = `acc_mcp_hitl_${suffix}`;
+  let tempHitlRunUid = null;
+  let tempHitlRunId = null;
+  let tempHitlApprovalId = null;
+  let createdHitlRule = false;
   const checks = {
     unauthenticatedMcp401: false,
     employeeBuilderToolsHidden: false,
     employeeBuilderCallDenied: false,
     employeeTopology403: false,
-    employeePortalCopilotScoped: false,
+    employeePortalAgentsScoped: false,
     adminMcpInitialize: false,
     adminMcpToolsListed15: false,
+    adminMcpToolsListed17: false,
+    mcpPromptsListAndAdminHiddenOk: false,
+    mcpPromptsGetOk: false,
+    mcpResourceTemplatesListOk: false,
     adminMcpInspectOk: false,
     adminMcpDryRunCompose: false,
     adminMcpRbacInspectAndRootBlocked: false,
@@ -68,6 +81,9 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     adminCreativeBlockDryRunOk: false,
     adminSnapshotListOk: false,
     adminProvisionRoleWorkspaceDryRunOk: false,
+    adminAppBuilderDryRunAndVerifyOk: false,
+    adminConfigureWorkflowDmnAndN8nOk: false,
+    hitlLatticeFlowApprovalResolvedOk: false,
     employeeCrossDeptRadarOk: false,
     adminMcpTopologyResource6Planes: false,
     itOtMcp4Tools: false,
@@ -91,6 +107,9 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     for (const adminTool of ADMIN_TOOLS) {
       assert.ok(!empToolNames.includes(adminTool), `Non-admin tools/list leaked ${adminTool}`);
     }
+    for (const opTool of OPERATIONAL_TOOLS) {
+      assert.ok(empToolNames.includes(opTool), `Non-admin tools/list missing operational tool ${opTool}`);
+    }
     checks.employeeBuilderToolsHidden = true;
 
     const empBlockedCall = await rpcRequest('employee', '/api/dxos-mcp', {
@@ -106,11 +125,11 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.ok(!empTopo.ok && empTopo.status === 403, `Expected 403 on dxosAi:enterpriseTopology for employee, got ${empTopo.status}`);
     checks.employeeTopology403 = true;
 
-    const empCopilot = await callActor('employee', 'dxosAi:portalCopilot?portalSlug=services');
-    assert.ok(empCopilot.ok && empCopilot.status < 300);
-    const visibleBefore = (empCopilot.data?.employees || []).map((e) => e.username);
-    assert.ok(!visibleBefore.includes('dxos-architect'), 'dxos-architect leaked into non-admin portalCopilot');
-    checks.employeePortalCopilotScoped = true;
+    const empAgents = await callActor('employee', 'dxosAi:portalAgents?portalSlug=services');
+    assert.ok(empAgents.ok && empAgents.status < 300);
+    const visibleBefore = (empAgents.data?.employees || []).map((e) => e.username);
+    assert.ok(!visibleBefore.includes('dxos-architect'), 'dxos-architect leaked into non-admin portalAgents');
+    checks.employeePortalAgentsScoped = true;
 
     // 3. Admin MCP initialize, tools/list, tools/call, resources/read (6 planes)
     const initRes = await rpcRequest('root', '/api/dxos-mcp', {
@@ -128,7 +147,9 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     for (const tool of [...ADMIN_TOOLS, ...OPERATIONAL_TOOLS]) {
       assert.ok(adminToolNames.includes(tool), `Admin MCP missing tool ${tool}`);
     }
+    assert.ok(adminToolNames.length >= 17, `Expected >= 17 admin+operational MCP tools, got ${adminToolNames.length}`);
     checks.adminMcpToolsListed15 = true;
+    checks.adminMcpToolsListed17 = true;
 
     const inspectCall = await rpcRequest('root', '/api/dxos-mcp', {
       jsonrpc: '2.0',
@@ -236,6 +257,230 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.equal(provRootDeny.json?.error?.code, -32003);
     checks.adminProvisionRoleWorkspaceDryRunOk = true;
 
+    // 3a-1. App Builder Orchestrator (build_enterprise_app dryRun + verify_app + employee 403)
+    const empBuildDeny = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 32,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: {
+          operation: 'build_enterprise_app',
+          collectionName: 'latticeCustomBlockedMcp',
+          portalSlug: 'services',
+          dryRun: true,
+        },
+      },
+    });
+    assert.equal(empBuildDeny.json?.error?.code, -32003, 'Expected -32003 for employee build_enterprise_app');
+
+    const buildDryCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 33,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: {
+          operation: 'build_enterprise_app',
+          collectionName: `latticeCustomAppEval${suffix.replace(/[^a-zA-Z0-9]/g, '')}`,
+          portalSlug: 'services',
+          pageTitle: `MCP App Builder ${suffix}`,
+          fields: [{ name: 'lotRef', type: 'string', title: 'Lot Ref' }],
+          blocks: [{ blockUse: 'DxosWmsOpsBlockModel', title: 'WMS Ops' }],
+          dryRun: true,
+        },
+      },
+    });
+    assert.equal(buildDryCall.json?.result?.isError, false);
+    const buildDryJson = JSON.parse(buildDryCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(buildDryJson.dryRun, true);
+    assert.ok(buildDryJson.planned?.collectionName, 'build_enterprise_app dryRun missing planned.collectionName');
+
+    const verifyAppCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 34,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_provision_role_workspace',
+        arguments: {
+          operation: 'verify_app',
+          collectionName: 'latticeOrders',
+          portalSlug: 'logistics',
+        },
+      },
+    });
+    assert.equal(verifyAppCall.json?.result?.isError, false);
+    const verifyAppJson = JSON.parse(verifyAppCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(typeof verifyAppJson.ok, 'boolean');
+    assert.ok(Array.isArray(verifyAppJson.checks) && verifyAppJson.checks.length >= 1, 'verify_app missing checks array');
+    checks.adminAppBuilderDryRunAndVerifyOk = true;
+
+    // 3a-2. dxos_configure_workflow (DMN tables + Stock n8n REST API v1 + connected apps)
+    const dmnListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 35,
+      method: 'tools/call',
+      params: { name: 'dxos_configure_workflow', arguments: { operation: 'dmn_list_tables' } },
+    });
+    assert.equal(dmnListCall.json?.result?.isError, false);
+    const dmnListJson = JSON.parse(dmnListCall.json?.result?.content?.[0]?.text || '{}');
+    assert.ok(Array.isArray(dmnListJson.tables || dmnListJson.items), 'dmn_list_tables missing tables/items');
+
+    const dmnSaveCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 36,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: {
+          operation: 'dmn_save_table',
+          tableKey: tempDmnKey,
+          name: `MCP DMN ${suffix}`,
+          hitPolicy: 'FIRST',
+          inputsJson: [{ name: 'tempC', type: 'number' }],
+          outputsJson: [{ name: 'action', type: 'string' }],
+          rulesJson: [
+            { when: { tempC: { op: 'gt', value: 8 } }, then: { action: 'quarantine' } },
+            { when: { tempC: '*' }, then: { action: 'normal' } },
+          ],
+        },
+      },
+    });
+    assert.equal(dmnSaveCall.json?.result?.isError, false);
+
+    const dmnEvalCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 37,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: { operation: 'dmn_evaluate', tableKey: tempDmnKey, context: { tempC: 11 } },
+      },
+    });
+    assert.equal(dmnEvalCall.json?.result?.isError, false);
+    const dmnEvalJson = JSON.parse(dmnEvalCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(dmnEvalJson.matched, true);
+    assert.equal(dmnEvalJson.result?.action, 'quarantine');
+
+    const appsListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 38,
+      method: 'tools/call',
+      params: { name: 'dxos_configure_workflow', arguments: { operation: 'list_connected_apps' } },
+    });
+    assert.equal(appsListCall.json?.result?.isError, false);
+    const appsListJson = JSON.parse(appsListCall.json?.result?.content?.[0]?.text || '{}');
+    assert.ok(Array.isArray(appsListJson.items) && appsListJson.items.length >= 1, 'list_connected_apps missing items');
+
+    const n8nDryCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 39,
+      method: 'tools/call',
+      params: {
+        name: 'dxos_configure_workflow',
+        arguments: {
+          operation: 'create_n8n_workflow',
+          dryRun: true,
+          workflow: { name: `MCP Dry n8n ${suffix}`, nodes: [], connections: {} },
+        },
+      },
+    });
+    assert.equal(n8nDryCall.json?.result?.isError, false);
+    const n8nDryJson = JSON.parse(n8nDryCall.json?.result?.content?.[0]?.text || '{}');
+    assert.equal(n8nDryJson.dryRun, true);
+
+    const n8nListCall = await rpcRequest('root', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 40,
+      method: 'tools/call',
+      params: { name: 'dxos_configure_workflow', arguments: { operation: 'list_n8n_workflows', limit: 5 } },
+    });
+    if (n8nListCall.json?.result?.isError === true) {
+      const errText = String(n8nListCall.json?.result?.content?.[0]?.text || '');
+      const n8nNotConfigured = /N8N_CONNECTOR_NOT_CONFIGURED|Chưa cấu hình connector n8n|No active n8n API connector/i.test(errText);
+      assert.ok(
+        n8nNotConfigured && process.env.DX_REQUIRE_N8N !== '1',
+        `list_n8n_workflows failed unexpectedly: ${errText}`,
+      );
+    } else {
+      assert.equal(n8nListCall.json?.result?.isError, false);
+    }
+    checks.adminConfigureWorkflowDmnAndN8nOk = true;
+
+    // 3a-3. latticeflow.approval HITL queue resolution via dxosAi:listApprovals + dxosAi:approveAction
+    const saveHitlRuleRes = await callActor('root', 'dxosAutomations:saveRule', {
+      method: 'POST',
+      values: {
+        organizationId,
+        schemaVersion: 2,
+        ruleKey: tempHitlRuleKey,
+        name: `MCP HITL Queue Rule ${suffix}`,
+        triggerEventType: 'manual.trigger',
+        cooldownSec: 0,
+        maxDepth: 8,
+        active: true,
+        graphJson: {
+          version: 2,
+          nodes: [
+            { id: 'trig_1', type: 'trigger.manual', label: 'Manual', config: {} },
+            {
+              id: 'hitl_gate',
+              type: 'control.approval',
+              label: 'Approval Gate',
+              config: { approverRole: 'ldx_manager', title: `MCP HITL ${suffix}`, summary: 'Approve MCP HITL check', riskLevel: 'medium' },
+            },
+            {
+              id: 'notify_done',
+              type: 'notify.send',
+              label: 'Done',
+              config: { roleNames: ['ldx_operator'], severity: 'info', title: `HITL done ${suffix}` },
+            },
+          ],
+          edges: [
+            { id: 'e1', source: 'trig_1', sourceHandle: 'main', target: 'hitl_gate', targetHandle: 'in' },
+            { id: 'e2', source: 'hitl_gate', sourceHandle: 'approved', target: 'notify_done', targetHandle: 'in', label: 'approved' },
+          ],
+          settings: { errorPolicy: 'stop', cooldownSec: 0, maxDepth: 8, timeoutMs: 30000 },
+        },
+      },
+    });
+    assert.ok(saveHitlRuleRes.ok && saveHitlRuleRes.status < 300, `dxosAutomations:saveRule failed: ${JSON.stringify(saveHitlRuleRes.data)}`);
+    createdHitlRule = true;
+
+    const hitlRunRes = await callActor('root', 'dxosAutomations:runNow', {
+      method: 'POST',
+      values: { organizationId, ruleKey: tempHitlRuleKey, event: { type: 'manual.trigger', data: { code: suffix } } },
+    });
+    assert.ok(hitlRunRes.ok && hitlRunRes.status < 300, `dxosAutomations:runNow failed: ${JSON.stringify(hitlRunRes.data)}`);
+    const hitlRun = hitlRunRes.data?.run || {};
+    tempHitlRunUid = hitlRun.runUid || null;
+    tempHitlRunId = hitlRun.id ?? null;
+    tempHitlApprovalId = hitlRun.approvalId ?? null;
+    assert.equal(hitlRun.status, 'suspended', `Expected suspended HITL run, got ${hitlRun.status}`);
+    assert.ok(tempHitlApprovalId != null, 'Suspended HITL run missing approvalId');
+
+    const pendingApprovalsRes = await callActor('root', `dxosAi:listApprovals?organizationId=${encodeURIComponent(organizationId)}&status=pending&limit=50`);
+    assert.ok(pendingApprovalsRes.ok && pendingApprovalsRes.status < 300);
+    const pendingItem = (pendingApprovalsRes.data?.items || []).find((q) => Number(q?.id) === Number(tempHitlApprovalId));
+    assert.ok(pendingItem, 'latticeflow.approval item missing from dxosAi:listApprovals');
+    assert.equal(pendingItem.toolName, 'latticeflow.approval');
+    assert.equal(pendingItem.targetCollection, 'latticeAutomationRuns');
+
+    const approveHitlRes = await callActor('root', 'dxosAi:approveAction', {
+      method: 'POST',
+      values: { approvalId: tempHitlApprovalId, note: 'Approved by MCP E2E acceptance' },
+    });
+    assert.ok(approveHitlRes.ok && approveHitlRes.status < 300, `dxosAi:approveAction failed: ${JSON.stringify(approveHitlRes.data)}`);
+    assert.ok(['approved', 'executed'].includes(approveHitlRes.data?.status), `Expected approved/executed HITL status, got ${approveHitlRes.data?.status}`);
+    const resolvedFlowStatus = approveHitlRes.data?.executionResult?.run?.status || approveHitlRes.data?.executionResult?.status || approveHitlRes.data?.flowRun?.status;
+    if (resolvedFlowStatus) {
+      assert.equal(resolvedFlowStatus, 'completed');
+    } else if (tempHitlRunUid) {
+      const traceRes = await callActor('root', `dxosAutomations:getRunTrace?organizationId=${encodeURIComponent(organizationId)}&runUid=${encodeURIComponent(tempHitlRunUid)}`);
+      assert.ok(traceRes.ok && traceRes.data?.run?.status === 'completed');
+    }
+    checks.hitlLatticeFlowApprovalResolvedOk = true;
+
     const empRadar = await rpcRequest('employee', '/api/dxos-mcp', {
       jsonrpc: '2.0',
       id: 20,
@@ -255,6 +500,52 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.equal(topoJson.planes?.length, 6);
     assert.equal(topoJson.clause52Preserved, true);
     checks.adminMcpTopologyResource6Planes = true;
+
+    // 3b. MCP prompts/list, prompts/get, and resources/templates/list (with admin scoping)
+    const empPrompts = await rpcRequest('employee', '/api/dxos-mcp', { jsonrpc: '2.0', id: 26, method: 'prompts/list', params: {} });
+    assert.equal(empPrompts.status, 200);
+    const empPromptNames = (empPrompts.json?.result?.prompts || []).map((p) => p.name);
+    for (const opPrompt of ['dxos-cold-chain-incident-triage', 'dxos-fefo-dispatch-audit', 'dxos-executive-radar-brief']) {
+      assert.ok(empPromptNames.includes(opPrompt), `Employee prompts/list missing ${opPrompt}`);
+    }
+    assert.ok(!empPromptNames.includes('dxos-system-blueprint-architect'), 'Employee prompts/list leaked admin prompt');
+
+    const rootPrompts = await rpcRequest('root', '/api/dxos-mcp', { jsonrpc: '2.0', id: 27, method: 'prompts/list', params: {} });
+    assert.equal(rootPrompts.status, 200);
+    const rootPromptNames = (rootPrompts.json?.result?.prompts || []).map((p) => p.name);
+    assert.ok(rootPromptNames.includes('dxos-system-blueprint-architect'), 'Root prompts/list missing admin architect prompt');
+    assert.ok(rootPromptNames.length >= 4, `Expected >= 4 MCP prompts for admin, got ${rootPromptNames.length}`);
+    checks.mcpPromptsListAndAdminHiddenOk = true;
+
+    const empAdminPromptDeny = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 28,
+      method: 'prompts/get',
+      params: { name: 'dxos-system-blueprint-architect', arguments: { goal: 'Unauthorized bypass attempt' } },
+    });
+    assert.equal(empAdminPromptDeny.json?.error?.code, -32003, 'Expected -32003 when employee fetches admin MCP prompt');
+
+    const empTriagePrompt = await rpcRequest('employee', '/api/dxos-mcp', {
+      jsonrpc: '2.0',
+      id: 29,
+      method: 'prompts/get',
+      params: { name: 'dxos-cold-chain-incident-triage', arguments: { assetCode: 'COLD-CHILLER-01' } },
+    });
+    assert.equal(empTriagePrompt.status, 200);
+    assert.match(String(empTriagePrompt.json?.result?.messages?.[0]?.content?.text || ''), /COLD-CHILLER-01/);
+    checks.mcpPromptsGetOk = true;
+
+    const empTemplates = await rpcRequest('employee', '/api/dxos-mcp', { jsonrpc: '2.0', id: 30, method: 'resources/templates/list', params: {} });
+    assert.equal(empTemplates.status, 200);
+    const empUris = (empTemplates.json?.result?.resourceTemplates || []).map((t) => t.uriTemplate);
+    assert.ok(empUris.includes('dxos://org/{organizationId}/lineage/{collection}/{recordId}'));
+    assert.ok(empUris.includes('dxos://org/{organizationId}/alarms/active'));
+    assert.ok(!empUris.includes('dxos://topology/planes'), 'Employee resources/templates/list leaked admin topology template');
+
+    const rootTemplates = await rpcRequest('root', '/api/dxos-mcp', { jsonrpc: '2.0', id: 31, method: 'resources/templates/list', params: {} });
+    const rootUris = (rootTemplates.json?.result?.resourceTemplates || []).map((t) => t.uriTemplate);
+    assert.ok(rootUris.includes('dxos://topology/planes'));
+    checks.mcpResourceTemplatesListOk = true;
 
     // 4. IT/OT Streamable MCP endpoint (/api/dxos-mcp/it-ot)
     const itOtList = await rpcRequest('root', '/api/dxos-mcp/it-ot', { jsonrpc: '2.0', id: 9, method: 'tools/list', params: {} });
@@ -282,7 +573,7 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
     assert.equal(itOtTelem.json?.result?.isError, false);
     checks.itOtMcpTelemetrySafe = true;
 
-    // 5. Dynamic Admin-created AI Employee lifecycle & portalCopilot propagation
+    // 5. Dynamic Admin-created AI Employee lifecycle & portalAgents propagation
     const saveRes = await callActor('root', 'dxosAi:saveProfile', {
       method: 'POST',
       values: {
@@ -292,20 +583,53 @@ export async function runDxosAiAndMcpAcceptance({ callActor, rpcRequest }) {
         organizationId: 'native-ui-lab',
         allowedRoles: ['ldx_employee', 'ldx_manager'],
         portalBindings: ['services'],
-        toolPermissions: { dxos_search_enterprise_context: 'ALLOW', dxos_my_tasks_copilot: 'ALLOW' },
-        quickPrompts: [{ label: 'E2E Copilot Check', prompt: 'Kiểm tra phiếu dịch vụ đang mở.' }],
+        toolPermissions: { dxos_search_enterprise_context: 'ALLOW', dxos_my_workflow_tasks: 'ALLOW' },
+        quickPrompts: [{ label: 'E2E Agent Check', prompt: 'Kiểm tra phiếu dịch vụ đang mở.' }],
       },
     });
     assert.ok(saveRes.ok && saveRes.status < 300, `saveProfile failed: ${JSON.stringify(saveRes.data)}`);
 
-    const empCopilotAfter = await callActor('employee', 'dxosAi:portalCopilot?portalSlug=services');
-    assert.ok(empCopilotAfter.ok);
-    const visibleAfter = (empCopilotAfter.data?.employees || []).map((e) => e.username);
-    assert.ok(visibleAfter.includes(customUsername), `Custom AI employee ${customUsername} missing from portalCopilot`);
+    const empAgentsAfter = await callActor('employee', 'dxosAi:portalAgents?portalSlug=services');
+    assert.ok(empAgentsAfter.ok);
+    const visibleAfter = (empAgentsAfter.data?.employees || []).map((e) => e.username);
+    assert.ok(visibleAfter.includes(customUsername), `Custom AI employee ${customUsername} missing from portalAgents`);
     checks.customAiCreatedAndVisible = true;
   } finally {
     const delRes = await callActor('root', 'dxosAi:deleteProfile', { method: 'POST', values: { username: customUsername } }).catch(() => ({ ok: false }));
     if (delRes?.ok) checks.customAiLifecycleCleanedUp = true;
+
+    if (tempHitlApprovalId != null) {
+      await callActor('root', `latticeAiApprovalQueue:destroy?filterByTk=${encodeURIComponent(tempHitlApprovalId)}`, { method: 'POST' }).catch(() => {});
+    }
+    if (tempHitlRunId != null) {
+      await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${encodeURIComponent(tempHitlRunId)}`, { method: 'POST' }).catch(() => {});
+    } else if (tempHitlRunUid) {
+      const runsRes = await callActor(
+        'root',
+        `latticeAutomationRuns:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, runUid: tempHitlRunUid }))}&pageSize=5`,
+      ).catch(() => null);
+      const runs = Array.isArray(runsRes?.data) ? runsRes.data : (Array.isArray(runsRes?.data?.items) ? runsRes.data.items : []);
+      for (const r of runs) {
+        if (r?.id != null) {
+          await callActor('root', `latticeAutomationRuns:destroy?filterByTk=${encodeURIComponent(r.id)}`, { method: 'POST' }).catch(() => {});
+        }
+      }
+    }
+    if (createdHitlRule) {
+      await callActor('root', 'dxosAutomations:deleteRule', { method: 'POST', values: { organizationId, ruleKey: tempHitlRuleKey } }).catch(() => {});
+    }
+    const dmnListCleanup = await callActor(
+      'root',
+      `latticeDecisionTables:list?filter=${encodeURIComponent(JSON.stringify({ organizationId, tableKey: tempDmnKey }))}&pageSize=5`,
+    ).catch(() => null);
+    const dmnRows = Array.isArray(dmnListCleanup?.data)
+      ? dmnListCleanup.data
+      : (Array.isArray(dmnListCleanup?.data?.items) ? dmnListCleanup.data.items : []);
+    for (const row of dmnRows) {
+      if (row?.id != null) {
+        await callActor('root', `latticeDecisionTables:destroy?filterByTk=${encodeURIComponent(row.id)}`, { method: 'POST' }).catch(() => {});
+      }
+    }
   }
 
   const auditRes = await callActor('root', 'dxosAi:auditLogs?pageSize=20');

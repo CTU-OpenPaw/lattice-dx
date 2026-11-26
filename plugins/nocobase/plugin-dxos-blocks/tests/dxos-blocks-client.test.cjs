@@ -52,7 +52,7 @@ test('dxos-blocks helpers reject unsafe URLs, enforce ACL button filtering, and 
   assert.equal(metrics[1].targetPath, null);
 });
 
-test('registerDxosBlockModels registers all 8 configurable BlockModel subclasses with flowEngine settings flows', () => {
+test('registerDxosBlockModels registers all 12 configurable BlockModel subclasses with flowEngine settings flows', () => {
   const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
 
   class MockBlockModel {
@@ -81,6 +81,10 @@ test('registerDxosBlockModels registers all 8 configurable BlockModel subclasses
     'DxosParaVaultBlockModel',
     'DxosCreativeStudioBlockModel',
     'DxosRecordWorkbenchBlockModel',
+    'DxosWebGisBlockModel',
+    'DxosKanbanScheduleBlockModel',
+    'DxosWmsOpsBlockModel',
+    'DxosBiChartBlockModel',
   ];
   assert.deepEqual(Object.keys(models).sort(), expectedNames.slice().sort());
   assert.deepEqual(Object.keys(registered).sort(), expectedNames.slice().sort());
@@ -172,12 +176,12 @@ test('dxosBlockSettings stepParams take precedence over stale props and renderCo
   assert.equal(merged.title, 'Live Step Title');
 });
 
-test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when plugin-dxos-ai disabled, and triggers flowEngine AI task', async () => {
+test('Dynamic Block Agent Strip resolves portal slug, degrades silently when plugin-dxos-ai disabled, and triggers flowEngine AI task', async () => {
   const {
     inferPortalSlugFromLocation,
-    fetchPortalCopilot,
-    triggerDxosCopilot,
-    createCopilotStripElement,
+    fetchPortalAgents,
+    triggerDxosAgent,
+    createAgentStripElement,
   } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
 
   assert.equal(inferPortalSlugFromLocation('/p/logistics'), 'logistics');
@@ -189,15 +193,15 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
   const disabledApi = {
     request: async () => { throw Object.assign(new Error('Not found'), { response: { status: 404 } }); },
   };
-  const offRes = await fetchPortalCopilot(disabledApi, { portalSlug: 'logistics' });
+  const offRes = await fetchPortalAgents(disabledApi, { portalSlug: 'logistics' });
   assert.equal(offRes.pluginDisabled, true);
   assert.deepEqual(offRes.employees, []);
-  assert.equal(createCopilotStripElement(React, { employees: [], loading: false }), null);
+  assert.equal(createAgentStripElement(React, { employees: [], loading: false }), null);
 
   // Enabled response returns scoped AI employees + quickPrompts
   const activeApi = {
     request: async ({ url, params }) => {
-      assert.equal(url, 'dxosAi:portalCopilot');
+      assert.equal(url, 'dxosAi:portalAgents');
       assert.equal(params.portalSlug, 'logistics');
       return {
         data: {
@@ -214,7 +218,7 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
       };
     },
   };
-  const onRes = await fetchPortalCopilot(activeApi, { portalSlug: 'logistics' });
+  const onRes = await fetchPortalAgents(activeApi, { portalSlug: 'logistics' });
   assert.equal(onRes.pluginDisabled, false);
   assert.equal(onRes.employees.length, 1);
 
@@ -228,7 +232,7 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
       },
     },
   };
-  const triggerOut = await triggerDxosCopilot(mockApp, {
+  const triggerOut = await triggerDxosAgent(mockApp, {
     aiEmployee: 'dxos-logistics',
     prompt: 'Kiểm tra công việc logistics chờ xử lý.',
     blockTitle: 'Hộp việc Logistics',
@@ -240,14 +244,14 @@ test('Dynamic Block Copilot Strip resolves portal slug, degrades silently when p
   assert.equal(triggeredCalls[0].open, true);
   assert.ok(triggeredCalls[0].tasks[0].text.includes('Hộp việc Logistics'));
 
-  const noAiOut = await triggerDxosCopilot({}, { aiEmployee: 'dxos-logistics', prompt: 'Test' });
+  const noAiOut = await triggerDxosAgent({}, { aiEmployee: 'dxos-logistics', prompt: 'Test' });
   assert.equal(noAiOut.triggered, false);
 
-  const stripEl = createCopilotStripElement(React, {
+  const stripEl = createAgentStripElement(React, {
     employees: onRes.employees,
     onRunPrompt: () => {},
   });
-  assert.ok(stripEl && stripEl.props['data-testid'] === 'dxos-block-copilot-strip');
+  assert.ok(stripEl && stripEl.props['data-testid'] === 'dxos-block-agent-strip');
 });
 
 test('DxosPortalHeroView renders clean page header with zero inline AI strips or bars even for admins', () => {
@@ -287,7 +291,7 @@ test('DxosPortalHeroView renders clean page header with zero inline AI strips or
   walk(tree);
 
   assert.ok(testIds.includes('dxos-portal-hero-block'));
-  assert.equal(testIds.includes('dxos-block-copilot-strip'), false);
+  assert.equal(testIds.includes('dxos-block-agent-strip'), false);
   assert.equal(testIds.includes('dxos-admin-architect-bar'), false);
   assert.equal(testIds.includes('dxos-picker-toggle-btn'), false);
   assert.equal(testIds.includes('dxos-rollback-page-btn'), false);
@@ -389,4 +393,393 @@ test('DxosRecordWorkbenchBlockModel exposes uiSchema and renders Export Bar, Vou
   assert.ok(dump.includes('CSV') && dump.includes('XLSX') && dump.includes('PDF'));
   assert.ok(dump.includes('dxos-voucher-lifecycle-bar'));
   assert.ok(dump.includes('dxos-record-chatter'));
+});
+
+test('Task 5: fetchCollectionsMeta & inferCollectionFieldsMeta infer statusField, stages, dateFields, titleField, and geo fields', async () => {
+  const { fetchCollectionsMeta, inferCollectionFieldsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(typeof fetchCollectionsMeta, 'function');
+  assert.equal(typeof inferCollectionFieldsMeta, 'function');
+
+  const seenUrls = [];
+  const api = {
+    async request(req) {
+      seenUrls.push(`${req.method}:${req.url}`);
+      return {
+        data: {
+          data: {
+            collections: [
+              {
+                name: 'latticeCustomFleetTrips',
+                title: 'Chuyến xe lạnh',
+                isCustom: true,
+                fields: [
+                  { name: 'tripName', type: 'string', interface: 'input', title: 'Tên chuyến' },
+                  {
+                    name: 'tripStage',
+                    type: 'string',
+                    interface: 'select',
+                    title: 'Giai đoạn',
+                    enumValues: [
+                      { value: 'planned', label: 'Đã lên lịch' },
+                      { value: 'en_route', label: 'Đang chạy' },
+                      { value: 'arrived', label: 'Đã đến' },
+                    ],
+                  },
+                  { name: 'departureAt', type: 'datetime', interface: 'datetime', title: 'Giờ xuất phát' },
+                  { name: 'geoLat', type: 'float', interface: 'number', title: 'Vĩ độ' },
+                  { name: 'geoLng', type: 'float', interface: 'number', title: 'Kinh độ' },
+                ],
+              },
+            ],
+          },
+        },
+      };
+    },
+  };
+
+  const cols = await fetchCollectionsMeta(api);
+  assert.deepEqual(seenUrls, ['get:dxosBlocks:collectionsMeta']);
+  assert.equal(cols.length, 1);
+  assert.equal(cols[0].name, 'latticeCustomFleetTrips');
+
+  const inferred = inferCollectionFieldsMeta(cols[0]);
+  assert.equal(inferred.statusField, 'tripStage');
+  assert.deepEqual(inferred.stages, [
+    { value: 'planned', label: 'Đã lên lịch' },
+    { value: 'en_route', label: 'Đang chạy' },
+    { value: 'arrived', label: 'Đã đến' },
+  ]);
+  assert.equal(inferred.dateFields[0], 'departureAt');
+  assert.equal(inferred.titleField, 'tripName');
+  assert.equal(inferred.latField, 'geoLat');
+  assert.equal(inferred.lngField, 'geoLng');
+
+  const failingApi = {
+    async request() {
+      throw Object.assign(new Error('Unauthorized'), { response: { status: 401 } });
+    },
+  };
+  assert.deepEqual(await fetchCollectionsMeta(failingApi), []);
+});
+
+test('Task 5: DxosKanbanScheduleBlockModel uiSchema keeps existing fields and adds optional statusField, dateField, titleField', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+
+  const KanbanModel = models.DxosKanbanScheduleBlockModel;
+  const cfgStep = KanbanModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  for (const field of ['title', 'collection', 'viewMode', 'pageSize', 'statusField', 'dateField', 'titleField']) {
+    assert.ok(cfgStep.uiSchema[field], `DxosKanbanScheduleBlockModel uiSchema missing ${field}`);
+  }
+  const inst = new KanbanModel({ props: { collection: 'latticeCustomMaintenanceOrders', statusField: 'status', dateField: 'scheduledAt', titleField: 'equipmentName' } });
+  const el = inst.renderComponent();
+  assert.equal(el.props.liveConfig.collection, 'latticeCustomMaintenanceOrders');
+  assert.equal(el.props.liveConfig.statusField, 'status');
+  assert.equal(el.props.liveConfig.dateField, 'scheduledAt');
+  assert.equal(el.props.liveConfig.titleField, 'equipmentName');
+});
+
+test('Task 7: DxosRecordWorkbenchBlockModel preserves strict defaultParams while populating dynamic latticeCustom* collections in block config dropdowns', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const bootstrapApi = {
+    auth: { getToken: () => 'tok-valid' },
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomMaintenanceOrders', title: 'Lệnh Bảo trì', isCustom: true, fields: [] },
+              ],
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => bootstrapApi, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: bootstrapApi },
+  );
+
+  await new Promise((r) => setTimeout(r, 15));
+  const cfgStep = models.DxosRecordWorkbenchBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  assert.deepEqual(cfgStep.defaultParams, {
+    title: 'Trao đổi Chatter, Chứng từ & Xuất báo cáo',
+    collection: 'latticeRequests',
+    recordId: '',
+    showExport: true,
+    showVoucherActions: true,
+    showChatter: true,
+  });
+  assert.ok(
+    cfgStep.uiSchema.collection.enum.some((opt) => opt.value === 'latticeCustomMaintenanceOrders'),
+    'DxosRecordWorkbenchBlockModel config collection dropdown must include dynamic latticeCustom* collections',
+  );
+});
+
+test('Task 7 Fix Round 1: registerDxosBlockModels skips collectionsMeta when unauthenticated (0 requests on /signin) and lazily populates enums after post-login fetchCollectionsMeta', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { fetchCollectionsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const unauthCalls = [];
+  const unauthApiWithAuth = {
+    auth: { getToken: () => '' },
+    async request(req) {
+      unauthCalls.push(req);
+      return { data: { data: { collections: [] } } };
+    },
+  };
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => unauthApiWithAuth, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: unauthApiWithAuth },
+  );
+
+  const tokenlessCalls = [];
+  const tokenlessApi = {
+    async request(req) {
+      tokenlessCalls.push(req);
+      return { data: { data: { collections: [] } } };
+    },
+  };
+  registerDxosBlockModels(
+    { useAPIClient: () => tokenlessApi, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: tokenlessApi },
+  );
+
+  await new Promise((r) => setTimeout(r, 15));
+  assert.equal(unauthCalls.length, 0, 'Unauthenticated bootstrap with empty getToken() must make 0 requests');
+  assert.equal(tokenlessCalls.length, 0, 'Tokenless bootstrap without NOCOBASE_TOKEN must make 0 requests');
+
+  // Simulate post-login SPA navigation where a block view triggers fetchCollectionsMeta(api)
+  const postLoginApi = {
+    auth: { getToken: () => 'tok-post-login' },
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return {
+          data: {
+            data: {
+              collections: [
+                { name: 'latticeCustomColdAlerts', title: 'Cảnh báo Chuỗi lạnh', isCustom: true, fields: [] },
+              ],
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  await fetchCollectionsMeta(postLoginApi);
+
+  const wbEnum = models.DxosRecordWorkbenchBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema.collection.enum;
+  const kbEnum = models.DxosKanbanScheduleBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema.collection.enum;
+  assert.ok(
+    wbEnum.some((opt) => opt.value === 'latticeCustomColdAlerts'),
+    'Post-login fetchCollectionsMeta must lazily populate DxosRecordWorkbenchBlockModel config dropdown',
+  );
+  assert.ok(
+    kbEnum.some((opt) => opt.value === 'latticeCustomColdAlerts'),
+    'Post-login fetchCollectionsMeta must lazily populate DxosKanbanScheduleBlockModel config dropdown',
+  );
+
+  // Tightened lat/lng inference avoids substring false positives like escalation / prolong
+  const { inferCollectionFieldsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+  const nonGeoMeta = inferCollectionFieldsMeta({
+    name: 'latticeCustomTickets',
+    fields: [
+      { name: 'escalation', type: 'integer' },
+      { name: 'prolongDays', type: 'integer' },
+      { name: 'geoLat', type: 'double' },
+      { name: 'geoLng', type: 'double' },
+    ],
+  });
+  assert.equal(nonGeoMeta.latField, 'geoLat');
+  assert.equal(nonGeoMeta.lngField, 'geoLng');
+  const falsePositiveOnly = inferCollectionFieldsMeta({
+    name: 'latticeCustomEscalations',
+    fields: [{ name: 'escalation', type: 'integer' }, { name: 'prolongDays', type: 'integer' }],
+  });
+  assert.equal(falsePositiveOnly.latField, null);
+  assert.equal(falsePositiveOnly.lngField, null);
+});
+
+test('DxosBiChartBlockModel registers uiSchema with dynamic collection & numeric-filtered metricField options via collectionsMeta', async () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { isNumericCollectionField, extractBiFieldOptions, fetchCollectionsMeta } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(typeof isNumericCollectionField, 'function');
+  assert.equal(typeof extractBiFieldOptions, 'function');
+
+  assert.equal(isNumericCollectionField({ name: 'totalAmount', type: 'decimal' }), true);
+  assert.equal(isNumericCollectionField({ name: 'qty', type: 'integer' }), true);
+  assert.equal(isNumericCollectionField({ name: 'status', type: 'string' }), false);
+
+  const invoiceMeta = {
+    name: 'latticeCustomInvoices',
+    title: 'Hóa đơn',
+    fields: [
+      { name: 'status', type: 'string', title: 'Trạng thái' },
+      { name: 'region', type: 'string', title: 'Khu vực' },
+      { name: 'totalAmount', type: 'decimal', title: 'Tổng tiền' },
+      { name: 'secretToken', type: 'string', title: 'Token' },
+      { name: '__proto__', type: 'string', title: 'Proto' },
+    ],
+  };
+  assert.deepEqual(
+    extractBiFieldOptions(invoiceMeta).map((o) => o.value),
+    ['status', 'region', 'totalAmount'],
+  );
+  assert.deepEqual(
+    extractBiFieldOptions(invoiceMeta, { numericOnly: true }).map((o) => o.value),
+    ['totalAmount'],
+  );
+
+  class MockBlockModel {
+    constructor(opts = {}) {
+      this.props = opts.props || {};
+      this.stepParams = opts.stepParams || {};
+    }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  }
+
+  const bootstrapApi = {
+    auth: { getToken: () => 'tok-bi' },
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: [invoiceMeta] } } };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => bootstrapApi, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    { apiClient: bootstrapApi },
+  );
+  await fetchCollectionsMeta(bootstrapApi);
+
+  const biModel = models.DxosBiChartBlockModel;
+  assert.ok(biModel, 'DxosBiChartBlockModel must be registered');
+  const cfgStep = biModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
+  for (const key of ['title', 'collection', 'chartType', 'groupBy', 'secondaryGroupBy', 'metricOp', 'metricField', 'limit', 'filterJson']) {
+    assert.ok(key in cfgStep.defaultParams, `defaultParams missing ${key}`);
+    assert.ok(cfgStep.uiSchema[key], `uiSchema missing ${key}`);
+  }
+  assert.ok(cfgStep.uiSchema.collection.enum.some((o) => o.value === 'latticeCustomInvoices'));
+
+  const runReaction = (schemaField, queryValues) => {
+    const field = {
+      dataSource: [],
+      componentProps: {},
+      query: (name) => ({ value: () => queryValues[name] }),
+    };
+    const fn = schemaField['x-reactions'];
+    assert.equal(typeof fn, 'function');
+    fn(field);
+    return field;
+  };
+
+  const gbField = runReaction(cfgStep.uiSchema.groupBy, { collection: 'latticeCustomInvoices', metricOp: 'sum' });
+  assert.deepEqual(gbField.dataSource.map((o) => o.value), ['status', 'region', 'totalAmount']);
+
+  const secField = runReaction(cfgStep.uiSchema.secondaryGroupBy, { collection: 'latticeCustomInvoices', metricOp: 'sum' });
+  assert.deepEqual(secField.dataSource.map((o) => o.value), ['status', 'region', 'totalAmount']);
+
+  const metricSumField = runReaction(cfgStep.uiSchema.metricField, { collection: 'latticeCustomInvoices', metricOp: 'sum' });
+  assert.deepEqual(metricSumField.dataSource.map((o) => o.value), ['totalAmount']);
+
+  const metricCountField = runReaction(cfgStep.uiSchema.metricField, { collection: 'latticeCustomInvoices', metricOp: 'count' });
+  assert.deepEqual(metricCountField.dataSource.map((o) => o.value), ['status', 'region', 'totalAmount']);
+});
+
+test('M1.1 Iteration 2: isNumericCollectionField aligns formula eligibility with server (numeric dataType/interface only)', () => {
+  const { isNumericCollectionField, extractBiFieldOptions } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+
+  assert.equal(isNumericCollectionField({ name: 'calcNum', type: 'formula', interface: 'number' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcInt', type: 'formula', interface: 'integer' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcFloat', type: 'formula', interface: 'float' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcPct', type: 'formula', interface: 'percent' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcData', type: 'formula', dataType: 'decimal' }), true);
+  assert.equal(isNumericCollectionField({ name: 'calcStr', type: 'formula', interface: 'input' }), false);
+  assert.equal(isNumericCollectionField({ name: 'calcStrData', type: 'formula', dataType: 'string' }), false);
+  assert.equal(isNumericCollectionField({ name: 'calcBare', type: 'formula' }), false);
+  assert.equal(isNumericCollectionField({ name: 'badStr', type: 'string', interface: 'number' }), false);
+
+  const meta = {
+    name: 'latticeCustomFormulas',
+    fields: [
+      { name: 'calcNum', type: 'formula', interface: 'number' },
+      { name: 'calcData', type: 'formula', dataType: 'float' },
+      { name: 'calcStr', type: 'formula', interface: 'input', dataType: 'string' },
+      { name: 'badStr', type: 'string', interface: 'number' },
+    ],
+  };
+  assert.deepEqual(
+    extractBiFieldOptions(meta, { numericOnly: true }).map((o) => o.value),
+    ['calcNum', 'calcData'],
+  );
 });

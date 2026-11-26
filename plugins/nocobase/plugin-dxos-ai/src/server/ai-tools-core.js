@@ -9,19 +9,51 @@
 'use strict';
 
 const { defineToolSchema } = require('./schema-helper');
-const { recordAiAuditLog, redactAuditText } = require('./ai-schemas');
+const { recordAiAuditLog, redactAuditText, normalizeToolPermissionsMap, resolveDefaultOrganizationId } = require('./ai-schemas');
+const { runWithTenantRls, runWithSystemRlsBypass } = require('./ai-rls');
 const {
   redactPiiText,
   redactPiiDeep,
   estimateTokens,
+  normalizeTokenUsage,
   estimateCostUsd,
   checkAndConsumeAiQuota,
   hydrateQuotaBucketFromDb,
   recordQuotaUsagePersistent,
 } = require('./ai-governance');
 const { createBuilderTools } = require('./ai-builder-tools');
-const { createCopilotTools } = require('./ai-copilot-tools');
+const { createOperationalTools } = require('./ai-operational-tools');
 const { createSurfaceAndCreativeTools } = require('./ai-surface-creative-tools');
+const {
+  MEMORY_TOOL_NAMES,
+  MEMORY_TOOL_DEFINITIONS,
+  recallMemories,
+  buildMemoryContextPrompt,
+  executeMemoryTool,
+} = require('./ai-memory');
+const {
+  orchestrateEnterpriseAppBuild,
+  verifyEnterpriseApp,
+  listBuiltApps,
+  rebuildEnterpriseApp,
+  exportAppBundle,
+  teardownBuiltApp,
+  planEnterpriseApp,
+  patchEnterpriseApp,
+  rollbackEnterpriseApp,
+} = require('./app-builder-orchestrator');
+
+const ORCHESTRATOR_OPS = new Set([
+  'build_enterprise_app',
+  'verify_app',
+  'list_built_apps',
+  'rebuild_enterprise_app',
+  'export_app_bundle',
+  'teardown_built_app',
+  'plan_enterprise_app',
+  'patch_enterprise_app',
+  'rollback_enterprise_app',
+]);
 
 const ADMIN_BUILDER_TOOL_NAMES = [
   'dxos_inspect_architecture',
@@ -40,8 +72,10 @@ const ADMIN_BUILDER_TOOL_NAMES = [
 const OPERATIONAL_TOOL_NAMES = [
   'dxos_search_enterprise_context',
   'dxos_execute_record_action',
-  'dxos_my_tasks_copilot',
+  'dxos_my_workflow_tasks',
   'dxos_orchestrate_enterprise_case',
+  'dxos_graph_impact_analysis',
+  'dxos_alarm_action',
 ];
 
 const WRITABLE_BUSINESS_COLLECTIONS = new Set([
@@ -58,11 +92,32 @@ const PROTECTED_SERVER_FIELDS = new Set([
 
 const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
-  'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
+  'applicationPlugins', 'applicationTokens', 'sessions',
+  'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
+  'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',
+  'workflows', 'flow_nodes', 'collections', 'fields',
+  'latticeNotifications', 'latticeSlaPolicies', 'latticeAiApprovalQueue', 'latticeParaChunks',
+  'latticeBuiltApps',
+  'latticeAiMemory',
+  'latticeAiTraces',
+  'latticeAutomationRuleVersions',
+  'latticeA2aTasks',
+  'latticeApprovalPolicies',
+  'latticeApprovalRequests',
+  'latticeNotificationDeliveries',
+  'latticePublicForms',
 ]);
+const SYSTEM_PROTECTED_COLLECTIONS_LOWER = new Set(
+  [...SYSTEM_PROTECTED_COLLECTIONS].map((c) => c.toLowerCase()),
+);
+
+function isProtectedCollection(name) {
+  const s = String(name || '').trim();
+  return SYSTEM_PROTECTED_COLLECTIONS.has(s) || SYSTEM_PROTECTED_COLLECTIONS_LOWER.has(s.toLowerCase());
+}
 
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const FIELD_NAME_RE = /^[a-z][a-zA-Z0-9_]{1,48}$/;
@@ -71,6 +126,7 @@ const ALLOWED_BLOCK_MODELS = [
   'DxosPortalHeroBlockModel', 'DxosKpiMetricBlockModel', 'DxosContextTelemetryBlockModel',
   'DxosAiProposalBlockModel', 'DxosWorkflowTasksBlockModel', 'DxosParaVaultBlockModel',
   'DxosCreativeStudioBlockModel', 'DxosRecordWorkbenchBlockModel',
+  'DxosWebGisBlockModel', 'DxosKanbanScheduleBlockModel', 'DxosWmsOpsBlockModel', 'DxosBiChartBlockModel',
   'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock',
   'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
 ];
@@ -130,7 +186,7 @@ async function isStudioAdmin(ctx, db) {
   });
 }
 
-async function resolveActorScope(ctx, db) {
+async function resolveActorScope(ctx, db, { defaultFallback = 'native-ui-lab' } = {}) {
   const user = ctx?.state?.currentUser || ctx?.auth?.user;
   const userId = val(user, 'id');
   if (!userId) throw failTool('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập để thực thi công cụ.');
@@ -141,7 +197,7 @@ async function resolveActorScope(ctx, db) {
   const empRepo = targetDb?.getRepository?.('latticeEmployees');
   let employee = null;
   if (empRepo) {
-    const rows = (await empRepo.find({ filter: { userId, active: true }, limit: 1 })) || [];
+    const rows = (await runWithSystemRlsBypass(targetDb, () => empRepo.find({ filter: { userId, active: true }, limit: 1 }))) || [];
     employee = rows[0] || null;
   }
   if (!isAdmin && (!employee || !val(employee, 'organizationId'))) {
@@ -151,7 +207,9 @@ async function resolveActorScope(ctx, db) {
     ? String(ctx.state.dxosTargetOrganizationId).trim()
     : '';
   const empOrg = val(employee, 'organizationId') || '';
-  const organizationId = targetOrgOverride || empOrg || String(ctx?.state?.defaultOrgId || 'native-ui-lab');
+  const organizationId = targetOrgOverride
+    || empOrg
+    || (await resolveDefaultOrganizationId(targetDb, { ctx, fallback: defaultFallback }));
   const employeeId = (targetOrgOverride && empOrg && empOrg !== targetOrgOverride)
     ? null
     : (val(employee, 'id') || null);
@@ -179,14 +237,23 @@ function safeGetResource(ctx, resourceName) {
   return null;
 }
 
-async function invokeResourceAction(ctx, resourceName, actionName, { filterByTk, values } = {}) {
+async function invokeResourceAction(ctx, resourceName, actionName, options = {}) {
+  const { filterByTk, values, method, ...extraParams } = options && typeof options === 'object' ? options : {};
   const resource = safeGetResource(ctx, resourceName);
   const handler = resource?.actions?.get?.(actionName)?.handler || resource?.actions?.[actionName];
   if (typeof handler !== 'function') {
     throw failTool('HOST_ACTION_UNAVAILABLE', 503, `Dịch vụ ${resourceName}:${actionName} chưa sẵn sàng.`);
   }
-  const params = { resourceName, actionName, ...(filterByTk != null ? { filterByTk } : {}), ...(values ? { values } : {}) };
+  const params = {
+    resourceName,
+    actionName,
+    ...extraParams,
+    ...(filterByTk != null ? { filterByTk } : {}),
+    ...(values ? { values } : {}),
+  };
   const subCtx = {
+    ...(method ? { method } : {}),
+    ...(method === 'GET' ? { query: { ...extraParams } } : {}),
     app: ctx.app,
     db: ctx.db,
     dataSource: ctx.dataSource || ctx.app?.mainDataSource,
@@ -243,23 +310,77 @@ function createAuditedTool(spec) {
           throw failTool('DXOS_ADMIN_REQUIRED', 403, `Công cụ "${spec.name}" chỉ dành cho Quản trị viên.`);
         }
         const isHitlApprovedReplay = Boolean(ctx?.state?.dxosApprovedQueueId);
+        const aiEmployeeName = String(aiEmployee || '').trim().toLowerCase();
+        if (aiEmployeeName && !isHitlApprovedReplay) {
+          const profRepo = db?.getRepository?.('latticeAiProfiles');
+          if (profRepo && typeof profRepo.findOne === 'function') {
+            const profile = await runWithTenantRls(db, actor.organizationId, () => profRepo.findOne({ filter: { username: aiEmployeeName } }));
+            const matchedUsername = String(val(profile, 'username') || '').trim().toLowerCase();
+            if (profile && (!matchedUsername || matchedUsername === aiEmployeeName)) {
+              if (val(profile, 'enabled') === false) {
+                throw failTool('TOOL_PERMISSION_OFF', 403, `Hồ sơ AI "${aiEmployeeName}" đang bị vô hiệu hóa.`);
+              }
+              const rawPerms = val(profile, 'toolPermissions') ?? val(profile, 'toolPermissionsJson');
+              if (rawPerms && (typeof rawPerms === 'object' || typeof rawPerms === 'string')) {
+                const perms = normalizeToolPermissionsMap(rawPerms);
+                if (Object.prototype.hasOwnProperty.call(perms, spec.name) && String(perms[spec.name] || '').trim().toUpperCase() === 'OFF') {
+                  throw failTool('TOOL_PERMISSION_OFF', 403, `Công cụ ${spec.name} đang tắt trên hồ sơ AI này.`);
+                }
+              }
+            }
+          }
+        }
         if (!isHitlApprovedReplay) {
           await hydrateQuotaBucketFromDb(db, actor.organizationId);
           checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
         }
-        const checked = schemaHelper.validate(rawArgs);
-        if (!checked.ok) throw failTool('TOOL_ARGS_INVALID', 400, checked.error);
-        const result = await spec.run(ctx, db, actor, checked.value);
-        const completionTokens = estimateTokens(result);
+        let normalizedRawArgs = rawArgs;
+        if (typeof normalizedRawArgs === 'string' && normalizedRawArgs.trim().startsWith('{')) {
+          try {
+            normalizedRawArgs = JSON.parse(normalizedRawArgs);
+          } catch {
+            // Preserve malformed JSON string so schemaHelper.validate reports the validation error
+          }
+        }
+        const preparedArgs = typeof spec.prepareArgs === 'function' ? spec.prepareArgs(normalizedRawArgs) : normalizedRawArgs;
+        const checked = schemaHelper.validate(preparedArgs);
+        if (!checked.ok) throw failTool(checked.code || 'TOOL_ARGS_INVALID', 400, checked.error);
+        const skipOuterTx = spec.name === 'dxos_provision_role_workspace'
+          && ORCHESTRATOR_OPS.has(checked.value?.operation);
+        const result = skipOuterTx
+          ? await spec.run(ctx, db, actor, checked.value)
+          : await runWithTenantRls(db, actor.organizationId, () => spec.run(ctx, db, actor, checked.value));
+        const estCompletion = estimateTokens(result);
+        const providerUsage = result?.usage || result?._llmUsage || ctx?.state?.dxosLlmUsage || null;
+        const usageInfo = normalizeTokenUsage(
+          providerUsage
+            ? { usage: providerUsage }
+            : { promptTokens, completionTokens: estCompletion, tokenSource: 'estimated' },
+          promptTokens,
+          estCompletion,
+        );
         const modelName = ctx?.state?.dxosModelName || ctx?.state?.modelName || '';
         const estimatedCostUsd = isHitlApprovedReplay
           ? 0
-          : estimateCostUsd(promptTokens, completionTokens, modelName, process.env);
+          : estimateCostUsd(usageInfo.promptTokens, usageInfo.completionTokens, modelName, process.env);
         const redactedArgs = redactPiiDeep(checked.value);
         const redactedRes = redactPiiText(redactAuditText(JSON.stringify(result).slice(0, 600)));
         const piiRedactedCount = redactedArgs.count + redactedRes.count;
+        const usagePayload = {
+          promptTokens: usageInfo.promptTokens,
+          completionTokens: usageInfo.completionTokens,
+          totalTokens: usageInfo.totalTokens,
+        };
         if (!isHitlApprovedReplay) {
-          await recordQuotaUsagePersistent(db, actor, { promptTokens, completionTokens, costUsd: estimatedCostUsd, piiRedactedCount });
+          await recordQuotaUsagePersistent(db, actor, {
+            promptTokens: usageInfo.promptTokens,
+            completionTokens: usageInfo.completionTokens,
+            totalTokens: usageInfo.totalTokens,
+            usage: providerUsage || usagePayload,
+            tokenSource: usageInfo.tokenSource,
+            costUsd: estimatedCostUsd,
+            piiRedactedCount,
+          });
         }
         await recordAiAuditLog(db, {
           actorUserId: actor.userId,
@@ -271,8 +392,11 @@ function createAuditedTool(spec) {
           argsSummary: redactedArgs.value,
           status: result?.degraded ? 'degraded' : 'allowed',
           durationMs: Date.now() - started,
-          promptTokens,
-          completionTokens,
+          promptTokens: usageInfo.promptTokens,
+          completionTokens: usageInfo.completionTokens,
+          totalTokens: usageInfo.totalTokens,
+          usage: providerUsage || usagePayload,
+          tokenSource: usageInfo.tokenSource,
           estimatedCostUsd,
           piiRedactedCount,
           resultSummary: redactedRes.text,
@@ -293,6 +417,8 @@ function createAuditedTool(spec) {
           durationMs: Date.now() - started,
           promptTokens,
           completionTokens: 0,
+          totalTokens: promptTokens,
+          tokenSource: 'estimated',
           estimatedCostUsd: estimateCostUsd(promptTokens, 0, '', process.env),
           piiRedactedCount: redactedArgs.count + redactedErr.count,
           errorCode: err?.code || 'TOOL_ERROR',
@@ -316,21 +442,345 @@ function createDxosTools() {
     safeGetResource,
     invokeResourceAction,
     createAuditedTool,
+    redactPiiText,
+    redactPiiDeep,
     ADMIN_BUILDER_TOOL_NAMES,
     WRITABLE_BUSINESS_COLLECTIONS,
     PROTECTED_SERVER_FIELDS,
     SYSTEM_PROTECTED_COLLECTIONS,
+    isProtectedCollection,
     CUSTOM_COLLECTION_RE,
     FIELD_NAME_RE,
     SLUG_RE,
     ALLOWED_BLOCK_MODELS,
     SEARCHABLE_COLLECTIONS,
   };
+  const surfaceTools = createSurfaceAndCreativeTools(shared).map((tool) => {
+    if (tool?.definition?.name !== 'dxos_provision_role_workspace') return tool;
+    const orchestratorTool = createAuditedTool({
+      name: 'dxos_provision_role_workspace',
+      adminOnly: true,
+      defaultPermission: 'ASK',
+      introduction: {
+        title: 'Kiến trúc sư Ứng dụng Doanh nghiệp & Phân hệ Mới',
+        about: 'Dựng trọn gói phân hệ (Snapshot + Rich Schema/Relations/RLS/OpenAPI + RBAC + Portal 12 BlockModels + DMN + LatticeFlow v2 + Stock n8n + Verifier & 2-round Self-Healing), lập kế hoạch dry-run (plan_enterprise_app), vá nâng cấp (patch_enterprise_app), hoàn tác (rollback_enterprise_app) hoặc kiểm chứng ứng dụng.',
+      },
+      description: 'End-to-end Multi-Entity Enterprise App Builder & Workspace Architect: provision role/workspace/AI (default), plan_enterprise_app (dry-run ER & diff), build_enterprise_app, patch_enterprise_app, rollback_enterprise_app, verify_app, list_built_apps, rebuild_enterprise_app, export_app_bundle (v3), or teardown_built_app.',
+      schema: {
+        description: 'Role-to-Workspace & Full-Stack Multi-Entity Enterprise App Builder request.',
+        properties: {
+          operation: {
+            type: 'string',
+            default: 'provision_role_workspace',
+            enum: [
+              'provision_role_workspace',
+              'plan_enterprise_app',
+              'build_enterprise_app',
+              'patch_enterprise_app',
+              'rollback_enterprise_app',
+              'verify_app',
+              'list_built_apps',
+              'rebuild_enterprise_app',
+              'export_app_bundle',
+              'teardown_built_app',
+            ],
+          },
+          appKey: { type: 'string', maxLength: 120 },
+          name: { type: 'string', maxLength: 160 },
+          status: { type: 'string', maxLength: 32 },
+          keepData: { type: 'boolean', default: true },
+          specPatch: { type: 'object', description: 'Partial spec update for rebuild_enterprise_app (collections, portals, roles, dmnTables, flowGraphs).' },
+          patch: { type: 'object', description: 'Incremental patch spec for plan_enterprise_app / patch_enterprise_app (addCollections, addFields, updateFields, deprecateFields, addRelations, addBlocks, removeBlocks, addRoles, addFlows, addDmnTables).' },
+          targetSpec: { type: 'object', description: 'Optional full candidate spec for plan_enterprise_app / patch_enterprise_app.' },
+          prompt: { type: 'string', maxLength: 2000, description: 'Natural-language instruction for plan_enterprise_app / patch_enterprise_app.' },
+          editPrompt: { type: 'string', maxLength: 2000 },
+          targetVersion: { type: 'integer', description: 'Target version number for rollback_enterprise_app.' },
+          summary: { type: 'string', maxLength: 300 },
+          collections: {
+            type: 'array',
+            description: 'Multi-Entity custom collections (latticeCustom<Name>), auto topologically sorted (belongsTo/hasMany/hasOne). Never target system tables.',
+            items: {
+              type: 'object',
+              properties: {
+                collectionName: { type: 'string', description: 'Custom collection name matching ^latticeCustom[A-Z][A-Za-z0-9]{1,40}$.' },
+                collectionTitle: { type: 'string', description: 'Human-readable Vietnamese collection title.' },
+                fields: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      name: { type: 'string', description: 'Field name matching ^[a-z][a-zA-Z0-9_]{1,48}$.' },
+                      title: { type: 'string' },
+                      label: { type: 'string' },
+                      type: { type: 'string', enum: ['string', 'text', 'integer', 'float', 'boolean', 'date', 'datetime', 'select', 'enum', 'json', 'jsonb', 'belongsTo', 'hasMany', 'hasOne', 'belongsToMany', 'formula'] },
+                      target: { type: 'string', description: 'Target latticeCustom* or allowlisted business collection when type is belongsTo, hasMany, hasOne, or belongsToMany.' },
+                      through: { type: 'string', description: 'Optional latticeCustom* join collection name for belongsToMany.' },
+                      foreignKey: { type: 'string' },
+                      otherKey: { type: 'string' },
+                      sourceKey: { type: 'string' },
+                      targetKey: { type: 'string' },
+                      formulaExpression: { type: 'string' },
+                      formula: { type: 'string' },
+                      formulaReturnType: { type: 'string', enum: ['float', 'integer', 'string', 'boolean'] },
+                      validation: { type: 'object' },
+                      required: { type: 'boolean' },
+                      unique: { type: 'boolean' },
+                      indexed: { type: 'boolean' },
+                      enum: { type: 'array', items: { type: 'string' } },
+                      enumValues: { type: 'array', items: { type: 'string' } },
+                      defaultValue: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          roles: {
+            type: 'array',
+            description: 'Scoped ldx_* roles provisioned for this app.',
+            items: {
+              type: 'object',
+              properties: {
+                roleName: { type: 'string', description: 'Role name starting with ldx_.' },
+                roleTitle: { type: 'string' },
+                lockedFields: { type: 'array', items: { type: 'string' } },
+                collections: { type: 'array', items: { type: 'string' } },
+                aiUsername: { type: 'string' },
+                aiNickname: { type: 'string' },
+              },
+            },
+          },
+          portals: {
+            type: 'array',
+            description: 'Portal pages & blocks attached to /p/<portalSlug>.',
+            items: {
+              type: 'object',
+              properties: {
+                portalSlug: { type: 'string', description: 'Lowercase portal slug (e.g. services, cold-assets, clinic).' },
+                pageTitle: { type: 'string' },
+                roleName: { type: 'string' },
+                roleTitle: { type: 'string' },
+                collectionName: { type: 'string', description: 'Primary latticeCustom* collection bound to this portal page.' },
+                creativeTheme: { type: 'string', enum: ['industrial-cockpit', 'emerald-ops', 'amber-alert', 'royal-indigo', 'clean-light'] },
+                blocks: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    properties: {
+                      blockUse: { type: 'string', description: 'Allowed BlockModel name (12 Native v2 BlockModels incl. DxosPortalHeroBlockModel, DxosCreativeStudioBlockModel, DxosRecordWorkbenchBlockModel, DxosKanbanScheduleBlockModel, DxosWebGisBlockModel, DxosWmsOpsBlockModel, DxosBiChartBlockModel, TableBlockModel, etc.).' },
+                      title: { type: 'string' },
+                      collection: { type: 'string', description: 'Target latticeCustom* collection for Kanban/WebGIS/RecordWorkbench/BiChart.' },
+                      statusField: { type: 'string' },
+                      dateField: { type: 'string' },
+                      titleField: { type: 'string' },
+                      latField: { type: 'string' },
+                      lngField: { type: 'string' },
+                      labelField: { type: 'string' },
+                      chartType: { type: 'string', enum: ['bar', 'line', 'pie', 'kpi', 'pivot'] },
+                      groupBy: { type: 'string' },
+                      secondaryGroupBy: { type: 'string' },
+                      metricOp: { type: 'string', enum: ['count', 'sum', 'avg', 'min', 'max'] },
+                      metricField: { type: 'string' },
+                      limit: { type: 'integer' },
+                      filterJson: { type: 'string' },
+                      config: { type: 'object' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          dmnTables: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                tableKey: { type: 'string' },
+                name: { type: 'string' },
+                hitPolicy: { type: 'string' },
+                inputsJson: { type: 'array', items: { type: 'object' } },
+                outputsJson: { type: 'array', items: { type: 'object' } },
+                rulesJson: { type: 'array', items: { type: 'object' } },
+              },
+            },
+          },
+          flowGraphs: {
+            type: 'array',
+            items: {
+              type: 'object',
+              properties: {
+                ruleKey: { type: 'string' },
+                name: { type: 'string' },
+                description: { type: 'string' },
+                cooldownSec: { type: 'integer' },
+                graphJson: { type: 'object' },
+              },
+            },
+          },
+          n8nWorkflows: { type: 'array', items: { type: 'object' } },
+          roleName: { type: 'string', maxLength: 42 },
+          roleTitle: { type: 'string', maxLength: 100 },
+          portalSlug: { type: 'string', maxLength: 40 },
+          pageTitle: { type: 'string', maxLength: 100 },
+          collectionName: { type: 'string', maxLength: 64 },
+          collectionTitle: { type: 'string', maxLength: 100 },
+          fields: { type: 'array', items: { type: 'object' } },
+          lockedFields: { type: 'array', items: { type: 'string' } },
+          creativeTheme: { type: 'string', enum: ['industrial-cockpit', 'emerald-ops', 'amber-alert', 'royal-indigo', 'clean-light'], default: 'amber-alert' },
+          blocks: { type: 'array', items: { type: 'object' } },
+          dmnTable: { type: 'object' },
+          dmnTableKey: { type: 'string', maxLength: 80 },
+          flowGraph: { type: 'object' },
+          flowRuleKey: { type: 'string', maxLength: 80 },
+          n8nWorkflow: { type: 'object' },
+          n8nWorkflowId: { type: 'string', maxLength: 80 },
+          n8nConnectorKey: { type: 'string', maxLength: 64 },
+          activateN8n: { type: 'boolean', default: true },
+          maxHealRounds: { type: 'integer', default: 2 },
+          target: { type: 'object' },
+          aiUsername: { type: 'string', maxLength: 60 },
+          aiNickname: { type: 'string', maxLength: 120 },
+          dryRun: { type: 'boolean', default: false },
+        },
+      },
+      async run(ctx, db, actor, args) {
+        if (args.operation === 'plan_enterprise_app') {
+          return planEnterpriseApp(ctx, db, actor, args);
+        }
+        if (args.operation === 'patch_enterprise_app') {
+          return patchEnterpriseApp(ctx, db, actor, args);
+        }
+        if (args.operation === 'rollback_enterprise_app') {
+          return rollbackEnterpriseApp(ctx, db, actor, {
+            appKey: args.appKey,
+            targetVersion: args.targetVersion,
+          });
+        }
+        if (args.operation === 'verify_app') {
+          const target = args.target && typeof args.target === 'object' ? { ...args.target } : {};
+          return verifyEnterpriseApp(ctx, db, actor, {
+            ...target,
+            ...(args.collectionName ? { collectionName: args.collectionName } : {}),
+            ...(args.portalSlug ? { portalSlug: args.portalSlug } : {}),
+            ...(args.pageTitle ? { pageTitle: args.pageTitle } : {}),
+            ...(args.roleName ? { roleName: args.roleName } : {}),
+            ...(args.lockedFields ? { lockedFields: args.lockedFields } : {}),
+            ...(args.dmnTableKey ? { dmnTableKey: args.dmnTableKey } : {}),
+            ...(args.flowRuleKey ? { flowRuleKey: args.flowRuleKey } : {}),
+            ...(args.n8nWorkflowId ? { n8nWorkflowId: args.n8nWorkflowId } : {}),
+          });
+        }
+        if (args.operation === 'list_built_apps') {
+          return listBuiltApps(db, actor, { status: args.status });
+        }
+        if (args.operation === 'rebuild_enterprise_app') {
+          return rebuildEnterpriseApp(ctx, db, actor, {
+            appKey: args.appKey,
+            specPatch: args.specPatch,
+            maxHealRounds: args.maxHealRounds,
+          });
+        }
+        if (args.operation === 'export_app_bundle') {
+          return exportAppBundle(db, actor, { appKey: args.appKey });
+        }
+        if (args.operation === 'teardown_built_app') {
+          return teardownBuiltApp(ctx, db, actor, {
+            appKey: args.appKey,
+            keepData: args.keepData !== false,
+          });
+        }
+        return orchestrateEnterpriseAppBuild(ctx, db, actor, args);
+      },
+    });
+    return {
+      ...orchestratorTool,
+      async invoke(ctx, rawArgs = {}) {
+        let op = rawArgs && typeof rawArgs === 'object' ? rawArgs.operation : undefined;
+        if (!op && typeof rawArgs === 'string' && rawArgs.trim().startsWith('{')) {
+          try { op = JSON.parse(rawArgs).operation; } catch {}
+        }
+        if (ORCHESTRATOR_OPS.has(op)) {
+          return orchestratorTool.invoke(ctx, rawArgs);
+        }
+        return tool.invoke(ctx, rawArgs);
+      },
+    };
+  });
   return [
     ...createBuilderTools(shared),
-    ...createSurfaceAndCreativeTools(shared),
-    ...createCopilotTools(shared),
+    ...surfaceTools,
+    ...createOperationalTools(shared),
+    ...createMemoryTools(),
   ];
+}
+
+function createMemoryTools() {
+  return MEMORY_TOOL_DEFINITIONS.map((def) => createAuditedTool({
+    name: def.name,
+    adminOnly: Boolean(def.adminOnly),
+    defaultPermission: def.defaultPermission || 'ALLOW',
+    introduction: def.introduction,
+    description: def.description,
+    schema: def.schema,
+    async run(ctx, db, actor, args) {
+      const rawSingleScope = args?.scope != null && String(args.scope).trim() !== ''
+        ? String(args.scope).trim().toLowerCase()
+        : '';
+      let parsedScopes = args?.scopes;
+      if (typeof parsedScopes === 'string' && parsedScopes.trim().startsWith('[')) {
+        try { parsedScopes = JSON.parse(parsedScopes); } catch {}
+      }
+      const scopesArr = Array.isArray(parsedScopes)
+        ? parsedScopes.map((s) => String(s || '').trim().toLowerCase()).filter(Boolean)
+        : [];
+      const combinedScopes = [
+        ...(rawSingleScope ? [rawSingleScope] : []),
+        ...scopesArr,
+      ];
+      const scopeList = combinedScopes.length > 0 ? [...new Set(combinedScopes)] : ['org'];
+      const isMutation = def.name === 'dxos_memory_remember' || def.name === 'dxos_memory_forget';
+      for (const targetScope of scopeList) {
+        if (isMutation && targetScope === 'org' && !actor.isAdmin) {
+          throw failTool('MEMORY_ORG_WRITE_FORBIDDEN', 403, 'Chỉ Quản trị viên mới được ghi hoặc xóa bộ nhớ dùng chung phạm vi tổ chức (org).');
+        }
+        if (targetScope === 'agent' && !actor.isAdmin) {
+          throw failTool('MEMORY_AGENT_FORBIDDEN', 403, 'Chỉ Quản trị viên mới được truy cập bộ nhớ nội bộ phạm vi agent.');
+        }
+      }
+      return executeMemoryTool(db, def.name, args, {
+        actor,
+        agentId: ctx?.state?.dxosAiUsername || actor?.aiEmployee || actor?.username || null,
+        sessionId: ctx?.state?.dxosSessionId || ctx?.state?.sessionId || null,
+      });
+    },
+  }));
+}
+
+async function buildAgentMemoryContext(db, actor = {}, options = {}) {
+  if (!db?.getRepository || !db.getRepository('latticeAiMemory')) return '';
+  const organizationId = String(options.organizationId || actor?.organizationId || '').trim();
+  if (!organizationId || organizationId.toLowerCase() === 'all') return '';
+  const scopes = Array.isArray(options.scopes) && options.scopes.length
+    ? options.scopes
+    : ['org', ...(options.agentId || actor?.aiEmployee ? ['agent'] : [])];
+  try {
+    const recalled = await recallMemories(db, {
+      organizationId,
+      scopes,
+      agentId: options.agentId || actor?.aiEmployee || actor?.username || undefined,
+      userId: actor?.userId != null ? String(actor.userId) : undefined,
+      sessionId: options.sessionId || undefined,
+      query: String(options.query || ''),
+      limit: options.limit || 6,
+      touchAccess: options.touchAccess === true,
+    });
+    return buildMemoryContextPrompt(recalled.memories || [], {
+      maxChars: options.maxChars || 2400,
+      maxItems: options.maxItems || 8,
+    });
+  } catch {
+    return '';
+  }
 }
 
 const OWN_SCOPED_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
@@ -402,9 +852,11 @@ function registerDxosToolsWithHost(appOrPlugin) {
 module.exports = {
   ADMIN_BUILDER_TOOL_NAMES,
   OPERATIONAL_TOOL_NAMES,
+  MEMORY_TOOL_NAMES,
   WRITABLE_BUSINESS_COLLECTIONS,
   PROTECTED_SERVER_FIELDS,
   SYSTEM_PROTECTED_COLLECTIONS,
+  isProtectedCollection,
   CUSTOM_COLLECTION_RE,
   FIELD_NAME_RE,
   SLUG_RE,
@@ -419,7 +871,12 @@ module.exports = {
   isRowVisibleToActor,
   safeGetResource,
   invokeResourceAction,
+  normalizeToolPermissionsMap,
   createAuditedTool,
+  createMemoryTools,
+  buildMemoryContextPrompt,
+  recallMemories,
+  buildAgentMemoryContext,
   createDxosTools,
   registerDxosToolsWithHost,
 };

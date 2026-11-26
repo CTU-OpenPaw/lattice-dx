@@ -1,0 +1,187 @@
+{
+  "blueprintKey": "auto_procurement_hitl_approval",
+  "ruleKey": "auto_procurement_hitl_approval",
+  "name": "Phê duyệt Mua sắm HITL Giám đốc theo Ngưỡng Ngân sách",
+  "description": "Kích hoạt khi tạo mới bản ghi trên latticeRequests: nếu amount > 50.000.000 VNĐ thì tạm dừng chờ Giám đốc (ldx_manager) phê duyệt HITL; được duyệt sẽ cập nhật ngân sách và báo ldx_operator, từ chối sẽ báo ldx_employee.",
+  "category": "erp-procurement",
+  "triggerEventType": "record.latticeRequests.create",
+  "dmnTableKey": null,
+  "cooldownSec": 0,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "record.latticeRequests.create",
+    "source": "dxos-studio:orm",
+    "subject": "REQ-PROC-001",
+    "data": {
+      "id": 42,
+      "code": "REQ-PROC-001",
+      "name": "Mua máy nén dự phòng hệ thống kho",
+      "category": "equipment",
+      "amount": 75000000,
+      "currency": "VND"
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_request_create",
+        "type": "trigger.record",
+        "label": "Tạo yêu cầu mua sắm (latticeRequests)",
+        "position": { "x": 80, "y": 280 },
+        "config": {
+          "collection": "latticeRequests",
+          "operation": "create",
+          "filterJson": null
+        }
+      },
+      {
+        "id": "if_over_50m",
+        "type": "control.if",
+        "label": "Giá trị vượt 50 triệu VNĐ?",
+        "position": { "x": 360, "y": 280 },
+        "config": {
+          "condition": {
+            "field": "data.amount",
+            "op": "gt",
+            "value": 50000000
+          }
+        }
+      },
+      {
+        "id": "approval_director",
+        "type": "control.approval",
+        "label": "HITL Giám đốc phê duyệt",
+        "position": { "x": 640, "y": 140 },
+        "config": {
+          "approverRole": "ldx_manager",
+          "title": "Phê duyệt mua sắm vượt ngưỡng: {{data.code}}",
+          "summary": "Yêu cầu {{data.name}} ({{data.code}}) có giá trị {{data.amount}} VNĐ vượt ngưỡng 50.000.000 VNĐ cần Giám đốc phê duyệt.",
+          "riskLevel": "high",
+          "ttlHours": 24
+        }
+      },
+      {
+        "id": "update_approved_budget",
+        "type": "data.update",
+        "label": "Cập nhật trạng thái ngân sách đã duyệt",
+        "position": { "x": 920, "y": 60 },
+        "config": {
+          "collection": "latticeRequests",
+          "recordId": "{{data.id}}",
+          "filter": {
+            "id": "{{data.id}}"
+          },
+          "values": {
+            "priority": "approved_budget",
+            "decisionReason": "Giám đốc đã phê duyệt ngân sách qua cổng HITL"
+          }
+        }
+      },
+      {
+        "id": "notify_operator_approved",
+        "type": "notify.send",
+        "label": "Thông báo vận hành triển khai mua sắm",
+        "position": { "x": 1200, "y": 60 },
+        "config": {
+          "roleNames": ["ldx_operator"],
+          "category": "procurement",
+          "severity": "info",
+          "title": "Yêu cầu {{data.code}} đã được duyệt ngân sách",
+          "body": "Giám đốc đã phê duyệt HITL yêu cầu {{data.name}} ({{data.amount}} VNĐ); tiến hành đặt hàng.",
+          "targetCollection": "latticeRequests",
+          "targetRecordId": "{{data.id}}",
+          "targetPath": "/p/procurement"
+        }
+      },
+      {
+        "id": "notify_employee_rejected",
+        "type": "notify.send",
+        "label": "Thông báo nhân viên yêu cầu bị từ chối",
+        "position": { "x": 920, "y": 220 },
+        "config": {
+          "roleNames": ["ldx_employee"],
+          "category": "procurement",
+          "severity": "warning",
+          "title": "Yêu cầu mua sắm {{data.code}} bị từ chối",
+          "body": "Yêu cầu {{data.name}} ({{data.amount}} VNĐ) chưa được Giám đốc phê duyệt ngân sách.",
+          "targetCollection": "latticeRequests",
+          "targetRecordId": "{{data.id}}",
+          "targetPath": "/p/procurement"
+        }
+      },
+      {
+        "id": "notify_operator_standard",
+        "type": "notify.send",
+        "label": "Thông báo xử lý hạn mức tiêu chuẩn",
+        "position": { "x": 640, "y": 420 },
+        "config": {
+          "roleNames": ["ldx_operator"],
+          "category": "procurement",
+          "severity": "info",
+          "title": "Yêu cầu mua sắm tiêu chuẩn {{data.code}}",
+          "body": "Yêu cầu {{data.name}} ({{data.amount}} VNĐ) nằm trong hạn mức chuẩn, chuyển xử lý trực tiếp.",
+          "targetCollection": "latticeRequests",
+          "targetRecordId": "{{data.id}}",
+          "targetPath": "/p/procurement"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_trig_if",
+        "source": "trig_request_create",
+        "sourceHandle": "main",
+        "target": "if_over_50m",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_if_approval",
+        "source": "if_over_50m",
+        "sourceHandle": "true",
+        "target": "approval_director",
+        "targetHandle": "in",
+        "label": "> 50.000.000 VNĐ"
+      },
+      {
+        "id": "e_approval_update",
+        "source": "approval_director",
+        "sourceHandle": "approved",
+        "target": "update_approved_budget",
+        "targetHandle": "in",
+        "label": "Phê duyệt"
+      },
+      {
+        "id": "e_update_notify",
+        "source": "update_approved_budget",
+        "sourceHandle": "main",
+        "target": "notify_operator_approved",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_approval_reject",
+        "source": "approval_director",
+        "sourceHandle": "rejected",
+        "target": "notify_employee_rejected",
+        "targetHandle": "in",
+        "label": "Từ chối"
+      },
+      {
+        "id": "e_if_standard",
+        "source": "if_over_50m",
+        "sourceHandle": "false",
+        "target": "notify_operator_standard",
+        "targetHandle": "in",
+        "label": "<= 50.000.000 VNĐ"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 0,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

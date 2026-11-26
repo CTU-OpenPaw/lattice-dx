@@ -10,7 +10,7 @@
 
 const { existsSync } = require('node:fs');
 const { createAuditedTool, resolveReadablePolicies, failTool, val } = require('./ai-tools-core');
-const { validateMcpServerUrl } = require('./ai-schemas');
+const { validateMcpServerUrl, getEnvDefaultOrgId } = require('./ai-schemas');
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const DISPATCH_ALLOWED_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_manager', 'ldx_dispatcher']);
@@ -267,28 +267,66 @@ function createItOtMcpTools(dbArg, env = process.env, fetchImpl = globalThis.fet
   ];
 }
 
+async function listActiveOrganizationIds(db, env = process.env) {
+  const orgs = [];
+  const orgRepo = db?.getRepository?.('latticeOrganizations');
+  if (orgRepo && typeof orgRepo.find === 'function') {
+    try {
+      const rows = (await orgRepo.find({ limit: 100 })) || [];
+      for (const row of rows) {
+        const orgId = String(val(row, 'organizationId') || '').trim();
+        if (!orgId || orgId.toLowerCase() === 'all') continue;
+        if (val(row, 'active') === false) continue;
+        const st = String(val(row, 'status') || 'active').trim().toLowerCase();
+        if (st === 'inactive' || st === 'disabled') continue;
+        if (!orgs.includes(orgId)) orgs.push(orgId);
+      }
+    } catch {
+      // Non-fatal in minimal mock harnesses
+    }
+  }
+  const envOrg = getEnvDefaultOrgId(env);
+  if (envOrg && !orgs.includes(envOrg)) orgs.unshift(envOrg);
+  return orgs;
+}
+
+async function countActiveAutomationRules(db, organizations = []) {
+  if (Array.isArray(organizations) && organizations.length > 0) {
+    const counts = await Promise.all(
+      organizations.map((orgId) => safeCount(db, 'latticeAutomationRules', { organizationId: orgId, active: true })),
+    );
+    return counts.reduce((sum, n) => sum + Number(n || 0), 0);
+  }
+  return safeCount(db, 'latticeAutomationRules', { active: true });
+}
+
 async function buildEnterpriseTopology(db, env = process.env, fetchImpl = globalThis.fetch, app = null) {
   const urls = resolveServiceUrls(env);
   const nocobaseVersion = await resolveHostVersion(env, db?.app?.version, app?.version);
-  const [orion, n8n, keycloak, rolesCount, assetsCount, outboxPending, workflowsCount, portalsCount, paraCount, profilesCount, auditCount, collectionsCount] = await Promise.all([
+  const organizations = await listActiveOrganizationIds(db, env);
+  const [orion, n8n, keycloak, rolesCount, assetsCount, outboxPending, nocobaseWorkflowsCount, automationRulesCount, portalsCount, paraCount, profilesCount, auditCount, collectionsCount] = await Promise.all([
     probeService(`${urls.orionUrl}/version`, fetchImpl),
     probeService(`${urls.n8nUrl}/healthz`, fetchImpl),
     probeService(`${urls.keycloakUrl}/realms/lattice`, fetchImpl),
     safeCount(db, 'roles', {}),
     safeCount(db, 'latticeAssets', {}),
     safeCount(db, 'latticeContextOutbox', { state: 'pending' }),
-    safeCount(db, 'workflows', { current: true }),
+    safeCount(db, 'workflows', { enabled: true }),
+    countActiveAutomationRules(db, organizations),
     safeCount(db, 'uiLayouts', {}),
     safeCount(db, 'latticeParaDocuments', {}),
     safeCount(db, 'latticeAiProfiles', { enabled: true }),
     safeCount(db, 'latticeAiAuditLogs', {}),
     safeCount(db, 'collections', {}),
   ]);
+  const workflowsCount = Number(automationRulesCount || 0) + Number(nocobaseWorkflowsCount || 0);
 
   return {
     platform: 'LatticeDX Enterprise Digital OS (DX-OS)',
     nocobaseVersion,
     generatedAt: new Date().toISOString(),
+    organizations,
+    defaultOrganizationId: organizations[0] || null,
     positioningStatement: `NocoBase ${nocobaseVersion} đóng vai trò phân hệ dữ liệu & metadata ứng dụng (Plane #6) bên dưới kiến trúc điều phối 6 phân hệ của LatticeDX.`,
     clause52Preserved: true,
     planes: [

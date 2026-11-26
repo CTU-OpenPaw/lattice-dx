@@ -534,7 +534,10 @@ test('decideApproval handles concurrency (single execution), expiry 409, root ov
     assert.ok(allowed.includes('dxosAi:approveAction:loggedIn'));
     assert.ok(allowed.includes('dxosAi:rejectAction:loggedIn'));
 
-    const hitlGuard = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiHitlScope')?.fn;
+    const hitlEntry = rmMiddlewares.find((m) => m.opts?.tag === 'dxosAiHitlScope');
+    assert.equal(hitlEntry?.opts?.after, 'acl');
+    assert.equal(hitlEntry?.opts?.before, 'latticeNativeScope');
+    const hitlGuard = hitlEntry?.fn;
     assert.equal(typeof hitlGuard, 'function');
     await assert.rejects(
       () => hitlGuard({ state: { currentUser: { id: 10 }, currentRole: 'ldx_manager' }, action: { resourceName: 'latticeAiApprovalQueue', actionName: 'update', params: {} } }, async () => {}),

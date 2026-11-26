@@ -28,7 +28,7 @@ function grant(name,role) {
   return {name,dataSourceKey:'main',usingActionsConfig:true,actions};
 }
 function rolePresets() {
-  const names={employee:'Nhân viên',manager:'Quản lý',warehouse:'Kho',dispatcher:'Điều phối',driver:'Tài xế',director:'Giám đốc (chỉ đọc)',admin:'Quản trị nghiệp vụ'};
+  const names={employee:'Nhân viên',manager:'Quản lý',operator:'Vận hành',warehouse:'Kho',dispatcher:'Điều phối',driver:'Tài xế',director:'Giám đốc (chỉ đọc)',admin:'Quản trị nghiệp vụ'};
   return Object.entries(names).map(([key,title])=>({name:'ldx_'+key,title:'Lattice — '+title,allowConfigure:false,allowNewMenu:false,allowNewAiEmployee:false,strategy:{actions:[]},snippets:[],resources:['latticeRequests','latticeOrders','latticeDepartments','latticeEmployees','latticeLocations','latticeAssets'].map(name=>grant(name,key))}));
 }
 async function installRolePresets(db) {

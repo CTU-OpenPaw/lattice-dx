@@ -8,9 +8,94 @@
  */
 'use strict';
 
+const { createDxosGovernanceConsoles, GOVERNANCE_SECTIONS } = require('./governance-consoles');
+const { createBuilderBrokerPanels, parseJsonSafe } = require('./builder-broker-panels');
+const { createFlowPinStorage } = require('./flow-pin-storage');
+const { createPublicFormBuilderPanel } = require('./public-form-builder');
+const { createApprovalInboxPanel } = require('./approval-inbox-panel');
+
+const VALID_STUDIO_TABS = new Set([
+  'workflows',
+  'portals',
+  'plugins',
+  'pof',
+  'outbox',
+  'gitops',
+  'broker',
+  'automation',
+  'builder',
+  'forms',
+  'approvals',
+]);
+
+const STUDIO_NAV_GROUPS = Object.freeze([
+  {
+    id: 'apps-data',
+    label: 'Ứng dụng & Dữ liệu',
+    items: [
+      ['portals', 'Portal Composer (Đa-Block)'],
+      ['builder', 'Visual Domain Builder & Tenant'],
+      ['forms', 'Biểu mẫu Công khai'],
+      ['gitops', 'GitOps Bundle v3'],
+    ],
+  },
+  {
+    id: 'workflows-approvals',
+    label: 'Quy trình & Phê duyệt',
+    items: [
+      ['workflows', 'Mẫu Quy trình & SLA'],
+      ['approvals', 'Hộp thư Phê duyệt Thống nhất'],
+    ],
+  },
+  {
+    id: 'integrations-ops',
+    label: 'Tích hợp & Vận hành',
+    items: [
+      ['automation', 'Vault & Automation Rules'],
+      ['broker', 'Broker & Sự kiện'],
+      ['outbox', 'Hàng đợi Outbox & DLQ'],
+      ['plugins', 'Hệ sinh thái 7 Plugin'],
+      ['pof', 'Sẵn sàng PoF & Hệ thống'],
+    ],
+  },
+]);
+
+const SPACE_LABELS = Object.freeze({
+  '[H]': 'Con người',
+  '[P]': 'Quy trình',
+  '[D]': 'Dữ liệu',
+  '[I]': 'AI',
+  '[W]': 'Chứng từ',
+});
+
+function formatPluginSpaces(spaces) {
+  return (Array.isArray(spaces) ? spaces : [])
+    .map((sp) => SPACE_LABELS[sp] || String(sp || '').replace(/^\[|\]$/g, ''))
+    .filter(Boolean)
+    .join(' · ');
+}
+
+function readInitialStudioTab() {
+  try {
+    const search = typeof window !== 'undefined' && window.location ? window.location.search : '';
+    const raw = new URLSearchParams(search || '').get('tab') || '';
+    return VALID_STUDIO_TABS.has(raw) ? raw : 'workflows';
+  } catch {
+    return 'workflows';
+  }
+}
+
 function createDxosStudioSettingsPage(client, React, antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const GovernanceConsoles = createDxosGovernanceConsoles(client, React, antd, app);
+  const {
+    BrokerAndEventsPanel,
+    VaultAndAutomationPanel,
+    DomainBuilderAndTenantsPanel,
+  } = createBuilderBrokerPanels(client, React, antd, app);
+  const PublicFormBuilderPanel = createPublicFormBuilderPanel(client, React, antd, app);
+  const ApprovalInboxPanel = createApprovalInboxPanel(client, React, antd, app);
 
   function openRoute(path) {
     const url = app?.getRouteUrl?.(path) || path;
@@ -20,7 +105,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
   return function DxosStudioSettingsPage() {
     const api = useApi();
-    const [tab, setTab] = React.useState('workflows');
+    const [tab, setTab] = React.useState(readInitialStudioTab);
     const [loading, setLoading] = React.useState(true);
     const [templates, setTemplates] = React.useState([]);
     const [employees, setEmployees] = React.useState([]);
@@ -38,6 +123,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [bundleText, setBundleText] = React.useState('');
     const [bundleInfo, setBundleInfo] = React.useState(null);
     const [enableBundleWorkflows, setEnableBundleWorkflows] = React.useState(false);
+    const [govSection, setGovSection] = React.useState('api-keys');
 
     const loadAll = React.useCallback(async () => {
       if (!api?.request) { setLoading(false); return; }
@@ -190,6 +276,9 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           workflows: Array.isArray(b.workflows) ? b.workflows.length : 0,
           customCollections: Array.isArray(b.customCollections) ? b.customCollections.length : 0,
           aiProfiles: Array.isArray(b.aiProfiles) ? b.aiProfiles.length : 0,
+          governance: (Array.isArray(b?.governance?.decisionTables) ? b.governance.decisionTables.length : 0)
+            + (Array.isArray(b?.governance?.slaPolicies) ? b.governance.slaPolicies.length : 0)
+            + (Array.isArray(b?.governance?.incidentRules) ? b.governance.incidentRules.length : 0),
         };
         setBundleText(JSON.stringify(b, null, 2));
         setBundleInfo({
@@ -234,7 +323,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       setBusyAction(true);
       setFeedback(null);
       try {
-        const parsed = JSON.parse(bundleText || '{}');
+        const parsed = parseJsonSafe(bundleText || '{}');
         const res = await api.request({
           url: 'dxosStudio:solutionBundleImport',
           method: 'post',
@@ -301,15 +390,6 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       }
     }
 
-    const tabItems = [
-      ['workflows', '1. Quy trình Poka-yoke'],
-      ['portals', '2. Dựng cổng đa-block'],
-      ['plugins', '3. Hệ sinh thái 7 Plugin'],
-      ['pof', '4. Sẵn sàng PoF & Hệ thống'],
-      ['outbox', '5. Hàng đợi Outbox & DLQ'],
-      ['gitops', '6. GitOps Bundle'],
-    ];
-
     const btnStyle = (primary = false, danger = false, disabled = false) => ({
       padding: '8px 14px',
       borderRadius: 8,
@@ -337,6 +417,21 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           : '#1e293b',
     });
 
+    const railBtnStyle = (active = false) => ({
+      width: '100%',
+      textAlign: 'left',
+      padding: '7px 10px',
+      borderRadius: 8,
+      cursor: 'pointer',
+      fontSize: 12,
+      fontWeight: active ? 700 : 500,
+      border: active ? '1px solid #93c5fd' : '1px solid transparent',
+      background: active ? '#eff6ff' : 'transparent',
+      color: active ? '#1d4ed8' : '#334155',
+      lineHeight: 1.35,
+      boxSizing: 'border-box',
+    });
+
     if (forbidden) {
       return h('div', { 'data-testid': 'dxos-studio-forbidden', style: { padding: 24, maxWidth: 720, margin: '24px auto', borderRadius: 12, border: '1px solid #fecaca', background: '#fef2f2', color: '#991b1b' } },
         h('h2', { style: { margin: '0 0 8px', fontSize: 18 } }, '403 — Chỉ Quản trị viên mới truy cập được DX-OS Control Studio'),
@@ -347,25 +442,100 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
     const requiredCount = activeTemplate?.requiredBindings?.length || 0;
     const missingCrew = Boolean(activeTemplate && selectedOrg && orgEmployees.length < requiredCount);
+    const isGovernanceTab = tab === 'governance' || GOVERNANCE_SECTIONS.some((s) => s.id === tab);
+    const activeGovSection = tab === 'governance' ? govSection : (isGovernanceTab ? tab : govSection);
 
-    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '24px 24px 64px', maxWidth: 1120, margin: '0 auto', display: 'grid', gap: 16 } },
+    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '20px 24px 64px', maxWidth: 1320, margin: '0 auto', display: 'grid', gap: 16 } },
+      h('style', null, [
+        '@media (max-width: 1023px) {',
+        '  .dxos-studio-shell { flex-direction: column !important; }',
+        '  .dxos-studio-sidebar { width: 100% !important; flex: none !important; }',
+        '  .dxos-studio-nav-group-items { flex-direction: row !important; flex-wrap: wrap !important; }',
+        '  .dxos-studio-nav-group-items > button { width: auto !important; }',
+        '}',
+      ].join('\n')),
       h('div', { style: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'center' } },
         h('div', null,
-          h('h1', { style: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#0f172a' } }, 'DX-OS Control Studio — Xây dựng Hệ thống từ NocoBase'),
-          h('p', { style: { margin: 0, color: '#475569', fontSize: 13 } }, 'Cài mẫu quy trình Poka-yoke, dựng cổng đa-block kết hợp Block tùy biến, quản lý hệ sinh thái 7 plugin Open-Core và kiểm tra PoF.'),
+          h('h1', { style: { margin: '0 0 6px', fontSize: 22, fontWeight: 700, color: '#0f172a' } }, 'DX-OS Control Studio — Quản trị & Xây dựng Hệ thống'),
+          h('p', { style: { margin: 0, color: '#475569', fontSize: 13 } }, 'Thiết kế phân hệ dữ liệu, dựng cổng đa-block, cài mẫu quy trình, cấu hình bảng quyết định DMN và kiểm tra sẵn sàng hệ thống.'),
         ),
-        h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở AI Workforce & 6-Plane Center'),
+        h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở Trung tâm AI Workforce & 6 Không gian'),
       ),
-      h('div', { role: 'tablist', style: { display: 'flex', flexWrap: 'nowrap', gap: 6, overflowX: 'auto', paddingBottom: 4 } },
-        tabItems.map(([k, label]) => h('button', {
-          key: k,
-          type: 'button',
-          role: 'tab',
-          'aria-selected': tab === k,
-          onClick: () => setTab(k),
-          style: { ...btnStyle(tab === k), padding: '6px 10px', fontSize: 12, whiteSpace: 'nowrap', flexShrink: 0 },
-        }, label)),
-      ),
+      h('div', {
+        className: 'dxos-studio-shell',
+        'data-testid': 'dxos-studio-shell',
+        style: { display: 'flex', alignItems: 'flex-start', gap: 18 },
+      },
+        h('aside', {
+          className: 'dxos-studio-sidebar',
+          'data-testid': 'dxos-studio-sidebar',
+          style: {
+            width: 224,
+            flex: '0 0 224px',
+            borderRadius: 12,
+            border: '1px solid #e2e8f0',
+            background: '#f8fafc',
+            padding: 12,
+            display: 'grid',
+            gap: 14,
+            boxSizing: 'border-box',
+          },
+        },
+          h('div', {
+            role: 'tablist',
+            'aria-orientation': 'vertical',
+            'aria-label': 'Danh mục DX-OS Studio',
+            style: { display: 'flex', flexDirection: 'column', gap: 12 },
+          },
+            STUDIO_NAV_GROUPS.map((grp) => h('div', { key: grp.id, 'data-testid': `dxos-studio-nav-group-${grp.id}`, style: { display: 'grid', gap: 4 } },
+              h('div', { style: { fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', padding: '0 6px' } }, grp.label),
+              h('div', { className: 'dxos-studio-nav-group-items', style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+                grp.items.map(([k, label]) => h('button', {
+                  key: k,
+                  type: 'button',
+                  role: 'tab',
+                  'data-testid': `dxos-studio-tab-${k}`,
+                  'aria-selected': tab === k,
+                  onClick: () => { setTab(k); setFeedback(null); },
+                  style: railBtnStyle(tab === k),
+                }, label)),
+              ),
+            )),
+          ),
+          h('div', {
+            role: 'navigation',
+            'aria-label': 'Quản trị & Quyết định DX-OS',
+            'data-testid': 'dxos-studio-governance-nav',
+            style: { display: 'grid', gap: 4, paddingTop: 10, borderTop: '1px solid #e2e8f0' },
+          },
+            h('div', { style: { fontSize: 11, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em', color: '#64748b', padding: '0 6px' } }, 'Quản trị & Quyết định'),
+            h('div', { className: 'dxos-studio-nav-group-items', style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+              GOVERNANCE_SECTIONS.map((sec) => {
+                const active = isGovernanceTab && activeGovSection === sec.id;
+                return h('button', {
+                  key: sec.id,
+                  type: 'button',
+                  'data-testid': `dxos-studio-tab-${sec.id}`,
+                  'aria-pressed': active,
+                  onClick: () => { setTab('governance'); setGovSection(sec.id); setFeedback(null); },
+                  style: railBtnStyle(active),
+                }, sec.label);
+              }),
+            ),
+          ),
+          h('div', { style: { paddingTop: 10, borderTop: '1px solid #e2e8f0' } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-studio-link-connectors',
+              onClick: () => openRoute('/admin/settings/workflow/connectors'),
+              style: { ...railBtnStyle(false), color: '#0369a1', background: '#f0f9ff', border: '1px solid #bae6fd' },
+            }, 'Ứng dụng Kết nối (Stock n8n) ↗'),
+          ),
+        ),
+        h('main', {
+          'data-testid': 'dxos-studio-content',
+          style: { flex: 1, minWidth: 0, display: 'grid', gap: 14 },
+        },
       feedback ? h('div', {
         role: 'status',
         style: {
@@ -454,7 +624,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
               h('span', { style: { color: p.enabled ? '#166534' : '#9a3412', fontSize: 11 } }, p.enabled ? 'Đang bật' : 'Đang tắt'),
             ),
             h('div', { style: { fontSize: 12, color: '#64748b' } }, `${p.packageName} v${p.version} · ${p.license}`),
-            h('div', { style: { fontSize: 11, color: '#4f46e5', marginTop: 4 } }, `Không gian: ${(p.spaces || []).join(' ')}`),
+            h('div', { style: { fontSize: 11, color: '#4f46e5', marginTop: 4 } }, `Phạm vi: ${formatPluginSpaces(p.spaces)}`),
           )),
         ),
       ) : null,
@@ -510,7 +680,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
       tab === 'gitops' ? h('div', { 'data-testid': 'dxos-studio-gitops-bundle-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-          h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle v2 (Schema · RBAC · Portals · Workflows · AI)'),
+          h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle v3 (Schema · RBAC · Portals · Workflows · AI · Governance)'),
           h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('button', { type: 'button', disabled: busyAction, onClick: handleExportBundle, style: btnStyle(true, false, busyAction) }, 'Xuất Bundle JSON'),
             h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: handleDownloadBundle, style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Tải tệp .json'),
@@ -538,6 +708,24 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
             ['workflows', 'Quy trình', bundleInfo?.applied?.workflowsUpserted, bundleInfo?.diff?.sections?.workflows, bundleInfo?.counts?.workflows],
             ['customCollections', 'Bảng tùy biến', bundleInfo?.applied?.customCollectionsUpserted, bundleInfo?.diff?.sections?.customCollections, bundleInfo?.counts?.customCollections],
             ['aiProfiles', 'Nhân sự AI', bundleInfo?.applied?.aiProfilesUpserted, bundleInfo?.diff?.sections?.aiProfiles, bundleInfo?.counts?.aiProfiles],
+            ['governance', 'Quản trị Governance', (() => {
+              const ap = bundleInfo?.applied;
+              if (!ap || (ap.decisionTablesUpserted === undefined && ap.slaPoliciesUpserted === undefined && ap.incidentRulesUpserted === undefined)) return undefined;
+              return Number(ap.decisionTablesUpserted || 0) + Number(ap.slaPoliciesUpserted || 0) + Number(ap.incidentRulesUpserted || 0);
+            })(), (() => {
+              const parts = [
+                bundleInfo?.diff?.sections?.decisionTables || bundleInfo?.diff?.governance?.decisionTables,
+                bundleInfo?.diff?.sections?.slaPolicies || bundleInfo?.diff?.governance?.slaPolicies,
+                bundleInfo?.diff?.sections?.incidentRules || bundleInfo?.diff?.governance?.incidentRules,
+              ].filter(Boolean);
+              if (!parts.length) return undefined;
+              return {
+                added: parts.flatMap((s) => s.added || []),
+                changed: parts.flatMap((s) => s.changed || []),
+                unchanged: parts.flatMap((s) => s.unchanged || []),
+                removed: parts.flatMap((s) => s.removed || []),
+              };
+            })(), bundleInfo?.counts?.governance],
           ].map(([key, label, appliedCount, diffObj, expCount]) => {
             const removedCount = diffObj?.removed?.length || 0;
             const diffSummary = diffObj
@@ -558,13 +746,65 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         h('textarea', {
           value: bundleText,
           onChange: (e) => setBundleText(e.target.value),
-          placeholder: 'Dán hoặc xuất JSON latticedx.solution-bundle/v2 (hỗ trợ cả v1) tại đây…',
+          placeholder: 'Dán hoặc xuất JSON latticedx.solution-bundle/v3 (hỗ trợ cả v1/v2) tại đây…',
           rows: 10,
           style: { width: '100%', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12 },
         }),
       ) : null,
+
+      tab === 'broker' ? h(BrokerAndEventsPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'automation' ? h(VaultAndAutomationPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'builder' ? h(DomainBuilderAndTenantsPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'forms' ? h(PublicFormBuilderPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      tab === 'approvals' ? h(ApprovalInboxPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
+
+      isGovernanceTab ? h(GovernanceConsoles, {
+        api,
+        activeSection: activeGovSection,
+        onSelectSection: (nextSec) => { setTab('governance'); setGovSection(nextSec); },
+        selectedOrg,
+        organizations,
+        employees,
+        openRoute,
+      }) : null,
+        ),
+      ),
     );
   };
 }
 
-module.exports = { createDxosStudioSettingsPage };
+module.exports = { createDxosStudioSettingsPage, createFlowPinStorage, STUDIO_NAV_GROUPS };

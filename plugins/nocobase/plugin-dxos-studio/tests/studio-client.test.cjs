@@ -104,6 +104,8 @@ test('plugin-dxos-studio renders Tab 6 GitOps Solution Bundle panel cleanly', as
   const tree = Page();
   const dump = JSON.stringify(tree);
   assert.ok(dump.includes('dxos-studio-gitops-bundle-panel'), 'Studio UI should present Tab 6 GitOps Bundle panel');
+  assert.ok(dump.includes('GitOps Solution Bundle v3'), 'Studio UI Tab 6 should present GitOps Solution Bundle v3 heading');
+  assert.ok(dump.includes('latticedx.solution-bundle/v3 (hỗ trợ cả v1/v2)'), 'Studio UI Tab 6 should present Bundle v3 placeholder');
 });
 
 function collectNodes(node, pred, out = []) {
@@ -144,21 +146,44 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
     return Page();
   };
 
-  // Tab bar a11y + single-row styling
+  // Categorized vertical left-rail navigation + 11 tabs + responsive collapse under 1024px
   const wfTree = renderTab('workflows');
+  const sidebar = collectNodes(wfTree, (n) => n.props?.['data-testid'] === 'dxos-studio-sidebar')[0];
+  assert.ok(sidebar, 'Expected left-rail sidebar');
+  assert.equal(sidebar.props.style.width, 224);
   const tablists = collectNodes(wfTree, (n) => n.props?.role === 'tablist');
   assert.equal(tablists.length, 1);
-  assert.equal(tablists[0].props.style.flexWrap, 'nowrap');
-  assert.equal(tablists[0].props.style.overflowX, 'auto');
+  assert.equal(tablists[0].props['aria-orientation'], 'vertical');
   const tabs = collectNodes(tablists[0], (n) => n.props?.role === 'tab');
-  assert.equal(tabs.length, 6);
-  assert.equal(tabs[0].props['aria-selected'], true);
-  assert.equal(tabs[1].props['aria-selected'], false);
+  assert.equal(tabs.length, 11);
+  const wfTab = tabs.find((t) => t.props['data-testid'] === 'dxos-studio-tab-workflows');
+  const portTab = tabs.find((t) => t.props['data-testid'] === 'dxos-studio-tab-portals');
+  assert.equal(wfTab.props['aria-selected'], true);
+  assert.equal(portTab.props['aria-selected'], false);
+  const tabIds = new Set(tabs.map((t) => t.props['data-testid']));
+  for (const expectedId of [
+    'dxos-studio-tab-workflows',
+    'dxos-studio-tab-portals',
+    'dxos-studio-tab-plugins',
+    'dxos-studio-tab-pof',
+    'dxos-studio-tab-outbox',
+    'dxos-studio-tab-gitops',
+    'dxos-studio-tab-broker',
+    'dxos-studio-tab-automation',
+    'dxos-studio-tab-builder',
+    'dxos-studio-tab-forms',
+    'dxos-studio-tab-approvals',
+  ]) {
+    assert.ok(tabIds.has(expectedId), `Missing tab ${expectedId}`);
+  }
+  const treeDump = JSON.stringify(wfTree);
+  assert.ok(treeDump.includes('Ứng dụng & Dữ liệu'));
+  assert.ok(treeDump.includes('Quy trình & Phê duyệt'));
+  assert.ok(treeDump.includes('Tích hợp & Vận hành'));
+  assert.equal(/\[P\]|\[D\]|\[H\]|\[W\]/.test(treeDump), false, 'Studio UI must not expose raw [P]/[D]/[H]/[W] tags');
   for (const t of tabs) {
-    assert.equal(t.props.style.whiteSpace, 'nowrap');
-    assert.equal(t.props.style.flexShrink, 0);
     assert.equal(t.props.style.fontSize, 12);
-    assert.equal(t.props.style.padding, '6px 10px');
+    assert.equal(t.props.style.width, '100%');
   }
 
   // Disabled workflow install button uses muted grey style
@@ -282,8 +307,8 @@ test('plugin-dxos-studio Tab 6 renders download .json, rollback button, and per-
   assert.ok(rollbackBtn, 'Tab 6 should render "Hoàn tác Import gần nhất" button');
   assert.equal(downloadBtn.props.disabled, false);
 
-  // Per-section counts displayed for all 6 sections including removed count
-  for (const sectionKey of ['roles', 'roleResources', 'portals', 'workflows', 'customCollections', 'aiProfiles']) {
+  // Per-section counts displayed for all sections including governance and removed count
+  for (const sectionKey of ['roles', 'roleResources', 'portals', 'workflows', 'customCollections', 'aiProfiles', 'governance']) {
     assert.ok(dump.includes(sectionKey), `Tab 6 should display per-section count for ${sectionKey}`);
   }
   assert.ok(dump.includes('-1'), 'Tab 6 diffSummary should display removed count when removed has items');

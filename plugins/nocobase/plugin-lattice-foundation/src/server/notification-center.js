@@ -9,6 +9,14 @@
 'use strict';
 
 const { resolveNativeActor } = require('./native-scope');
+const { callerRoles } = require('./native-portal-helpers');
+const { assertSafeConnectorUrl, assertSafeConnectorUrlAsync } = require('./connector-vault');
+const {
+  canUsePgRlsSession,
+  getActiveRlsContext,
+  runInRlsSavepoint,
+  withTenantRlsContext,
+} = require('./pg-rls');
 
 const VALID_CATEGORIES = new Set(['mention', 'voucher', 'sla', 'alarm', 'approval', 'system']);
 const VALID_SEVERITIES = new Set(['info', 'warning', 'high', 'critical']);
@@ -44,58 +52,48 @@ function resolveNotificationTargetPath(targetCollection) {
   return COLLECTION_PORTAL_PATHS[col] || '/admin/lattice-workspace';
 }
 
-function isBlockedIpv4(host) {
-  const parts = host.split('.');
-  if (parts.length !== 4 || !parts.every((p) => /^\d{1,3}$/.test(p))) return false;
-  const octets = parts.map(Number);
-  if (octets.some((n) => n < 0 || n > 255)) return true;
-  const [a, b] = octets;
-  if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  return false;
+function resolveNotificationPortalSlug(targetPath, explicitSlug = null) {
+  const cleanExplicit = typeof explicitSlug === 'string' ? explicitSlug.trim().toLowerCase() : '';
+  if (cleanExplicit && /^[a-z0-9_-]{1,64}$/.test(cleanExplicit)) return cleanExplicit;
+  const clean = String(targetPath || '').split('?')[0].split('#')[0].trim();
+  const pMatch = /^\/p\/([a-z0-9_-]{1,64})(?:\/|$)/i.exec(clean);
+  if (pMatch) return pMatch[1].toLowerCase();
+  if (clean === '/v/mobile' || clean.startsWith('/v/mobile/') || clean === '/mobile' || clean.startsWith('/mobile/')) {
+    return 'mobile';
+  }
+  if (clean === '/admin' || clean.startsWith('/admin/')) return 'admin';
+  return '*';
 }
 
-function isBlockedIpv6(bareHost) {
-  if (!bareHost.includes(':')) return false;
-  return (
-    bareHost === '::'
-    || bareHost === '::1'
-    || bareHost.startsWith('::ffff:')
-    || /^fe[89ab][0-9a-f]?:/i.test(bareHost)
-    || /^f[cd][0-9a-f]{0,2}:/i.test(bareHost)
-    || /^ff[0-9a-f]{2}:/i.test(bareHost)
-  );
+async function publishNotificationSurfaceUpdate(app, payload) {
+  try {
+    await app?.pubSubManager?.publish?.('latticedx:surface-updates', payload);
+  } catch {
+    // Non-fatal pub/sub forward
+  }
 }
 
 function isSafeExternalWebhookUrl(rawUrl) {
-  const trimmed = String(rawUrl || '').trim();
-  if (!trimmed || trimmed.length > 2048) return false;
-  let parsed;
   try {
-    parsed = new URL(trimmed);
+    assertSafeConnectorUrl(rawUrl, { connectorType: 'webhook', allowInternal: false });
+    return true;
   } catch {
     return false;
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-  if (parsed.username || parsed.password) return false;
-  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
-  if (!bare) return false;
-  if (
-    bare === 'localhost'
-    || bare.endsWith('.localhost')
-    || bare.endsWith('.local')
-    || bare.endsWith('.internal')
-    || bare === 'metadata.google.internal'
-    || bare === 'metadata.azure.com'
-  ) {
+}
+
+async function isSafeExternalWebhookUrlAsync(rawUrl, { lookupImpl, skipDnsCheck = false } = {}) {
+  try {
+    await assertSafeConnectorUrlAsync(rawUrl, {
+      connectorType: 'webhook',
+      allowInternal: false,
+      lookupImpl,
+      skipDnsCheck,
+    });
+    return true;
+  } catch {
     return false;
   }
-  if (isBlockedIpv6(bare)) return false;
-  if (isBlockedIpv4(bare)) return false;
-  return true;
 }
 
 async function sendJsonWebhook(fetchImpl, url, payload) {
@@ -139,32 +137,238 @@ function serializeNotification(row) {
   };
 }
 
-function channelAllowed(notifyChannels, channelName) {
-  if (!Array.isArray(notifyChannels) || notifyChannels.length === 0) return true;
-  return notifyChannels.includes(channelName) || notifyChannels.includes('all') || notifyChannels.includes('external');
+const PROTO_POLLUTION_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function copySafePlainConfig(obj) {
+  const clean = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (PROTO_POLLUTION_KEYS.has(k) || !Object.hasOwn(obj, k)) continue;
+    clean[k] = v;
+  }
+  return clean;
 }
 
-async function dispatchExternalChannels({ env, fetchImpl, notification, notifyChannels }) {
-  if (typeof fetchImpl !== 'function' || !env || typeof env !== 'object') return [];
+function normalizeNotificationChannelName(rawChannel) {
+  const ch = String(rawChannel || '').trim().toLowerCase();
+  if (ch === 'email' || ch === 'email_smtp' || ch === 'smtp_notify') return 'smtp';
+  if (ch === 'partner_webhook') return 'webhook';
+  return ch;
+}
 
+function normalizeNotifyChannels(notifyChannels) {
+  if (!Array.isArray(notifyChannels)) return notifyChannels;
+  const out = [];
+  const seen = new Set();
+  for (const entry of notifyChannels) {
+    if (typeof entry === 'string') {
+      const canonical = normalizeNotificationChannelName(entry);
+      if (!canonical || seen.has(canonical)) continue;
+      seen.add(canonical);
+      out.push(canonical);
+    } else if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+      const cleanEntry = copySafePlainConfig(entry);
+      const canonical = typeof cleanEntry.channel === 'string'
+        ? normalizeNotificationChannelName(cleanEntry.channel)
+        : '';
+      if (canonical) {
+        if (seen.has(canonical)) continue;
+        seen.add(canonical);
+        cleanEntry.channel = canonical;
+      }
+      out.push(cleanEntry);
+    }
+  }
+  return out;
+}
+
+function channelAllowed(notifyChannels, channelName) {
+  if (!Array.isArray(notifyChannels) || notifyChannels.length === 0) return true;
+  const target = normalizeNotificationChannelName(channelName);
+  return notifyChannels.some((entry) => {
+    const raw = typeof entry === 'string'
+      ? entry
+      : (entry && typeof entry === 'object' && typeof entry.channel === 'string' ? entry.channel : '');
+    const canonical = normalizeNotificationChannelName(raw);
+    return canonical === target || canonical === 'all' || canonical === 'external';
+  });
+}
+
+function normalizeNotificationChannelConfigs(notifyChannels, channelConfig, channelConfigs, templateKey) {
+  const cleanTemplateKey = typeof templateKey === 'string' && templateKey.trim()
+    ? templateKey.trim().slice(0, 120)
+    : null;
+  const seenExternal = new Set();
+  const externalChannels = [];
+  if (Array.isArray(notifyChannels)) {
+    for (const raw of notifyChannels) {
+      if (typeof raw !== 'string') continue;
+      const canonical = normalizeNotificationChannelName(raw);
+      if (!canonical || canonical === 'in_app' || seenExternal.has(canonical)) continue;
+      seenExternal.add(canonical);
+      externalChannels.push(canonical);
+    }
+  }
+
+  if (Array.isArray(channelConfigs) && channelConfigs.length > 0) {
+    const out = [];
+    const seenCanonical = new Set();
+    for (const cfg of channelConfigs) {
+      if (cfg && typeof cfg === 'object' && !Array.isArray(cfg)) {
+        const cleanCfg = copySafePlainConfig(cfg);
+        const canonical = typeof cleanCfg.channel === 'string'
+          ? normalizeNotificationChannelName(cleanCfg.channel)
+          : '';
+        if (canonical === 'in_app') continue;
+        if (canonical) {
+          if (seenCanonical.has(canonical)) continue;
+          seenCanonical.add(canonical);
+          cleanCfg.channel = canonical;
+        }
+        if (cleanTemplateKey && !cleanCfg.templateKey) {
+          cleanCfg.templateKey = cleanTemplateKey;
+        }
+        out.push(cleanCfg);
+      } else if (typeof cfg === 'string') {
+        const canonical = normalizeNotificationChannelName(cfg);
+        if (!canonical || canonical === 'in_app' || seenCanonical.has(canonical)) continue;
+        seenCanonical.add(canonical);
+        out.push(cleanTemplateKey && canonical !== 'all' && canonical !== 'external'
+          ? { channel: canonical, templateKey: cleanTemplateKey }
+          : canonical);
+      }
+    }
+    return out;
+  }
+
+  if (channelConfig && typeof channelConfig === 'object' && !Array.isArray(channelConfig)) {
+    const baseCfg = copySafePlainConfig(channelConfig);
+    if (cleanTemplateKey && !baseCfg.templateKey) {
+      baseCfg.templateKey = cleanTemplateKey;
+    }
+    const targetChannel = typeof baseCfg.channel === 'string'
+      ? normalizeNotificationChannelName(baseCfg.channel)
+      : '';
+    if (targetChannel) {
+      if (targetChannel === 'in_app') {
+        return externalChannels.map((ch) => {
+          if (ch === 'all' || ch === 'external') return ch;
+          return cleanTemplateKey ? { channel: ch, templateKey: cleanTemplateKey } : ch;
+        });
+      }
+      baseCfg.channel = targetChannel;
+      const out = [baseCfg];
+      for (const ch of externalChannels) {
+        if (ch === 'all' || ch === 'external' || ch === targetChannel) continue;
+        out.push(cleanTemplateKey ? { channel: ch, templateKey: cleanTemplateKey } : ch);
+      }
+      return out;
+    }
+    if (externalChannels.length > 0) {
+      return externalChannels.map((ch) => {
+        if (ch === 'all' || ch === 'external') return ch;
+        return { ...baseCfg, channel: ch };
+      });
+    }
+  }
+
+  if (cleanTemplateKey && externalChannels.length > 0) {
+    return externalChannels.map((ch) => {
+      if (ch === 'all' || ch === 'external') return ch;
+      return { channel: ch, templateKey: cleanTemplateKey };
+    });
+  }
+
+  return [];
+}
+
+async function dispatchExternalChannels({
+  db = null,
+  app = null,
+  env,
+  fetchImpl,
+  lookupImpl,
+  enforceDnsInMock = false,
+  allowInternal,
+  netConnectImpl,
+  tlsConnectImpl,
+  tlsOptions,
+  notification,
+  notifyChannels,
+  channelConfigs = [],
+  skipOmnichannel = false,
+}) {
+  const vaultChannels = [];
+  const normalizedNotifyChannels = normalizeNotifyChannels(notifyChannels);
+  const hasChannelConfigs = Array.isArray(channelConfigs) && channelConfigs.length > 0;
+  const hasExternalNotifyChannels = Array.isArray(normalizedNotifyChannels)
+    && normalizedNotifyChannels.some((entry) => {
+      if (typeof entry === 'string') {
+        return Boolean(entry) && entry !== 'in_app';
+      }
+      return Boolean(entry && typeof entry === 'object');
+    });
+
+  if (!skipOmnichannel && db && (hasChannelConfigs || (db.getRepository?.('latticeConnectors') && hasExternalNotifyChannels))) {
+    try {
+      const adapter = typeof app?.latticeOmnichannelNotify?.createNotificationCenterAdapter === 'function'
+        ? app.latticeOmnichannelNotify.createNotificationCenterAdapter()
+        : require('./omnichannel-notify').createNotificationCenterAdapter();
+      if (typeof adapter === 'function') {
+        const omniRes = await adapter(
+          db,
+          { notification, notifyChannels: normalizedNotifyChannels, channelConfigs },
+          {
+            env,
+            fetchImpl,
+            lookupImpl,
+            enforceDnsInMock,
+            ...(allowInternal !== undefined ? { allowInternal } : {}),
+            ...(netConnectImpl ? { netConnectImpl } : {}),
+            ...(tlsConnectImpl ? { tlsConnectImpl } : {}),
+            ...(tlsOptions ? { tlsOptions } : {}),
+          },
+        );
+        if (Array.isArray(omniRes?.channelsDispatched)) {
+          for (const ch of omniRes.channelsDispatched) {
+            const canonical = normalizeNotificationChannelName(ch);
+            if (canonical && !vaultChannels.includes(canonical)) {
+              vaultChannels.push(canonical);
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-fatal Vault omnichannel fallback; env channels below may still dispatch
+    }
+  }
+
+  if (typeof fetchImpl !== 'function' || !env || typeof env !== 'object') {
+    return vaultChannels;
+  }
+
+  const isMockFetch = fetchImpl !== globalThis.fetch;
+  const skipDnsCheck = isMockFetch && typeof lookupImpl !== 'function' && !enforceDnsInMock;
   const tasks = [];
   const appriseUrl = String(env.DX_APPRISE_URL || '').trim();
-  if (appriseUrl && channelAllowed(notifyChannels, 'apprise') && isSafeExternalWebhookUrl(appriseUrl)) {
+  if (appriseUrl && !vaultChannels.includes('apprise') && channelAllowed(normalizedNotifyChannels, 'apprise') && isSafeExternalWebhookUrl(appriseUrl)) {
     const typeMap = { critical: 'failure', high: 'failure', warning: 'warning', info: 'info' };
-    tasks.push(
-      sendJsonWebhook(fetchImpl, appriseUrl, {
+    tasks.push((async () => {
+      if (!(await isSafeExternalWebhookUrlAsync(appriseUrl, { lookupImpl, skipDnsCheck }))) return null;
+      const ok = await sendJsonWebhook(fetchImpl, appriseUrl, {
         title: notification.title,
         body: notification.body || notification.title,
         type: typeMap[notification.severity] || 'info',
         tag: notification.category,
-      }).then((ok) => (ok ? 'apprise' : null)),
-    );
+      });
+      return ok ? 'apprise' : null;
+    })());
   }
 
   const webhookUrl = String(env.DX_NOTIFICATION_WEBHOOK_URL || '').trim();
-  if (webhookUrl && channelAllowed(notifyChannels, 'webhook') && isSafeExternalWebhookUrl(webhookUrl)) {
-    tasks.push(
-      sendJsonWebhook(fetchImpl, webhookUrl, {
+  if (webhookUrl && !vaultChannels.includes('webhook') && channelAllowed(normalizedNotifyChannels, 'webhook') && isSafeExternalWebhookUrl(webhookUrl)) {
+    tasks.push((async () => {
+      if (!(await isSafeExternalWebhookUrlAsync(webhookUrl, { lookupImpl, skipDnsCheck }))) return null;
+      const ok = await sendJsonWebhook(fetchImpl, webhookUrl, {
         event: 'lattice.notification',
         id: notification.id,
         organizationId: notification.organizationId,
@@ -177,29 +381,56 @@ async function dispatchExternalChannels({ env, fetchImpl, notification, notifyCh
         targetRecordId: notification.targetRecordId,
         targetPath: notification.targetPath,
         createdAt: notification.createdAt,
-      }).then((ok) => (ok ? 'webhook' : null)),
-    );
+      });
+      return ok ? 'webhook' : null;
+    })());
   }
 
   const tgToken = String(env.DX_TELEGRAM_BOT_TOKEN || '').trim();
   const tgChat = String(env.DX_TELEGRAM_CHAT_ID || '').trim();
-  if (tgToken && tgChat && channelAllowed(notifyChannels, 'telegram') && TELEGRAM_TOKEN_RE.test(tgToken) && TELEGRAM_CHAT_RE.test(tgChat)) {
+  if (tgToken && tgChat && !vaultChannels.includes('telegram') && channelAllowed(normalizedNotifyChannels, 'telegram') && TELEGRAM_TOKEN_RE.test(tgToken) && TELEGRAM_CHAT_RE.test(tgChat)) {
     const tgUrl = `https://api.telegram.org/bot${tgToken}/sendMessage`;
-    tasks.push(
-      sendJsonWebhook(fetchImpl, tgUrl, {
+    tasks.push((async () => {
+      if (!(await isSafeExternalWebhookUrlAsync(tgUrl, { lookupImpl, skipDnsCheck }))) return null;
+      const ok = await sendJsonWebhook(fetchImpl, tgUrl, {
         chat_id: tgChat,
         text: `[${String(notification.severity || 'info').toUpperCase()}] ${notification.title}${notification.body ? `\n${notification.body}` : ''}`,
         disable_web_page_preview: true,
-      }).then((ok) => (ok ? 'telegram' : null)),
-    );
+      });
+      return ok ? 'telegram' : null;
+    })());
   }
 
-  if (!tasks.length) return [];
+  if (!tasks.length) return vaultChannels;
   const outcomes = await Promise.all(tasks);
-  return outcomes.filter(Boolean);
+  return [...new Set([...vaultChannels, ...outcomes.filter(Boolean)])];
 }
 
-async function dispatchNotification(db, payload = {}, { env = process.env, fetchImpl = globalThis.fetch, transaction = null } = {}) {
+function runNotifTenantDb(db, organizationId, fn, explicitTx = null) {
+  const activeTx = explicitTx || getActiveRlsContext()?.transaction || null;
+  if (!canUsePgRlsSession(db) || activeTx || !organizationId) {
+    return fn(activeTx || undefined);
+  }
+  return withTenantRlsContext(db, organizationId, (tx) => fn(tx));
+}
+
+async function dispatchNotification(
+  db,
+  payload = {},
+  {
+    env = process.env,
+    fetchImpl = globalThis.fetch,
+    lookupImpl,
+    enforceDnsInMock = false,
+    allowInternal,
+    netConnectImpl,
+    tlsConnectImpl,
+    tlsOptions,
+    skipOmnichannel = false,
+    transaction = null,
+    app = null,
+  } = {},
+) {
   const organizationId = typeof payload.organizationId === 'string' ? payload.organizationId.trim() : '';
   if (!ORG_RE.test(organizationId)) {
     throw failNotif('NOTIFICATION_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ cho thông báo.');
@@ -220,27 +451,6 @@ async function dispatchNotification(db, payload = {}, { env = process.env, fetch
   const dedupKey = typeof payload.dedupKey === 'string' && payload.dedupKey.trim()
     ? payload.dedupKey.trim().slice(0, 255)
     : null;
-
-  if (dedupKey && typeof repo.find === 'function') {
-    const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
-    const recent = (await repo.find({
-      filter: { organizationId, recipientUserId, dedupKey },
-      sort: ['-id'],
-      limit: 10,
-      ...(transaction ? { transaction } : {}),
-    })) || [];
-    const hit = recent.find((row) => {
-      if (val(row, 'organizationId') !== organizationId) return false;
-      if (Number(val(row, 'recipientUserId')) !== recipientUserId) return false;
-      if (val(row, 'dedupKey') !== dedupKey) return false;
-      const createdAtRaw = val(row, 'createdAt');
-      const createdMs = createdAtRaw ? new Date(createdAtRaw).getTime() : Date.now();
-      return Number.isFinite(createdMs) && createdMs > cutoffMs;
-    });
-    if (hit) {
-      return { ...serializeNotification(hit), deduplicated: true, skipped: true };
-    }
-  }
 
   const rawCategory = String(payload.category || 'system').trim().toLowerCase();
   const category = VALID_CATEGORIES.has(rawCategory) ? rawCategory : 'system';
@@ -274,30 +484,96 @@ async function dispatchNotification(db, payload = {}, { env = process.env, fetch
     active: true,
   };
 
-  const created = await repo.create({ values, ...(transaction ? { transaction } : {}) });
-  const serialized = serializeNotification(created || values);
+  const persisted = await runNotifTenantDb(db, organizationId, async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    if (dedupKey && typeof repo.find === 'function') {
+      const cutoffMs = Date.now() - DEDUP_WINDOW_MS;
+      const recent = (await repo.find({
+        filter: { organizationId, recipientUserId, dedupKey },
+        sort: ['-id'],
+        limit: 10,
+        ...txOpt,
+      })) || [];
+      const hit = recent.find((row) => {
+        if (val(row, 'organizationId') !== organizationId) return false;
+        if (Number(val(row, 'recipientUserId')) !== recipientUserId) return false;
+        if (val(row, 'dedupKey') !== dedupKey) return false;
+        const createdAtRaw = val(row, 'createdAt');
+        const createdMs = createdAtRaw ? new Date(createdAtRaw).getTime() : Date.now();
+        return Number.isFinite(createdMs) && createdMs > cutoffMs;
+      });
+      if (hit) {
+        return { dedupResult: { ...serializeNotification(hit), deduplicated: true, skipped: true } };
+      }
+    }
+
+    const created = await repo.create({ values, ...txOpt });
+    return { created, serialized: serializeNotification(created || values) };
+  }, transaction);
+
+  if (persisted.dedupResult) {
+    return persisted.dedupResult;
+  }
+
+  const { created, serialized } = persisted;
+  const effectiveApp = app || payload.app || db?.app || null;
+  const channelConfigs = normalizeNotificationChannelConfigs(
+    payload.notifyChannels,
+    payload.channelConfig,
+    payload.channelConfigs,
+    payload.templateKey,
+  );
   const externalChannels = await dispatchExternalChannels({
+    db,
+    app: effectiveApp,
     env,
     fetchImpl,
+    lookupImpl,
+    enforceDnsInMock,
+    allowInternal,
+    netConnectImpl,
+    tlsConnectImpl,
+    tlsOptions,
     notification: serialized,
     notifyChannels: payload.notifyChannels,
+    channelConfigs,
+    skipOmnichannel: Boolean(payload.skipOmnichannel || skipOmnichannel),
   });
 
   const channelsDispatched = ['in_app', ...externalChannels];
   if (externalChannels.length > 0) {
     try {
-      if (typeof created?.update === 'function') {
-        await created.update({ channelsDispatched }, transaction ? { transaction } : undefined);
-      } else if (typeof repo.update === 'function' && serialized.id != null) {
-        await repo.update({ filterByTk: serialized.id, values: { channelsDispatched }, ...(transaction ? { transaction } : {}) });
-      }
+      const applyChannelPatch = async (tx) => {
+        const txOpt = tx ? { transaction: tx } : {};
+        if (typeof created?.update === 'function') {
+          await created.update({ channelsDispatched }, tx ? { transaction: tx } : undefined);
+        } else if (typeof repo.update === 'function' && serialized.id != null) {
+          await repo.update({ filterByTk: serialized.id, values: { channelsDispatched }, ...txOpt });
+        }
+      };
+      await runNotifTenantDb(db, organizationId, (tx) => (
+        tx && getActiveRlsContext()?.transaction === tx
+          ? runInRlsSavepoint(db, applyChannelPatch)
+          : applyChannelPatch(tx)
+      ), transaction);
     } catch {}
   }
+
+  await publishNotificationSurfaceUpdate(effectiveApp, {
+    kind: 'notification',
+    type: 'notification',
+    portalSlug: resolveNotificationPortalSlug(serialized.targetPath, payload.portalSlug),
+    organizationId,
+    recipientUserId,
+    notificationId: serialized.id ?? null,
+    category,
+    severity,
+  });
 
   return { ...serialized, channelsDispatched, deduplicated: false, skipped: false };
 }
 
-async function resolveEmployeeUsersForRoles(db, organizationId, roleNames) {
+async function resolveEmployeeUsersForRoles(db, organizationId, roleNames, { transaction = null } = {}) {
   const empRepo = db?.getRepository?.('latticeEmployees');
   if (!empRepo || typeof empRepo.find !== 'function') return [];
   const targetRoles = new Set(
@@ -307,67 +583,74 @@ async function resolveEmployeeUsersForRoles(db, organizationId, roleNames) {
   );
   if (!targetRoles.size) return [];
 
-  const employees = (await empRepo.find({ filter: { organizationId, active: true }, limit: 1000 })) || [];
-  const activeWithUser = [];
-  for (const emp of employees) {
-    if (val(emp, 'active') !== true || val(emp, 'organizationId') !== organizationId) continue;
-    const uid = val(emp, 'userId');
-    if (uid == null || !/^[1-9]\d*$/.test(String(uid))) continue;
-    activeWithUser.push({
-      employeeId: Number(val(emp, 'id')),
-      userId: Number(uid),
-    });
-  }
-  if (!activeWithUser.length) return [];
-
-  const userIds = [...new Set(activeWithUser.map((e) => e.userId))];
-  const allowedUserIds = new Set();
-  const ruRepo = db.getRepository?.('rolesUsers');
-  if (ruRepo && typeof ruRepo.find === 'function') {
-    const bindings = (await ruRepo.find({
-      filter: { userId: { $in: userIds }, roleName: { $in: [...targetRoles] } },
-      limit: 2000,
-    })) || [];
-    for (const row of bindings) {
-      const uid = Number(val(row, 'userId'));
-      const rName = String(val(row, 'roleName') || '').trim();
-      if (userIds.includes(uid) && targetRoles.has(rName)) {
-        allowedUserIds.add(uid);
-      }
+  return runNotifTenantDb(db, organizationId, async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    const employees = (await empRepo.find({ filter: { organizationId, active: true }, limit: 1000, ...txOpt })) || [];
+    const activeWithUser = [];
+    for (const emp of employees) {
+      if (val(emp, 'active') !== true || val(emp, 'organizationId') !== organizationId) continue;
+      const uid = val(emp, 'userId');
+      if (uid == null || !/^[1-9]\d*$/.test(String(uid))) continue;
+      activeWithUser.push({
+        employeeId: Number(val(emp, 'id')),
+        userId: Number(uid),
+      });
     }
-  } else {
-    const usersRepo = db.getRepository?.('users');
-    if (usersRepo && typeof usersRepo.find === 'function') {
-      const users = (await usersRepo.find({
-        filter: { id: { $in: userIds } },
-        appends: ['roles'],
-        limit: 1000,
+    if (!activeWithUser.length) return [];
+
+    const userIds = [...new Set(activeWithUser.map((e) => e.userId))];
+    const allowedUserIds = new Set();
+    const ruRepo = db.getRepository?.('rolesUsers');
+    if (ruRepo && typeof ruRepo.find === 'function') {
+      const bindings = (await ruRepo.find({
+        filter: { userId: { $in: userIds }, roleName: { $in: [...targetRoles] } },
+        limit: 2000,
+        ...txOpt,
       })) || [];
-      for (const u of users) {
-        const uid = Number(val(u, 'id'));
-        const uRoles = Array.isArray(val(u, 'roles')) ? val(u, 'roles') : [];
-        if (uRoles.some((r) => targetRoles.has(typeof r === 'string' ? r : val(r, 'name')))) {
+      for (const row of bindings) {
+        const uid = Number(val(row, 'userId'));
+        const rName = String(val(row, 'roleName') || '').trim();
+        if (userIds.includes(uid) && targetRoles.has(rName)) {
           allowedUserIds.add(uid);
         }
       }
+    } else {
+      const usersRepo = db.getRepository?.('users');
+      if (usersRepo && typeof usersRepo.find === 'function') {
+        const users = (await usersRepo.find({
+          filter: { id: { $in: userIds } },
+          appends: ['roles'],
+          limit: 1000,
+          ...txOpt,
+        })) || [];
+        for (const u of users) {
+          const uid = Number(val(u, 'id'));
+          const uRoles = Array.isArray(val(u, 'roles')) ? val(u, 'roles') : [];
+          if (uRoles.some((r) => targetRoles.has(typeof r === 'string' ? r : val(r, 'name')))) {
+            allowedUserIds.add(uid);
+          }
+        }
+      }
     }
-  }
 
-  const seenUsers = new Set();
-  const targets = [];
-  for (const item of activeWithUser) {
-    if (!allowedUserIds.has(item.userId) || seenUsers.has(item.userId)) continue;
-    seenUsers.add(item.userId);
-    targets.push(item);
-  }
-  return targets;
+    const seenUsers = new Set();
+    const targets = [];
+    for (const item of activeWithUser) {
+      if (!allowedUserIds.has(item.userId) || seenUsers.has(item.userId)) continue;
+      seenUsers.add(item.userId);
+      targets.push(item);
+    }
+    return targets;
+  }, transaction);
 }
 
 async function dispatchRoleNotifications(db, { organizationId, roleNames = [], ...rest } = {}, options = {}) {
   if (!ORG_RE.test(String(organizationId || '').trim())) {
     throw failNotif('NOTIFICATION_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ.');
   }
-  const targets = await resolveEmployeeUsersForRoles(db, organizationId, roleNames);
+  const targets = await resolveEmployeeUsersForRoles(db, organizationId, roleNames, {
+    transaction: options.transaction || null,
+  });
   const results = [];
   let dispatchedCount = 0;
   let skippedCount = 0;
@@ -423,14 +706,52 @@ function registerNotificationCenter(app) {
     return next();
   }, { tag: 'latticeNotificationScopeGuard', after: 'acl' });
 
-  const resolveScopedUser = async (ctx) => {
+  const isVerifiedRoot = async (ctx) => {
+    const roles = callerRoles(ctx);
+    if (!roles.includes('root')) return false;
+    const uid = val(ctx?.state?.currentUser, 'id');
+    const ruRepo = db?.getRepository?.('rolesUsers');
+    if (ruRepo && typeof ruRepo.find === 'function' && uid != null) {
+      const bindings = (await ruRepo.find({ filter: { userId: Number(uid) } })) || [];
+      return bindings.some((b) => String(val(b, 'roleName') || '').trim() === 'root');
+    }
+    return true;
+  };
+
+  const resolveScopedUser = async (ctx, { allowRootWithoutEmployee = false } = {}) => {
     if (!ctx?.state?.currentUser) throw failNotif('NATIVE_LOGIN_REQUIRED', 401);
-    const actor = await resolveNativeActor(db, ctx.state.currentUser);
-    return {
-      organizationId: actor.organizationId,
-      userId: Number(actor.userId),
-      employeeId: actor.employeeId,
-    };
+    const empRepo = db?.getRepository?.('latticeEmployees');
+    if (!empRepo && allowRootWithoutEmployee && (await isVerifiedRoot(ctx))) {
+      return {
+        organizationId: null,
+        userId: Number(val(ctx.state.currentUser, 'id')) || null,
+        employeeId: null,
+        rootWithoutOrg: true,
+      };
+    }
+    try {
+      const actor = await resolveNativeActor(db, ctx.state.currentUser);
+      return {
+        organizationId: actor.organizationId,
+        userId: Number(actor.userId),
+        employeeId: actor.employeeId,
+        rootWithoutOrg: false,
+      };
+    } catch (err) {
+      if (
+        allowRootWithoutEmployee
+        && ['NATIVE_EMPLOYEE_NOT_FOUND', 'NATIVE_MEMBERSHIP_REQUIRED', 'NATIVE_MEMBERSHIP_INVALID'].includes(err?.code)
+        && (await isVerifiedRoot(ctx))
+      ) {
+        return {
+          organizationId: null,
+          userId: Number(val(ctx.state.currentUser, 'id')) || null,
+          employeeId: null,
+          rootWithoutOrg: true,
+        };
+      }
+      throw err;
+    }
   };
 
   app.resourceManager.define({
@@ -438,7 +759,11 @@ function registerNotificationCenter(app) {
     actions: {
       listMine: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
-        const { organizationId, userId } = await resolveScopedUser(ctx);
+        const { organizationId, userId, rootWithoutOrg } = await resolveScopedUser(ctx, { allowRootWithoutEmployee: true });
+        if (rootWithoutOrg) {
+          ctx.body = { organizationId: null, total: 0, unreadCount: 0, items: [] };
+          return next();
+        }
         const params = readParams(ctx);
         const limit = Math.max(1, Math.min(100, Math.floor(Number(params.limit) || 30)));
         const page = Math.max(1, Math.min(10000, Math.floor(Number(params.page) || 1)));
@@ -457,17 +782,22 @@ function registerNotificationCenter(app) {
           ...(category ? { category } : {}),
           ...(unreadOnly ? { readAt: null } : {}),
         };
-        const rows = (await repo.find({
-          filter: listFilter,
-          sort: ['-createdAt', '-id'],
-          offset: (page - 1) * limit,
-          limit,
-        })) || [];
-        const total = typeof repo.count === 'function' ? await repo.count({ filter: listFilter }) : rows.length;
-        const unreadFilter = { ...baseFilter, readAt: null };
-        const unreadCount = typeof repo.count === 'function'
-          ? await repo.count({ filter: unreadFilter })
-          : ((await repo.find({ filter: unreadFilter, limit: 500 })) || []).length;
+        const { rows, total, unreadCount } = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const foundRows = (await repo.find({
+            filter: listFilter,
+            sort: ['-createdAt', '-id'],
+            offset: (page - 1) * limit,
+            limit,
+            ...txOpt,
+          })) || [];
+          const foundTotal = typeof repo.count === 'function' ? await repo.count({ filter: listFilter, ...txOpt }) : foundRows.length;
+          const unreadFilter = { ...baseFilter, readAt: null };
+          const foundUnread = typeof repo.count === 'function'
+            ? await repo.count({ filter: unreadFilter, ...txOpt })
+            : ((await repo.find({ filter: unreadFilter, limit: 500, ...txOpt })) || []).length;
+          return { rows: foundRows, total: foundTotal, unreadCount: foundUnread };
+        });
 
         ctx.body = {
           organizationId,
@@ -480,16 +810,23 @@ function registerNotificationCenter(app) {
 
       unreadCount: async (ctx, next) => {
         if ((ctx.method || 'GET') !== 'GET') ctx.throw(405);
-        const { organizationId, userId } = await resolveScopedUser(ctx);
+        const { organizationId, userId, rootWithoutOrg } = await resolveScopedUser(ctx, { allowRootWithoutEmployee: true });
+        if (rootWithoutOrg) {
+          ctx.body = { organizationId: null, unreadCount: 0 };
+          return next();
+        }
         const repo = db.getRepository('latticeNotifications');
         if (!repo) {
           ctx.body = { organizationId, unreadCount: 0 };
           return next();
         }
         const filter = { organizationId, recipientUserId: userId, active: true, readAt: null };
-        const unreadCount = typeof repo.count === 'function'
-          ? await repo.count({ filter })
-          : ((await repo.find({ filter, limit: 500 })) || []).length;
+        const unreadCount = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          return typeof repo.count === 'function'
+            ? repo.count({ filter, ...txOpt })
+            : ((await repo.find({ filter, limit: 500, ...txOpt })) || []).length;
+        });
         ctx.body = { organizationId, unreadCount };
         return next();
       },
@@ -504,19 +841,31 @@ function registerNotificationCenter(app) {
         }
         const repo = db.getRepository('latticeNotifications');
         if (!repo) throw failNotif('NOTIFICATION_NOT_FOUND', 404, 'Không tìm thấy thông báo.');
-        const row = await repo.findOne({ filter: { id, organizationId, recipientUserId: userId } });
-        if (!row || val(row, 'organizationId') !== organizationId || Number(val(row, 'recipientUserId')) !== userId) {
-          throw failNotif('NOTIFICATION_NOT_FOUND', 404, 'Không tìm thấy thông báo trong phạm vi tài khoản.');
-        }
-        const now = val(row, 'readAt') || new Date();
-        if (!val(row, 'readAt')) {
-          if (typeof repo.update === 'function') {
-            await repo.update({ filterByTk: id, filter: { organizationId, recipientUserId: userId }, values: { readAt: now } });
-          } else if (typeof row.update === 'function') {
-            await row.update({ readAt: now });
+        const { row, now } = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const found = await repo.findOne({ filter: { id, organizationId, recipientUserId: userId }, ...txOpt });
+          if (!found || val(found, 'organizationId') !== organizationId || Number(val(found, 'recipientUserId')) !== userId) {
+            throw failNotif('NOTIFICATION_NOT_FOUND', 404, 'Không tìm thấy thông báo trong phạm vi tài khoản.');
           }
-        }
+          const readTimestamp = val(found, 'readAt') || new Date();
+          if (!val(found, 'readAt')) {
+            if (typeof repo.update === 'function') {
+              await repo.update({ filterByTk: id, filter: { organizationId, recipientUserId: userId }, values: { readAt: readTimestamp }, ...txOpt });
+            } else if (typeof found.update === 'function') {
+              await found.update({ readAt: readTimestamp }, transaction ? { transaction } : undefined);
+            }
+          }
+          return { row: found, now: readTimestamp };
+        });
         ctx.body = { ...serializeNotification(row), readAt: now instanceof Date ? now.toISOString() : now };
+        await publishNotificationSurfaceUpdate(app, {
+          kind: 'notification',
+          type: 'unread_count',
+          portalSlug: '*',
+          organizationId,
+          recipientUserId: userId,
+          notificationId: id,
+        });
         return next();
       },
 
@@ -539,21 +888,36 @@ function registerNotificationCenter(app) {
           readAt: null,
           ...(category ? { category } : {}),
         };
-        const unreadCount = typeof repo.count === 'function'
-          ? await repo.count({ filter })
-          : ((await repo.find({ filter, limit: 1000 })) || []).length;
-        const now = new Date();
-        if (unreadCount > 0) {
-          if (typeof repo.update === 'function') {
-            await repo.update({ filter, values: { readAt: now } });
-          } else {
-            const rows = (await repo.find({ filter, limit: 1000 })) || [];
-            for (const row of rows) {
-              if (typeof row.update === 'function') await row.update({ readAt: now });
+        const { unreadCount, now } = await runNotifTenantDb(db, organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const countVal = typeof repo.count === 'function'
+            ? await repo.count({ filter, ...txOpt })
+            : ((await repo.find({ filter, limit: 1000, ...txOpt })) || []).length;
+          const readTimestamp = new Date();
+          if (countVal > 0) {
+            if (typeof repo.update === 'function') {
+              await repo.update({ filter, values: { readAt: readTimestamp }, ...txOpt });
+            } else {
+              const rows = (await repo.find({ filter, limit: 1000, ...txOpt })) || [];
+              for (const row of rows) {
+                if (typeof row.update === 'function') {
+                  await row.update({ readAt: readTimestamp }, transaction ? { transaction } : undefined);
+                }
+              }
             }
           }
-        }
+          return { unreadCount: countVal, now: readTimestamp };
+        });
         ctx.body = { organizationId, updatedCount: unreadCount, readAt: now.toISOString() };
+        if (unreadCount > 0) {
+          await publishNotificationSurfaceUpdate(app, {
+            kind: 'notification',
+            type: 'unread_count',
+            portalSlug: '*',
+            organizationId,
+            recipientUserId: userId,
+          });
+        }
         return next();
       },
     },
@@ -568,6 +932,9 @@ module.exports = {
   DEDUP_WINDOW_MS,
   EXTERNAL_TIMEOUT_MS,
   isSafeExternalWebhookUrl,
+  isSafeExternalWebhookUrlAsync,
+  normalizeNotificationChannelName,
+  normalizeNotificationChannelConfigs,
   resolveNotificationTargetPath,
   dispatchNotification,
   dispatchRoleNotifications,

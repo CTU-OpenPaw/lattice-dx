@@ -2,9 +2,9 @@
   {
     "id": "latticedx-iiot-tab",
     "type": "tab",
-    "label": "LatticeDX IIoT Telemetry Ingest",
+    "label": "LatticeDX IIoT Telemetry & Orion Sync",
     "disabled": false,
-    "info": "SPDX-License-Identifier: Apache-2.0 — Subscribes to latticedx/+/+/telemetry on Mosquitto, validates & sanitizes payload, and forwards to NocoBase dxosBlocks:telemetryIngest."
+    "info": "SPDX-License-Identifier: Apache-2.0 — Subscribes to latticedx/+/+/telemetry on Mosquitto, validates & sanitizes payload, forwards to NocoBase dxosBlocks:telemetryIngest and optionally mirrors to FIWARE Orion-LD."
   },
   {
     "id": "latticedx-mqtt-broker",
@@ -46,8 +46,8 @@
     "type": "function",
     "z": "latticedx-iiot-tab",
     "name": "Sanitize & Sign IIoT Telemetry",
-    "func": "const rawTopic = String(msg.topic || '');\nconst parts = rawTopic.split('/');\nif (parts.length !== 4 || parts[0] !== 'latticedx' || parts[3] !== 'telemetry') {\n  node.warn('Ignored invalid IIoT telemetry topic: ' + rawTopic);\n  return null;\n}\nconst orgId = parts[1].trim();\nconst topicAsset = parts[2].trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) {\n  node.warn('Rejected invalid organizationId in topic: ' + orgId);\n  return null;\n}\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try {\n    data = JSON.parse(data);\n  } catch (err) {\n    node.warn('Invalid JSON telemetry payload: ' + err.message);\n    return null;\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) {\n  node.warn('Telemetry payload must be a JSON object');\n  return null;\n}\nconst rawValue = data.numericValue !== undefined ? data.numericValue : data.value;\nif (rawValue === null || rawValue === undefined || (typeof rawValue === 'string' && rawValue.trim() === '') || typeof rawValue === 'boolean' || typeof rawValue === 'object') {\n  node.warn('Missing or non-numeric telemetry value');\n  return null;\n}\nconst numericValue = Number(rawValue);\nif (!Number.isFinite(numericValue)) {\n  node.warn('Non-finite telemetry numericValue');\n  return null;\n}\nconst edgeToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (edgeToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing telemetry dispatch');\n  return null;\n}\nconst metricName = String(data.metricName || data.attribute || 'temperature').trim();\nif (!/^[a-zA-Z0-9_.-]{1,128}$/.test(metricName)) {\n  node.warn('Invalid metricName: ' + metricName);\n  return null;\n}\nconst assetId = data.assetId != null && /^[1-9]\\d{0,18}$/.test(String(data.assetId)) ? Number(data.assetId) : undefined;\nconst assetEntityId = String(data.assetEntityId || (/^[1-9]\\d{0,18}$/.test(topicAsset) ? 'urn:ngsi-ld:Asset:' + orgId + ':native:' + topicAsset : topicAsset)).trim().slice(0, 255);\nif (!assetEntityId) {\n  node.warn('Missing assetEntityId');\n  return null;\n}\nlet observedAt;\nif (data.observedAt != null && data.observedAt !== '') {\n  const dt = new Date(String(data.observedAt));\n  if (!Number.isFinite(dt.getTime())) {\n    node.warn('Invalid observedAt timestamp');\n    return null;\n  }\n  observedAt = dt.toISOString();\n} else {\n  observedAt = new Date().toISOString();\n}\nmsg.url = String(env.get('DX_IIOT_INGEST_URL') || 'http://nocobase/api/dxosBlocks:telemetryIngest').trim();\nmsg.headers = {\n  'Content-Type': 'application/json',\n  'X-Lattice-Edge-Token': edgeToken\n};\nmsg.payload = {\n  organizationId: orgId,\n  ...(assetId !== undefined ? { assetId } : {}),\n  assetEntityId,\n  metricName,\n  numericValue,\n  unit: String(data.unit || 'CEL').trim().slice(0, 64) || 'CEL',\n  quality: String(data.quality || 'good').trim().slice(0, 64) || 'good',\n  sourceProtocol: 'mqtt',\n  observedAt\n};\nreturn msg;",
-    "outputs": 1,
+    "func": "const rawTopic = String(msg.topic || '');\nconst parts = rawTopic.split('/');\nif (parts.length !== 4 || parts[0] !== 'latticedx' || parts[3] !== 'telemetry') {\n  node.warn('Ignored invalid IIoT telemetry topic: ' + rawTopic);\n  return [null, null];\n}\nconst orgId = parts[1].trim();\nconst topicAsset = parts[2].trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) {\n  node.warn('Rejected invalid organizationId in topic: ' + orgId);\n  return [null, null];\n}\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try {\n    data = JSON.parse(data);\n  } catch (err) {\n    node.warn('Invalid JSON telemetry payload: ' + err.message);\n    return [null, null];\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) {\n  node.warn('Telemetry payload must be a JSON object');\n  return [null, null];\n}\nconst rawValue = data.numericValue !== undefined ? data.numericValue : data.value;\nif (rawValue === null || rawValue === undefined || (typeof rawValue === 'string' && rawValue.trim() === '') || typeof rawValue === 'boolean' || typeof rawValue === 'object') {\n  node.warn('Missing or non-numeric telemetry value');\n  return [null, null];\n}\nconst numericValue = Number(rawValue);\nif (!Number.isFinite(numericValue)) {\n  node.warn('Non-finite telemetry numericValue');\n  return [null, null];\n}\nconst edgeToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (edgeToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing telemetry dispatch');\n  return [null, null];\n}\nconst metricName = String(data.metricName || data.attribute || 'temperature').trim();\nif (!/^[a-zA-Z0-9_.-]{1,128}$/.test(metricName)) {\n  node.warn('Invalid metricName: ' + metricName);\n  return [null, null];\n}\nconst assetId = data.assetId != null && /^[1-9]\\d{0,18}$/.test(String(data.assetId)) ? Number(data.assetId) : undefined;\nconst assetEntityId = String(data.assetEntityId || (/^[1-9]\\d{0,18}$/.test(topicAsset) ? 'urn:ngsi-ld:Asset:' + orgId + ':native:' + topicAsset : topicAsset)).trim().slice(0, 255);\nif (!assetEntityId) {\n  node.warn('Missing assetEntityId');\n  return [null, null];\n}\nlet observedAt;\nif (data.observedAt != null && data.observedAt !== '') {\n  const dt = new Date(String(data.observedAt));\n  if (!Number.isFinite(dt.getTime())) {\n    node.warn('Invalid observedAt timestamp');\n    return [null, null];\n  }\n  observedAt = dt.toISOString();\n} else {\n  observedAt = new Date().toISOString();\n}\nconst ingestMsg = {\n  url: String(env.get('DX_IIOT_INGEST_URL') || 'http://nocobase/api/dxosBlocks:telemetryIngest').trim(),\n  headers: {\n    'Content-Type': 'application/json',\n    'X-Lattice-Edge-Token': edgeToken\n  },\n  payload: {\n    organizationId: orgId,\n    ...(assetId !== undefined ? { assetId } : {}),\n    assetEntityId,\n    metricName,\n    numericValue,\n    unit: String(data.unit || 'CEL').trim().slice(0, 64) || 'CEL',\n    quality: String(data.quality || 'good').trim().slice(0, 64) || 'good',\n    sourceProtocol: 'mqtt',\n    observedAt\n  }\n};\nconst orionBase = String(env.get('DX_ORION_URL') || '').trim().replace(/\\/+$/, '');\nlet orionMsg = null;\nif (orionBase && /^urn:ngsi-ld:[a-zA-Z0-9:._-]+$/.test(assetEntityId)) {\n  orionMsg = {\n    url: orionBase + '/ngsi-ld/v1/entities/' + encodeURIComponent(assetEntityId) + '/attrs',\n    headers: {\n      'Content-Type': 'application/json',\n      'NGSILD-Tenant': orgId\n    },\n    payload: {\n      [metricName]: {\n        type: 'Property',\n        value: numericValue,\n        observedAt\n      }\n    }\n  };\n}\nreturn [ingestMsg, orionMsg];",
+    "outputs": 2,
     "timeout": 5,
     "noerr": 0,
     "initialize": "",
@@ -58,6 +58,9 @@
     "wires": [
       [
         "latticedx-http-ingest"
+      ],
+      [
+        "latticedx-orion-patch"
       ]
     ]
   },
@@ -78,11 +81,33 @@
     "senderr": false,
     "headers": [],
     "x": 720,
-    "y": 140,
+    "y": 110,
     "wires": [
       [
         "latticedx-ingest-debug"
       ]
+    ]
+  },
+  {
+    "id": "latticedx-orion-patch",
+    "type": "http request",
+    "z": "latticedx-iiot-tab",
+    "name": "PATCH Orion-LD Attrs (Optional)",
+    "method": "PATCH",
+    "ret": "txt",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 720,
+    "y": 190,
+    "wires": [
+      []
     ]
   },
   {
@@ -99,6 +124,265 @@
     "statusVal": "",
     "statusType": "auto",
     "x": 960,
+    "y": 110,
+    "wires": []
+  },
+  {
+    "id": "latticedx-twin-downlink-tab",
+    "type": "tab",
+    "label": "LatticeDX Digital Twin Downlink",
+    "disabled": false,
+    "info": "SPDX-License-Identifier: Apache-2.0 — Validates POST /twin/command downlink requests and publishes to latticedx/<orgId>/<assetKey>/command on Mosquitto; forwards latticedx/+/+/ack back to NocoBase dxosBlocks:twinAckCommand."
+  },
+  {
+    "id": "latticedx-twin-http-in",
+    "type": "http in",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "POST /twin/command",
+    "url": "/twin/command",
+    "method": "post",
+    "upload": false,
+    "swaggerDoc": "",
+    "x": 170,
+    "y": 120,
+    "wires": [
+      [
+        "latticedx-twin-command-fn"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-command-fn",
+    "type": "function",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Validate & Route Twin Command",
+    "func": "const fail = (statusCode, error, message) => {\n  msg.statusCode = statusCode;\n  msg.payload = { error, message };\n  return [null, msg];\n};\nconst expectedToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (expectedToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing twin command');\n  return fail(401, 'EDGE_AUTH_INVALID', 'Edge token not configured');\n}\nconst hdrs = (msg.req && msg.req.headers) || msg.headers || {};\nlet providedToken = '';\nfor (const [k, v] of Object.entries(hdrs)) {\n  if (k.toLowerCase() === 'x-lattice-edge-token' && typeof v === 'string') {\n    providedToken = v.trim();\n    break;\n  }\n}\nlet diff = expectedToken.length ^ providedToken.length;\nconst maxLen = Math.max(expectedToken.length, providedToken.length);\nfor (let i = 0; i < maxLen; i += 1) {\n  const a = i < expectedToken.length ? expectedToken.charCodeAt(i) : 0;\n  const b = i < providedToken.length ? providedToken.charCodeAt(i) : 0;\n  diff |= a ^ b;\n}\nif (diff !== 0) {\n  node.warn('Rejected twin command with invalid X-Lattice-Edge-Token');\n  return fail(401, 'EDGE_AUTH_INVALID', 'Invalid X-Lattice-Edge-Token');\n}\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try {\n    data = JSON.parse(data);\n  } catch (err) {\n    node.warn('Invalid JSON twin command payload: ' + err.message);\n    return fail(400, 'TWIN_PAYLOAD_INVALID', 'Invalid JSON twin command payload');\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) {\n  node.warn('Twin command payload must be a JSON object');\n  return fail(400, 'TWIN_PAYLOAD_INVALID', 'Twin command payload must be a JSON object');\n}\nconst orgId = String(data.organizationId || '').trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) {\n  node.warn('Rejected invalid organizationId in twin command: ' + orgId);\n  return fail(400, 'TWIN_ORG_INVALID', 'Invalid organizationId');\n}\nlet rawAssetId = '';\nif (data.assetId !== undefined && data.assetId !== null && data.assetId !== '') {\n  if (!/^[1-9]\\d{0,18}$/.test(String(data.assetId))) {\n    node.warn('Rejected invalid assetId in twin command: ' + data.assetId);\n    return fail(400, 'TWIN_ASSET_INVALID', 'Invalid assetId');\n  }\n  rawAssetId = String(data.assetId);\n}\nconst rawEntity = typeof data.assetEntityId === 'string' ? data.assetEntityId.trim() : '';\nlet entityAssetKey = '';\nif (rawEntity) {\n  const urnMatch = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\\d{0,18})$/.exec(rawEntity);\n  if (urnMatch) {\n    if (urnMatch[1] !== orgId) {\n      return fail(400, 'TWIN_CROSS_ORG_URN', 'Cross-org assetEntityId URN rejected');\n    }\n    if (rawAssetId && urnMatch[2] !== rawAssetId) {\n      return fail(400, 'TWIN_ASSET_MISMATCH', 'assetId and assetEntityId mismatch');\n    }\n    entityAssetKey = urnMatch[2];\n  } else if (/^[a-zA-Z0-9_.-]{1,128}$/.test(rawEntity)) {\n    entityAssetKey = rawEntity;\n  } else {\n    return fail(400, 'TWIN_ENTITY_INVALID', 'Unsafe assetEntityId');\n  }\n}\nconst assetKey = rawAssetId || entityAssetKey;\nif (!assetKey) {\n  return fail(400, 'TWIN_ASSET_REQUIRED', 'Missing assetId or assetEntityId');\n}\nconst assetEntityId = rawEntity || ('urn:ngsi-ld:Asset:' + orgId + ':native:' + assetKey);\nmsg.topic = 'latticedx/' + orgId + '/' + assetKey + '/command';\nmsg.qos = 1;\nmsg.retain = false;\nmsg.statusCode = 202;\nmsg.payload = {\n  organizationId: orgId,\n  ...(rawAssetId ? { assetId: Number(rawAssetId) } : {}),\n  assetEntityId,\n  ...(data.commandId ? { commandId: String(data.commandId).slice(0, 64) } : {}),\n  desired: data.desired || data.desiredPatch || {},\n  issuedAt: data.issuedAt || new Date().toISOString()\n};\nreturn [msg, null];",
+    "outputs": 2,
+    "timeout": 5,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 450,
+    "y": 120,
+    "wires": [
+      [
+        "latticedx-twin-mqtt-out",
+        "latticedx-twin-http-res"
+      ],
+      [
+        "latticedx-twin-http-err"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-mqtt-out",
+    "type": "mqtt out",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "MQTT Command Out",
+    "topic": "",
+    "qos": "1",
+    "retain": "false",
+    "respTopic": "",
+    "contentType": "",
+    "userProps": "",
+    "correl": "",
+    "expiry": "",
+    "broker": "latticedx-mqtt-broker",
+    "x": 740,
+    "y": 100,
+    "wires": []
+  },
+  {
+    "id": "latticedx-twin-http-res",
+    "type": "http response",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Command Accepted",
+    "statusCode": "202",
+    "headers": {},
+    "x": 740,
+    "y": 150,
+    "wires": []
+  },
+  {
+    "id": "latticedx-twin-http-err",
+    "type": "http response",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Command Rejected",
+    "statusCode": "",
+    "headers": {},
+    "x": 740,
+    "y": 200,
+    "wires": []
+  },
+  {
+    "id": "latticedx-twin-ack-mqtt-in",
+    "type": "mqtt in",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "MQTT Twin Ack In",
+    "topic": "latticedx/+/+/ack",
+    "qos": "1",
+    "datatype": "auto-detect",
+    "broker": "latticedx-mqtt-broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 170,
+    "y": 260,
+    "wires": [
+      [
+        "latticedx-twin-ack-fn"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-ack-fn",
+    "type": "function",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Sign & Forward Twin Ack",
+    "func": "const rawTopic = String(msg.topic || '');\nconst parts = rawTopic.split('/');\nif (parts.length !== 4 || parts[0] !== 'latticedx' || parts[3] !== 'ack') {\n  return null;\n}\nconst orgId = parts[1].trim();\nconst topicAsset = parts[2].trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId)) return null;\nlet data = msg.payload;\nif (typeof data === 'string') {\n  try { data = JSON.parse(data); } catch { return null; }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) return null;\nconst edgeToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (edgeToken.length < 16) return null;\nconst assetId = data.assetId != null && /^[1-9]\\d{0,18}$/.test(String(data.assetId)) ? Number(data.assetId) : undefined;\nconst assetEntityId = String(data.assetEntityId || (/^[1-9]\\d{0,18}$/.test(topicAsset) ? 'urn:ngsi-ld:Asset:' + orgId + ':native:' + topicAsset : topicAsset)).trim().slice(0, 255);\nif (!assetEntityId) return null;\nconst reportedPatch = data.reportedPatch && typeof data.reportedPatch === 'object' && !Array.isArray(data.reportedPatch)\n  ? data.reportedPatch\n  : (data.reported && typeof data.reported === 'object' && !Array.isArray(data.reported) ? data.reported : {});\nmsg.url = String(env.get('DX_TWIN_ACK_URL') || 'http://nocobase/api/dxosBlocks:twinAckCommand').trim();\nmsg.headers = {\n  'Content-Type': 'application/json',\n  'X-Lattice-Edge-Token': edgeToken\n};\nmsg.payload = {\n  organizationId: orgId,\n  ...(assetId !== undefined ? { assetId } : {}),\n  assetEntityId,\n  ...(data.commandId ? { commandId: String(data.commandId).slice(0, 64) } : {}),\n  ackStatus: data.ackStatus === 'failed' ? 'failed' : 'acked',\n  reportedPatch\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 5,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 440,
+    "y": 260,
+    "wires": [
+      [
+        "latticedx-twin-ack-http"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-ack-http",
+    "type": "http request",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "POST dxosBlocks:twinAckCommand",
+    "method": "POST",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 730,
+    "y": 260,
+    "wires": [
+      [
+        "latticedx-twin-ack-debug"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-twin-ack-debug",
+    "type": "debug",
+    "z": "latticedx-twin-downlink-tab",
+    "name": "Twin Ack Status",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "statusCode",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 960,
+    "y": 260,
+    "wires": []
+  },
+  {
+    "id": "latticedx-device-status-tab",
+    "type": "tab",
+    "label": "LatticeDX MQTT Device Status & LWT",
+    "disabled": false,
+    "info": "SPDX-License-Identifier: Apache-2.0 — Subscribes to latticedx/+/+/status (BIRTH/DEATH/LWT) and pushes device online/offline transitions to NocoBase dxosBroker:deviceStatusIngest."
+  },
+  {
+    "id": "latticedx-status-mqtt-in",
+    "type": "mqtt in",
+    "z": "latticedx-device-status-tab",
+    "name": "MQTT Status / LWT In",
+    "topic": "latticedx/+/+/status",
+    "qos": "1",
+    "datatype": "auto-detect",
+    "broker": "latticedx-mqtt-broker",
+    "nl": false,
+    "rap": true,
+    "rh": 0,
+    "inputs": 0,
+    "x": 170,
+    "y": 140,
+    "wires": [
+      [
+        "latticedx-status-fn"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-status-fn",
+    "type": "function",
+    "z": "latticedx-device-status-tab",
+    "name": "Sanitize & Sign Device Status (LWT)",
+    "func": "const rawTopic = String(msg.topic || '');\nconst parts = rawTopic.split('/');\nif (parts.length !== 4 || parts[0] !== 'latticedx' || parts[3] !== 'status') {\n  return null;\n}\nconst orgId = parts[1].trim();\nconst deviceKey = parts[2].trim();\nif (!/^[a-zA-Z0-9_-]{1,80}$/.test(orgId) || !/^[a-zA-Z0-9_.-]{1,64}$/.test(deviceKey)) return null;\nlet data = msg.payload;\nif (typeof data === 'string') {\n  const clean = data.trim();\n  if (clean.startsWith('{')) {\n    try { data = JSON.parse(clean); } catch { return null; }\n  } else {\n    data = { status: clean };\n  }\n}\nif (!data || typeof data !== 'object' || Array.isArray(data)) return null;\nconst edgeToken = String(env.get('DX_IIOT_INGEST_TOKEN') || '').trim();\nif (edgeToken.length < 16) {\n  node.error('DX_IIOT_INGEST_TOKEN missing or shorter than 16 chars; refusing status dispatch');\n  return null;\n}\nconst rawState = String(data.status || data.state || data.event || '').trim().toUpperCase();\nlet normalized = '';\nif (rawState === 'BIRTH' || rawState === 'ONLINE' || rawState === 'CONNECTED') normalized = 'online';\nelse if (rawState === 'DEATH' || rawState === 'OFFLINE' || rawState === 'LWT' || rawState === 'DISCONNECTED') normalized = 'offline';\nif (!normalized) return null;\nmsg.url = String(env.get('DX_IIOT_STATUS_URL') || 'http://nocobase/api/dxosBroker:deviceStatusIngest').trim();\nmsg.headers = {\n  'Content-Type': 'application/json',\n  'X-Lattice-Edge-Token': edgeToken\n};\nmsg.payload = {\n  organizationId: orgId,\n  deviceKey,\n  status: normalized,\n  reason: String(data.reason || (rawState === 'DEATH' || rawState === 'LWT' ? 'mqtt_lwt_disconnect' : '')).trim().slice(0, 200),\n  observedAt: data.observedAt ? String(data.observedAt) : new Date().toISOString()\n};\nreturn msg;",
+    "outputs": 1,
+    "timeout": 5,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 440,
+    "y": 140,
+    "wires": [
+      [
+        "latticedx-status-http"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-status-http",
+    "type": "http request",
+    "z": "latticedx-device-status-tab",
+    "name": "POST dxosBroker:deviceStatusIngest",
+    "method": "POST",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": false,
+    "headers": [],
+    "x": 740,
+    "y": 140,
+    "wires": [
+      [
+        "latticedx-status-debug"
+      ]
+    ]
+  },
+  {
+    "id": "latticedx-status-debug",
+    "type": "debug",
+    "z": "latticedx-device-status-tab",
+    "name": "Device Status HTTP",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "statusCode",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 980,
     "y": 140,
     "wires": []
   }

@@ -23,6 +23,7 @@ import {
   restoreStack,
   validateTarEntries,
   validateTarVerboseEntries,
+  verifyWalArchiveReadiness,
 } from '../stack-recovery.mjs';
 
 function makeTempRoot(t) {
@@ -321,4 +322,63 @@ test('partial component rehearsal sets fullStackVerified=false and fullRecoverab
   assert.equal(rehearsal.fullStackVerified, false);
   assert.equal(rehearsal.fullRecoverability, false);
   assert.deepEqual(rehearsal.skippedComponents, ['nocobase-db', 'keycloak', 'orion-mongo', 'lattice-db', 'engine-objects']);
+});
+
+test('verifyWalArchiveReadiness validates PITR archive_mode, archive_command, and WAL directory readiness', (t) => {
+  const readyRunners = {
+    checkWalArchiveReadiness: () => ({
+      ready: true,
+      walArchiveDir: '/var/lib/postgresql/wal-archive',
+      targets: {
+        postgres: {
+          archiveMode: 'on',
+          archiveCommand: '/bin/sh /etc/postgresql/pitr-archive.sh %p %f',
+          walDirReady: true,
+          archiveScriptReady: true,
+        },
+        'nocobase-db': {
+          archiveMode: 'on',
+          archiveCommand: '/bin/sh /etc/postgresql/pitr-archive.sh %p %f',
+          walDirReady: true,
+          archiveScriptReady: true,
+        },
+      },
+    }),
+  };
+
+  const ok = verifyWalArchiveReadiness({ runners: readyRunners });
+  assert.equal(ok.ready, true);
+  assert.equal(ok.targets.postgres.archiveMode, 'on');
+  assert.equal(ok.targets['nocobase-db'].walDirReady, true);
+
+  const disabledRunners = {
+    checkWalArchiveReadiness: () => ({
+      ready: false,
+      walArchiveDir: '/var/lib/postgresql/wal-archive',
+      targets: {
+        postgres: {
+          archiveMode: 'on',
+          archiveCommand: '/bin/true',
+          walDirReady: false,
+          archiveScriptReady: true,
+        },
+      },
+    }),
+  };
+  const bad = verifyWalArchiveReadiness({ runners: disabledRunners });
+  assert.equal(bad.ready, false);
+  assert.throws(() => verifyWalArchiveReadiness({ runners: disabledRunners, strict: true }), /WAL archive/i);
+
+  const root = makeTempRoot(t);
+  const backupRoot = join(root, 'stack');
+  const realmFile = join(root, 'lattice-realm.json');
+  writeFileSync(realmFile, JSON.stringify({ realm: 'lattice' }), 'utf8');
+  const runners = {
+    ...makeFakeRunners({ realmPath: realmFile, ephemeral: true }),
+    checkWalArchiveReadiness: readyRunners.checkWalArchiveReadiness,
+  };
+  const backup = backupStack({ directory: backupRoot, runners, env: {} });
+  const rehearsal = rehearseStack(backup.bundleDir, { directory: backupRoot, runners, ephemeral: true });
+  assert.equal(rehearsal.walArchiveReady, true);
+  assert.equal(rehearsal.walArchive.ready, true);
 });

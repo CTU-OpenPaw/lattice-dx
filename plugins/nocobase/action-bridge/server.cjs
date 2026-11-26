@@ -17,13 +17,49 @@ class ActionBridgePlugin extends Plugin {
     const publicIssuer = process.env.DX_BRIDGE_ISSUER;
     const internalIssuer = process.env.DX_BRIDGE_INTERNAL_ISSUER;
     const gatewayUrl = process.env.DX_BRIDGE_GATEWAY_URL;
-    if (!callbackUrl || !publicIssuer || !internalIssuer || !gatewayUrl) throw new Error('Missing action bridge endpoint configuration.');
+    const methods = { connect: 'POST', callback: 'GET', status: 'GET', catalog: 'GET', list: 'GET', run: 'POST', files: 'POST', workflow: 'POST', studio: 'POST', entity: 'POST', agent: 'POST', logistics: 'POST', disconnect: 'POST' };
+    if (!callbackUrl || !publicIssuer || !internalIssuer || !gatewayUrl) {
+      this.app?.logger?.warn?.('[action-bridge] DX_BRIDGE_* not configured; registering degraded 503 dxActions handlers.');
+      const degradedActions = {};
+      for (const [name, method] of Object.entries(methods)) {
+        degradedActions[name] = async (ctx, next) => {
+          ctx.withoutDataWrapping = true;
+          ctx.set('Cache-Control', 'no-store');
+          ctx.set('Referrer-Policy', 'no-referrer');
+          if (ctx.method !== method) {
+            ctx.status = 405;
+            ctx.body = { error: 'Unsupported method.' };
+            await next();
+            return;
+          }
+          if (name !== 'callback') {
+            const currentUser = ctx.state?.currentUser;
+            if (!currentUser?.id || !String(ctx.get?.('Authorization') || '').startsWith('Bearer ')) {
+              ctx.status = 401;
+              ctx.body = { error: 'NocoBase bearer identity required.' };
+              await next();
+              return;
+            }
+          }
+          ctx.status = 503;
+          ctx.body = {
+            configured: false,
+            ...(name === 'status' ? { connected: false } : {}),
+            error: 'Action bridge endpoint is not configured.',
+          };
+          await next();
+        };
+      }
+      this.app.resourceManager.define({ name: 'dxActions', actions: degradedActions });
+      this.app.acl.allow('dxActions', 'callback', 'public');
+      for (const name of ['connect', 'status', 'catalog', 'list', 'run', 'files', 'workflow', 'studio', 'entity', 'agent', 'logistics', 'disconnect']) this.app.acl.allow('dxActions', name, 'loggedIn');
+      return;
+    }
     const callback = new URL(callbackUrl);
     if (callback.protocol !== 'https:' && !(callback.protocol === 'http:' && callback.hostname === 'localhost')) throw new Error('Bridge callback requires HTTPS outside localhost.');
     const bridge = createBridge({ callbackUrl, gatewayUrl, clientId: 'dx-nocobase',
       authorizationUrl: `${publicIssuer}/protocol/openid-connect/auth`, tokenUrl: `${internalIssuer}/protocol/openid-connect/token`, userinfoUrl: `${internalIssuer}/protocol/openid-connect/userinfo` });
     const cookies = { httpOnly: true, sameSite: 'lax', secure: callback.protocol === 'https:', signed: false, path: '/api', overwrite: true };
-    const methods = { connect: 'POST', callback: 'GET', status: 'GET', catalog: 'GET', list: 'GET', run: 'POST', files: 'POST', workflow: 'POST', studio: 'POST', entity: 'POST', agent: 'POST', logistics: 'POST', disconnect: 'POST' };
     const actions = {};
     for (const [name, method] of Object.entries(methods)) {
       actions[name] = async (ctx, next) => {

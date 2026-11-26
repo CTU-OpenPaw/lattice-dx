@@ -10,6 +10,21 @@
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+const ALLOWED_DXOS_BLOCK_USES = new Set([
+  'DxosPortalHeroBlockModel',
+  'DxosKpiMetricBlockModel',
+  'DxosContextTelemetryBlockModel',
+  'DxosAiProposalBlockModel',
+  'DxosWorkflowTasksBlockModel',
+  'DxosParaVaultBlockModel',
+  'DxosCreativeStudioBlockModel',
+  'DxosRecordWorkbenchBlockModel',
+  'DxosWebGisBlockModel',
+  'DxosKanbanScheduleBlockModel',
+  'DxosWmsOpsBlockModel',
+  'DxosBiChartBlockModel',
+]);
+
 const COLLECTION_FIELD_GROUPS = {
   latticeIncidentCases: [
     { title: 'Định danh & Tài sản', fields: ['code', 'name', 'organizationId', 'assetEntityId', 'runId', 'notificationId'] },
@@ -90,6 +105,22 @@ const OVERVIEW_SPECS = [
         use: 'DxosRecordWorkbenchBlockModel',
         config: { title: 'Chứng từ, Chatter & Xuất báo cáo Mua sắm [W]', collection: 'latticeRequests', showExport: true, showVoucherActions: true, showChatter: true },
       },
+      {
+        uidSuffix: 'bi-chart',
+        use: 'DxosBiChartBlockModel',
+        config: {
+          title: 'Phân tích Yêu cầu Mua sắm [BI]',
+          collection: 'latticeRequests',
+          chartType: 'bar',
+          groupBy: 'status',
+          secondaryGroupBy: '',
+          metricOp: 'count',
+          metricField: '',
+          metric: { op: 'count' },
+          limit: 20,
+          filterJson: '',
+        },
+      },
     ],
   },
   {
@@ -128,6 +159,17 @@ const OVERVIEW_SPECS = [
         uidSuffix: 'proposals',
         use: 'DxosAiProposalBlockModel',
         config: { title: 'Đề xuất AI có Bằng chứng [I]', targetCollection: 'latticeIncidentCases', state: 'all', pageSize: 5, showEvidence: true },
+      },
+      {
+        uidSuffix: 'webgis',
+        use: 'DxosWebGisBlockModel',
+        config: {
+          title: 'Bản đồ Giám sát Chuỗi lạnh WebGIS [D]',
+          defaultOrganizationId: '',
+          centerLat: 15.8,
+          centerLng: 106.5,
+          showTwinOverlay: true,
+        },
       },
     ],
   },
@@ -180,7 +222,53 @@ const OVERVIEW_SPECS = [
       {
         uidSuffix: 'workbench',
         use: 'DxosRecordWorkbenchBlockModel',
-        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Logistics [W]', collection: 'latticeOrders', showExport: true, showVoucherActions: true, showChatter: true },
+        config: {
+          title: 'Chứng từ, Chatter & Xuất báo cáo Logistics [W]',
+          collection: 'latticeOrders',
+          showExport: true,
+          showVoucherActions: true,
+          showChatter: true,
+          showPkiBadge: true,
+          showLineage: true,
+          showPrintVoucher: true,
+        },
+      },
+      {
+        uidSuffix: 'kanban',
+        use: 'DxosKanbanScheduleBlockModel',
+        config: {
+          title: 'Bảng Kanban & Lịch Giao nhận [H]',
+          collection: 'latticeOrders',
+          viewMode: 'kanban',
+          pageSize: 40,
+        },
+      },
+      {
+        uidSuffix: 'wms-ops',
+        use: 'DxosWmsOpsBlockModel',
+        config: {
+          title: 'Vận hành Kho FEFO & Nhập lô hàng loạt [W]',
+          defaultOrganizationId: '',
+          defaultTab: 'fefo',
+          defaultImportCollection: 'latticeStockLots',
+          showBulkImport: true,
+        },
+      },
+      {
+        uidSuffix: 'bi-chart',
+        use: 'DxosBiChartBlockModel',
+        config: {
+          title: 'Phân tích Đơn vận chuyển [BI]',
+          collection: 'latticeOrders',
+          chartType: 'bar',
+          groupBy: 'status',
+          secondaryGroupBy: '',
+          metricOp: 'count',
+          metricField: '',
+          metric: { op: 'count' },
+          limit: 20,
+          filterJson: '',
+        },
       },
     ],
   },
@@ -224,7 +312,16 @@ const OVERVIEW_SPECS = [
       {
         uidSuffix: 'workbench',
         use: 'DxosRecordWorkbenchBlockModel',
-        config: { title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]', collection: 'latticeServiceTickets', showExport: true, showVoucherActions: true, showChatter: true },
+        config: {
+          title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]',
+          collection: 'latticeServiceTickets',
+          showExport: true,
+          showVoucherActions: true,
+          showChatter: true,
+          showPkiBadge: true,
+          showLineage: true,
+          showPrintVoucher: true,
+        },
       },
     ],
   },
@@ -262,7 +359,16 @@ const DEFAULT_MOBILE_OPERATIONAL_ROLES = [
   'ldx_driver',
   'ldx_director',
 ];
-const EXCLUDED_MOBILE_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_sysadmin', 'ldx_connector']);
+const EXCLUDED_MOBILE_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_admin', 'ldx_sysadmin', 'ldx_connector']);
+const BUSINESS_ROLE_RE = /^[a-z][a-z0-9_]{1,40}$/;
+const RESERVED_SYSTEM_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector']);
+function isEnterpriseBusinessRole(roleName) {
+  if (typeof roleName !== 'string') return false;
+  const clean = roleName.trim();
+  if (!BUSINESS_ROLE_RE.test(clean) && !/^ldx_[a-z0-9_]{2,40}$/.test(clean)) return false;
+  if (clean.startsWith('r_')) return false;
+  return !RESERVED_SYSTEM_ROLES.has(clean);
+}
 
 const MOBILE_PORTAL_PAGES = [
   {
@@ -354,7 +460,7 @@ function findExistingPage(routes, layoutUid, groupTitle, pageTitle, linkedRouteI
 async function grantRolesToRoutes(db, routeIds, roleNames) {
   const grantsRepo = db.getRepository?.('rolesDesktopRoutes');
   const cleanRouteIds = [...new Set((routeIds || []).filter((id) => id != null))];
-  const cleanRoles = [...new Set((roleNames || []).filter((r) => typeof r === 'string' && r.startsWith('ldx_')))];
+  const cleanRoles = [...new Set((roleNames || []).filter(isEnterpriseBusinessRole))];
   if (!grantsRepo || !cleanRouteIds.length || !cleanRoles.length) return 0;
 
   let have = new Set();
@@ -396,7 +502,7 @@ async function resolveMobileOperationalRoles(db) {
     rows
       .map((r) => ({ name: val(r, 'name'), allowConfigure: val(r, 'allowConfigure'), snippets: val(r, 'snippets') }))
       .filter((r) => typeof r.name === 'string'
-        && /^ldx_[a-z0-9_]+$/.test(r.name)
+        && isEnterpriseBusinessRole(r.name)
         && !EXCLUDED_MOBILE_ROLES.has(r.name)
         && r.allowConfigure !== true
         && !(Array.isArray(r.snippets) && (r.snippets.includes('pm') || r.snippets.includes('pm.*'))))
@@ -506,6 +612,13 @@ async function attachDxosBlocksToTab(db, tabSchemaUid, slug, blocks) {
   let attached = 0;
   const allUids = [];
   for (const block of blocks) {
+    const blockUse = String(block?.use || '').trim();
+    if (!ALLOWED_DXOS_BLOCK_USES.has(blockUse)) {
+      throw Object.assign(new Error(`Disallowed DX-OS block use "${blockUse || '(empty)'}"`), {
+        code: 'DISALLOWED_BLOCK_USE',
+        status: 400,
+      });
+    }
     const uid = `dxos-ov-${slug}-${block.uidSuffix}`;
     allUids.push(uid);
     const existing = typeof flowModelsRepo.findOne === 'function'
@@ -620,7 +733,7 @@ async function composePortals(db, { applyBlueprint }) {
   if (linksRepo) {
     for (const ov of OVERVIEW_SPECS) {
       const uid = `ldx-portal-${ov.slug}`;
-      const configuredRoles = Array.isArray(portalMeta[uid]?.roles) ? portalMeta[uid].roles.filter((r) => typeof r === 'string' && r.startsWith('ldx_')) : [];
+      const configuredRoles = Array.isArray(portalMeta[uid]?.roles) ? portalMeta[uid].roles.filter(isEnterpriseBusinessRole) : [];
       if (!configuredRoles.length) continue;
       const links = (await linksRepo.find({ filter: { uiLayoutUid: uid } })) || [];
       const routeIds = [...new Set(links.map((l) => val(l, 'desktopRouteId')).filter((id) => id != null))];
@@ -633,4 +746,13 @@ async function composePortals(db, { applyBlueprint }) {
   return { createdPages, mobilePagesCreated: mobileRes.mobilePagesCreated, attachedBlocks, dxosBlocksAttached: dxosBlocksEnabled };
 }
 
-module.exports = { COLLECTION_FIELD_GROUPS, OVERVIEW_SPECS, EXTRA_DATA_PAGES, MOBILE_PORTAL_PAGES, composeMobilePortal, composePortals };
+module.exports = {
+  ALLOWED_DXOS_BLOCK_USES,
+  COLLECTION_FIELD_GROUPS,
+  OVERVIEW_SPECS,
+  EXTRA_DATA_PAGES,
+  MOBILE_PORTAL_PAGES,
+  attachDxosBlocksToTab,
+  composeMobilePortal,
+  composePortals,
+};

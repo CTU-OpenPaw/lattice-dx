@@ -13,8 +13,10 @@ const {
   isSafeAppPath,
   safeJsonParse,
   inferPortalSlugFromLocation,
-  triggerDxosCopilot,
+  triggerDxosAgent,
   requestAndDownloadExport,
+  formatStatusLabel,
+  stripDevBracketTags,
 } = require('./blocks-helpers');
 const { createRecordChatterView, createVoucherLifecycleBar } = require('./chatter-panel');
 
@@ -206,13 +208,21 @@ function evaluateRuleCondition(value, operator = 'gt', threshold = 0) {
   return false;
 }
 
-function resolveWidgetValue(widget, queryResults) {
-  if (widget.staticValue !== undefined && (!widget.queryId || !queryResults[widget.queryId]?.length)) {
+function resolveWidgetValue(widget, queryResults, queryCounts = {}) {
+  const metric = widget.metric || 'count';
+  const rows = queryResults?.[widget.queryId] || [];
+  const rawCount = widget.queryId && queryCounts ? queryCounts[widget.queryId] : undefined;
+  const hasCount = rawCount != null && Number.isFinite(Number(rawCount));
+  const resolvedCount = hasCount ? Number(rawCount) : null;
+
+  if (widget.staticValue !== undefined && (!widget.queryId || (!rows.length && !(metric === 'count' && hasCount && resolvedCount > 0)))) {
     return widget.staticValue;
   }
-  const rows = queryResults[widget.queryId] || [];
+  if (metric === 'count' && hasCount) {
+    return resolvedCount;
+  }
   if (!rows.length && widget.staticValue !== undefined) return widget.staticValue;
-  return evaluateQueryStats(rows, { metric: widget.metric || 'count', field: widget.field || '' });
+  return evaluateQueryStats(rows, { metric, field: widget.field || '' });
 }
 
 function navigateApp(app, path) {
@@ -253,13 +263,14 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
     const bp = React.useMemo(() => parseCreativeBlueprint(mergedCfg.blueprintJson || mergedCfg), [mergedCfg.blueprintJson, mergedCfg.title, mergedCfg.theme]);
     const palette = CREATIVE_THEMES[bp.theme] || CREATIVE_THEMES['industrial-cockpit'];
 
-    const [queryState, setQueryState] = React.useState({ loading: false, results: {}, error: '' });
+    const [queryState, setQueryState] = React.useState({ loading: false, results: {}, counts: {}, error: '' });
     const [actionNote, setActionNote] = React.useState('');
 
     const runQueries = React.useCallback(async () => {
       if (!api?.request || !bp.queries.length) return;
       setQueryState((prev) => ({ ...prev, loading: true, error: '' }));
       const results = {};
+      const counts = {};
       await Promise.all(bp.queries.map(async (q) => {
         try {
           if (q.kind === 'timeseries') {
@@ -280,20 +291,26 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
             results[q.id] = normalizeTelemetryRows(payload);
           } else if (q.kind === 'tasks') {
             const res = await api.request({ url: 'workflowManualTasks:listMine', method: 'get', params: { pageSize: q.limit, sort: ['-id'] } });
-            results[q.id] = Array.isArray(res?.data?.data) ? res.data.data : [];
+            const rows = Array.isArray(res?.data?.data) ? res.data.data : [];
+            results[q.id] = rows;
+            const metaCount = Number(res?.data?.meta?.count);
+            counts[q.id] = Number.isFinite(metaCount) ? metaCount : rows.length;
           } else {
             const res = await api.request({
               url: `${q.collection}:list`,
               method: 'get',
               params: { pageSize: q.limit, sort: ['-id'], ...(Object.keys(q.filter).length ? { filter: q.filter } : {}) },
             });
-            results[q.id] = Array.isArray(res?.data?.data) ? res.data.data : [];
+            const rows = Array.isArray(res?.data?.data) ? res.data.data : [];
+            results[q.id] = rows;
+            const metaCount = Number(res?.data?.meta?.count);
+            counts[q.id] = Number.isFinite(metaCount) ? metaCount : rows.length;
           }
         } catch {
           results[q.id] = [];
         }
       }));
-      setQueryState({ loading: false, results, error: '' });
+      setQueryState({ loading: false, results, counts, error: '' });
     }, [api, bp.queries]);
 
     React.useEffect(() => { runQueries(); }, [runQueries]);
@@ -318,7 +335,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
       }
       if (btn.kind === 'askAi') {
         const portalSlug = typeof window !== 'undefined' && window.location ? inferPortalSlugFromLocation(window.location.pathname) : '';
-        await triggerDxosCopilot(app, { aiEmployee: btn.aiEmployee, prompt: btn.prompt, blockTitle: mergedCfg.title || bp.title, portalSlug });
+        await triggerDxosAgent(app, { aiEmployee: btn.aiEmployee, prompt: btn.prompt, blockTitle: mergedCfg.title || bp.title, portalSlug });
         return;
       }
       if (btn.kind === 'createRecord' && api?.request) {
@@ -401,7 +418,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
           activeAlarms.length
             ? h('div', { style: { marginTop: 8, display: 'grid', gap: 6 } },
               activeAlarms.slice(0, 3).map((alm) => h('div', { key: alm.id, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 8px', borderRadius: 6, background: '#ef444418', border: '1px solid #ef444444', fontSize: 11 } },
-                h('span', null, `[${alm.severity}] ${alm.code} (${alm.status}, lặp ${alm.occurrenceCount || 1}x)`),
+                h('span', null, `[${formatStatusLabel(alm.severity)}] ${alm.code} (${formatStatusLabel(alm.status)}, lặp ${alm.occurrenceCount || 1}x)`),
                 h('div', { style: { display: 'flex', gap: 6 } },
                   alm.status === 'open' ? h('button', { type: 'button', onClick: () => handleAlarmTransition(alm.id, 'ack'), style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #f59e0b', background: 'transparent', color: '#f59e0b', cursor: 'pointer', fontWeight: 700 } }, 'Xác nhận (Ack)') : null,
                   h('button', { type: 'button', onClick: () => handleAlarmTransition(alm.id, 'clear'), style: { padding: '3px 8px', borderRadius: 6, border: '1px solid #10b981', background: 'transparent', color: '#10b981', cursor: 'pointer', fontWeight: 700 } }, 'Đóng (Clear)'),
@@ -412,7 +429,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         );
       }
       if (w.type === 'thermometer' || w.type === 'gauge') {
-        const valNum = resolveWidgetValue(w, queryState.results);
+        const valNum = resolveWidgetValue(w, queryState.results, queryState.counts);
         const min = Number.isFinite(Number(w.min)) ? Number(w.min) : 0;
         const max = Number.isFinite(Number(w.max)) && Number(w.max) > min ? Number(w.max) : Math.max(min + 1, 100);
         const numericVal = valNum === null || valNum === undefined || valNum === '' ? NaN : Number(valNum);
@@ -433,7 +450,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         );
       }
       if (w.type === 'rule-callout') {
-        const actual = resolveWidgetValue(w, queryState.results);
+        const actual = resolveWidgetValue(w, queryState.results, queryState.counts);
         const triggered = evaluateRuleCondition(actual, w.operator || 'gt', w.threshold ?? 0);
         const toneColor = triggered ? '#ef4444' : '#10b981';
         return h('div', { key: idx, style: { ...cardStyle, borderLeft: `4px solid ${toneColor}` } },
@@ -562,7 +579,7 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
               background: palette.badgeBg, color: palette.badgeColor, marginBottom: 6,
             },
           }, bp.badge),
-          h('h3', { style: { margin: 0, fontSize: 17, fontWeight: 800, color: palette.titleColor } }, String(mergedCfg.title || bp.title)),
+          h('h3', { style: { margin: 0, fontSize: 17, fontWeight: 800, color: palette.titleColor } }, stripDevBracketTags(mergedCfg.title || bp.title)),
           bp.subtitle ? h('div', { style: { fontSize: 12, color: palette.mutedColor, marginTop: 2 } }, bp.subtitle) : null,
         ),
         bp.queries.length ? h('button', {
@@ -586,6 +603,7 @@ module.exports = {
   parseCreativeBlueprint,
   normalizeTelemetryRows,
   evaluateQueryStats,
+  resolveWidgetValue,
   evaluateRuleCondition,
   createCreativeStudioView,
 };

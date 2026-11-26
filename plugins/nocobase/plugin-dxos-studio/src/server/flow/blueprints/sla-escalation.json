@@ -1,0 +1,140 @@
+{
+  "blueprintKey": "auto_sla_breach_escalation",
+  "ruleKey": "auto_sla_breach_escalation",
+  "name": "Leo thang Cảnh báo & Vi phạm SLA (DAG v2 Switch)",
+  "description": "Phân nhánh qua control.switch theo event.type: sla.warning nhắc điều phối viên ldx_dispatcher; sla.breached tạo phiếu xử lý khẩn trên latticeServiceTickets và leo thang tới ldx_manager.",
+  "category": "sla",
+  "triggerEventType": "sla.warning,sla.breached",
+  "dmnTableKey": null,
+  "cooldownSec": 120,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "sla.breached",
+    "source": "dxos-sla",
+    "subject": "TKT-001",
+    "data": {
+      "targetCollection": "latticeServiceTickets",
+      "recordId": 15,
+      "code": "TKT-001",
+      "priority": "high",
+      "overdueMinutes": 30,
+      "remainingMinutes": 0
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_sla",
+        "type": "trigger.event",
+        "label": "Nhận sự kiện SLA",
+        "position": { "x": 80, "y": 240 },
+        "config": {
+          "eventType": "sla.warning,sla.breached",
+          "filterJson": null
+        }
+      },
+      {
+        "id": "switch_sla_event",
+        "type": "control.switch",
+        "label": "Phân nhánh theo loại SLA",
+        "position": { "x": 360, "y": 240 },
+        "config": {
+          "expression": "event.type",
+          "cases": [
+            { "port": "case_0", "equals": "sla.warning", "operator": "eq" },
+            { "port": "case_1", "equals": "sla.breached", "operator": "eq" }
+          ]
+        }
+      },
+      {
+        "id": "notify_dispatcher_warn",
+        "type": "notify.send",
+        "label": "Nhắc điều phối viên sắp trễ SLA",
+        "position": { "x": 640, "y": 100 },
+        "config": {
+          "roleNames": ["ldx_dispatcher"],
+          "category": "sla",
+          "severity": "warning",
+          "title": "Cảnh báo sắp chạm ngưỡng SLA ({{data.code}})",
+          "body": "Bản ghi {{data.targetCollection}} #{{data.recordId}} còn {{data.remainingMinutes}} phút trước hạn SLA.",
+          "targetCollection": "{{data.targetCollection}}",
+          "targetRecordId": "{{data.recordId}}",
+          "targetPath": "/p/services"
+        }
+      },
+      {
+        "id": "create_sla_ticket",
+        "type": "data.create",
+        "label": "Tạo phiếu xử lý vi phạm SLA",
+        "position": { "x": 640, "y": 380 },
+        "config": {
+          "collection": "latticeServiceTickets",
+          "values": {
+            "code": "SLA-{{event.id}}",
+            "name": "Vi phạm SLA: {{data.code}}",
+            "serviceType": "facilities",
+            "priority": "high",
+            "description": "Quá hạn SLA {{data.overdueMinutes}} phút trên {{data.targetCollection}} #{{data.recordId}}."
+          }
+        }
+      },
+      {
+        "id": "notify_manager_breach",
+        "type": "notify.send",
+        "label": "Leo thang Quản lý khi vi phạm SLA",
+        "position": { "x": 920, "y": 380 },
+        "config": {
+          "roleNames": ["ldx_manager"],
+          "category": "sla",
+          "severity": "critical",
+          "title": "Leo thang SLA quá hạn: {{data.code}}",
+          "body": "Đã tạo phiếu xử lý khẩn #{{steps.create_sla_ticket.id}} do quá hạn SLA trên {{data.targetCollection}} #{{data.recordId}}.",
+          "targetCollection": "latticeServiceTickets",
+          "targetRecordId": "{{steps.create_sla_ticket.id}}",
+          "targetPath": "/p/services"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_trig_switch",
+        "source": "trig_sla",
+        "sourceHandle": "main",
+        "target": "switch_sla_event",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_case0_warn",
+        "source": "switch_sla_event",
+        "sourceHandle": "case_0",
+        "target": "notify_dispatcher_warn",
+        "targetHandle": "in",
+        "label": "sla.warning"
+      },
+      {
+        "id": "e_case1_create",
+        "source": "switch_sla_event",
+        "sourceHandle": "case_1",
+        "target": "create_sla_ticket",
+        "targetHandle": "in",
+        "label": "sla.breached"
+      },
+      {
+        "id": "e_create_escalate",
+        "source": "create_sla_ticket",
+        "sourceHandle": "main",
+        "target": "notify_manager_breach",
+        "targetHandle": "in"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 120,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

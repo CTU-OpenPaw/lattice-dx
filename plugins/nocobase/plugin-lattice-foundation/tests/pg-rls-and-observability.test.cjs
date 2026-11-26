@@ -46,10 +46,10 @@ function withMockedNocobase(fn) {
     });
 }
 
-test('pg-rls defines all 22 tenant-scoped tables, validates identifiers strictly, and parameterizes set_config', async () => {
+test('pg-rls defines at least 54 tenant-scoped tables (including snake_case attachment/upload tables), validates identifiers strictly, and parameterizes set_config', async () => {
   const pgRls = require('../src/server/pg-rls');
 
-  assert.equal(pgRls.TENANT_RLS_TABLES.length, 22);
+  assert.ok(pgRls.TENANT_RLS_TABLES.length >= 54, `Expected >= 54 RLS tables, got ${pgRls.TENANT_RLS_TABLES.length}`);
   for (const required of [
     'latticeRequests', 'latticeOrders', 'latticeAssets', 'latticeEmployees',
     'latticeDepartments', 'latticeLocations', 'latticeIncidentCases', 'latticeIncidentRules',
@@ -58,6 +58,17 @@ test('pg-rls defines all 22 tenant-scoped tables, validates identifiers strictly
     'latticeParaDocuments', 'latticeParaChunks', 'latticeServiceTickets',
     'latticeAiProfiles', 'latticeAiAuditLogs', 'latticeAiQuotaUsage',
     'latticeAiApprovalQueue', 'latticeTelemetryPoints',
+    'latticeApiKeys', 'latticePkiKeys', 'latticeCryptoLedger',
+    'latticeFrozenSnapshots', 'latticeDataLineage', 'latticeDataQuarantine',
+    'latticeOrderLines', 'latticeStockLots', 'latticeEpodRecords',
+    'latticeDecisionTables', 'latticeDelegations', 'latticeTwinShadows',
+    'latticeConnectors', 'latticeEventBus', 'latticeWebhookSubscriptions',
+    'latticeWebhookDeliveries', 'latticeIotDevices', 'latticeBrokerSubscriptions',
+    'latticeAutomationRules', 'latticeAutomationRuns', 'latticeBuiltApps',
+    'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions', 'latticeA2aTasks',
+    'latticeNotificationDeliveries', 'latticeApprovalPolicies', 'latticeApprovalRequests',
+    'latticePublicForms', 'latticePublicFormSubmissions',
+    'lattice_native_request_attachments', 'lattice_native_request_uploads',
   ]) {
     assert.ok(pgRls.TENANT_RLS_TABLES.includes(required), `Missing RLS table ${required}`);
   }
@@ -100,6 +111,22 @@ test('pg-rls defines all 22 tenant-scoped tables, validates identifiers strictly
   // setTransactionRlsOrg fails closed when transaction is missing
   await assert.rejects(() => pgRls.setTransactionRlsOrg(pgDb, 'org-alpha_01', null), { code: 'RLS_TRANSACTION_UNAVAILABLE' });
 
+  // withSystemRlsBypass sets app.rls_bypass='on' inside a transaction and rejects invalid inputs
+  assert.equal(typeof pgRls.withSystemRlsBypass, 'function');
+  await assert.rejects(() => pgRls.withSystemRlsBypass(pgDb, null), TypeError);
+  await assert.rejects(() => pgRls.withSystemRlsBypass({}, async () => 'nope'), { code: 'RLS_TRANSACTION_UNAVAILABLE' });
+
+  queries.length = 0;
+  const bypassOut = await pgRls.withSystemRlsBypass(pgDb, async (tx) => {
+    assert.equal(tx, fakeTx);
+    assert.equal(pgRls.getActiveRlsContext()?.systemRlsBypass, true);
+    return 'bypass-ok';
+  });
+  assert.equal(bypassOut, 'bypass-ok');
+  assert.equal(queries.length, 1);
+  assert.equal(queries[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+  assert.equal(queries[0].opts.transaction, fakeTx);
+
   // Non-postgres dialect skips set_config cleanly while running transaction callback
   const sqliteQueries = [];
   const sqliteDb = {
@@ -111,6 +138,8 @@ test('pg-rls defines all 22 tenant-scoped tables, validates identifiers strictly
   };
   const sqliteOut = await pgRls.withTenantRlsContext(sqliteDb, 'org-alpha_01', async () => 'ok');
   assert.equal(sqliteOut, 'ok');
+  const sqliteBypassOut = await pgRls.withSystemRlsBypass(sqliteDb, async () => 'bypass-sqlite-ok');
+  assert.equal(sqliteBypassOut, 'bypass-sqlite-ok');
   assert.equal(sqliteQueries.length, 0);
 });
 
@@ -214,7 +243,8 @@ test('installRlsTransactionBridge injects active AsyncLocalStorage transaction i
     await guard(ctx, async () => {
       await fakeDb.getRepository('latticeOrders').find({ filter: {} });
     });
-    assert.equal(seqCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.equal(seqCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(seqCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
     assert.equal(repoCalls.find((c) => c.method === 'assetFindOne').opts.transaction, fakeTx);
     assert.equal(repoCalls.find((c) => c.method === 'deptFindOne').opts.transaction, fakeTx);
     assert.equal(repoCalls.find((c) => c.method === 'find').opts.transaction, fakeTx);
@@ -224,12 +254,19 @@ test('installRlsTransactionBridge injects active AsyncLocalStorage transaction i
   }
 });
 
-test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive PostgreSQL RLS DDL and reversible down()', async () => {
+test('attachRlsPolicyToTable and migrations 20261123000600 & 20261127000100 emit fail-closed FORCE PostgreSQL RLS DDL and OAuth2 connector columns', async () => {
   await withMockedNocobase(async () => {
     const pgRls = require('../src/server/pg-rls');
     const migPath = require.resolve('../src/server/migrations/20261123000600-postgresql-rls-policies');
     delete require.cache[migPath];
     const Migration = require('../src/server/migrations/20261123000600-postgresql-rls-policies');
+
+    const policySql = pgRls.buildRlsPolicySql('latticeOrders');
+    assert.match(policySql.enableSql, /ENABLE ROW LEVEL SECURITY/);
+    assert.match(policySql.enableSql, /FORCE ROW LEVEL SECURITY/);
+    assert.match(policySql.createSql, /current_setting\('app\.rls_bypass', true\) = 'on'/);
+    assert.equal(policySql.createSql.includes('IS NULL'), false, 'RLS policy must fail closed (no IS NULL)');
+    assert.equal(policySql.createSql.includes("= ''"), false, 'RLS policy must fail closed (no empty string bypass)');
 
     const ddl = [];
     const fakeTx = { id: 'tx-mig' };
@@ -254,11 +291,13 @@ test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive 
     const single = await pgRls.attachRlsPolicyToTable(fakeDb, 'latticeOrders', { transaction: fakeTx });
     assert.equal(single.applied, true);
     assert.match(ddl[0].sql, /ALTER TABLE public\."latticeOrders" ENABLE ROW LEVEL SECURITY/);
+    assert.match(ddl[0].sql, /ALTER TABLE public\."latticeOrders" FORCE ROW LEVEL SECURITY/);
     assert.match(ddl[1].sql, /DROP POLICY IF EXISTS lattice_tenant_isolation ON public\."latticeOrders"/);
     assert.match(ddl[2].sql, /CREATE POLICY lattice_tenant_isolation ON public\."latticeOrders"/);
     assert.match(ddl[2].sql, /AS PERMISSIVE FOR ALL TO PUBLIC/);
-    assert.match(ddl[2].sql, /current_setting\('app\.current_org', true\) IS NULL/);
-    assert.match(ddl[2].sql, /"organizationId" = current_setting\('app\.current_org', true\)/);
+    assert.match(ddl[2].sql, /current_setting\('app\.rls_bypass', true\) = 'on'/);
+    assert.equal(ddl[2].sql.includes('IS NULL'), false);
+    assert.match(ddl[2].sql, /"organizationId" = nullif\(current_setting\('app\.current_org', true\), ''\)/);
     assert.match(ddl[2].sql, /WITH CHECK \(/);
 
     ddl.length = 0;
@@ -269,6 +308,7 @@ test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive 
     const joinedUp = ddl.map((d) => d.sql).join('\n');
     assert.match(joinedUp, /information_schema\.columns/);
     assert.match(joinedUp, /ALTER TABLE public\."latticeRequests" ENABLE ROW LEVEL SECURITY/);
+    assert.match(joinedUp, /ALTER TABLE public\."latticeRequests" FORCE ROW LEVEL SECURITY/);
     assert.match(joinedUp, /ALTER TABLE public\."latticeNotifications" ENABLE ROW LEVEL SECURITY/);
     assert.match(joinedUp, /ALTER TABLE public\."latticeCustomColdAudits" ENABLE ROW LEVEL SECURITY/);
     assert.equal(joinedUp.includes('"latticeAssets"'), false, 'must not alter unsynced tables absent from information_schema.columns');
@@ -288,6 +328,48 @@ test('attachRlsPolicyToTable and migration 20261123000600 emit valid permissive 
     });
     await sqliteMigration.up();
     await sqliteMigration.down();
+
+    // Migration 20261127000100 re-attaches FORCE RLS and adds OAuth2/n8n columns on latticeConnectors reversibly
+    const forceMigPath = require.resolve('../src/server/migrations/20261127000100-force-rls-and-oauth2-connectors');
+    delete require.cache[forceMigPath];
+    const ForceRlsMigration = require('../src/server/migrations/20261127000100-force-rls-and-oauth2-connectors');
+    const forceMig = new ForceRlsMigration({ db: fakeDb });
+    assert.equal(forceMig.on, 'afterSync');
+
+    ddl.length = 0;
+    await forceMig.up();
+    const forceUpSql = ddl.map((d) => d.sql).join('\n');
+    assert.match(forceUpSql, /FORCE ROW LEVEL SECURITY/);
+    for (const col of [
+      'appType',
+      'capabilitiesJson',
+      'oauthConfigJson',
+      'oauthAccessTokenEnc',
+      'oauthRefreshTokenEnc',
+      'oauthTokenExpiresAt',
+      'oauthScope',
+      'oauthStateNonce',
+      'n8nCredentialId',
+    ]) {
+      assert.match(forceUpSql, new RegExp(`ALTER TABLE IF EXISTS "latticeConnectors" ADD COLUMN IF NOT EXISTS "${col}"`));
+    }
+
+    ddl.length = 0;
+    await forceMig.down();
+    const forceDownSql = ddl.map((d) => d.sql).join('\n');
+    for (const col of [
+      'appType',
+      'capabilitiesJson',
+      'oauthConfigJson',
+      'oauthAccessTokenEnc',
+      'oauthRefreshTokenEnc',
+      'oauthTokenExpiresAt',
+      'oauthScope',
+      'oauthStateNonce',
+      'n8nCredentialId',
+    ]) {
+      assert.match(forceDownSql, new RegExp(`ALTER TABLE IF EXISTS "latticeConnectors" DROP COLUMN IF EXISTS "${col}"`));
+    }
   });
 });
 
@@ -323,21 +405,33 @@ test('native-scope sets ctx.state.latticeRlsOrg and executes withTenantRlsContex
     assert.equal(sqlCalls.length, 0);
 
     process.env.DX_PG_RLS_SESSION = 'true';
+    const circularSeq = {};
+    circularSeq.dialect = { sequelize: circularSeq };
+    fakeTx.sequelize = circularSeq;
     const ctxOn = { state: { currentUser: { id: 12 }, currentRole: 'ldx_employee' }, action: { resourceName: 'latticeAssets', actionName: 'list', params: {} } };
     let sawTxInsideNext = null;
-    await guard(ctxOn, async () => { sawTxInsideNext = ctxOn.state.latticeRlsTransaction; });
+    let stateSerialized = null;
+    await guard(ctxOn, async () => {
+      sawTxInsideNext = ctxOn.state.latticeRlsTransaction;
+      stateSerialized = JSON.parse(JSON.stringify(ctxOn.state));
+    });
     assert.equal(ctxOn.state.latticeRlsOrg, 'org-a');
     assert.equal(sawTxInsideNext, fakeTx);
-    assert.equal(sqlCalls.length, 1);
-    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
-    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.equal(Object.getOwnPropertyDescriptor(ctxOn.state, 'latticeRlsTransaction').enumerable, false);
+    assert.equal(stateSerialized.latticeRlsOrg, 'org-a');
+    assert.equal('latticeRlsTransaction' in stateSerialized, false);
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[1].opts.replacements, { orgId: 'org-a' });
 
-    // Root bypasses actor resolution and does not lock tenant RLS org
+    // Root uses explicit system RLS bypass without locking a tenant org
     sqlCalls.length = 0;
     const rootCtx = { state: { currentUser: { id: 1 }, currentRole: 'root' }, action: { resourceName: 'latticeAssets', actionName: 'list', params: {} } };
     await guard(rootCtx, async () => {});
     assert.equal(rootCtx.state.latticeRlsOrg, undefined);
-    assert.equal(sqlCalls.length, 0);
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
 
     // charts:queryData & updateScopedDocument also bind app.current_org when DX_PG_RLS_SESSION=true
     sqlCalls.length = 0;
@@ -347,8 +441,10 @@ test('native-scope sets ctx.state.latticeRlsOrg and executes withTenantRlsContex
     };
     await guard(chartCtx, async () => {});
     assert.equal(chartCtx.state.latticeRlsOrg, 'org-a');
-    assert.equal(sqlCalls.length, 1);
-    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.equal(sqlCalls.length, 2);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.rls_bypass', 'on', true)");
+    assert.equal(sqlCalls[1].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[1].opts.replacements, { orgId: 'org-a' });
 
     const { updateScopedDocument } = require('../src/server/native-scope');
     sqlCalls.length = 0;
@@ -751,18 +847,25 @@ test('dxos:metrics resolves admin JWT when ACL is public (ctx.auth.skipCheck() =
   );
 });
 
-test('CodeQL remediation: build.mjs bundles use top-level __deps, full-backup-core uses DX_RESTORE_ARG_JSON, backup-policy avoids lstat-open race', async () => {
-  const buildFiles = [
+test('CodeQL remediation: build.mjs bundles avoid dep wrapper interpolation, full-backup-core uses DX_RESTORE_ARG_JSON, backup-policy avoids lstat-open race', async () => {
+  const customBundleFiles = [
     'plugins/nocobase/plugin-lattice-foundation/scripts/build.mjs',
     'plugins/nocobase/plugin-dxos-ai/build.mjs',
-    'plugins/nocobase/plugin-dxos-blocks/build.mjs',
-    'plugins/nocobase/plugin-dxos-studio/build.mjs',
   ];
-  for (const rel of buildFiles) {
+  for (const rel of customBundleFiles) {
     const src = readFileSync(join(REPO_ROOT, rel), 'utf8');
     assert.match(src, /const __deps = /, `${rel} must emit top-level const __deps`);
     assert.match(src, /__modules\[id\]\(module,\s*module\.exports,\s*id\)/, `${rel} must pass id into __modules[id]`);
     assert.equal(/\$\{JSON\.stringify\((?:dependencies|deps)\)\}/.test(src), false, `${rel} must not interpolate deps JSON into wrapper function string`);
+  }
+  for (const esbuildRel of [
+    'plugins/nocobase/plugin-dxos-studio/build.mjs',
+    'plugins/nocobase/plugin-dxos-blocks/build.mjs',
+  ]) {
+    const esbuildSrc = readFileSync(join(REPO_ROOT, esbuildRel), 'utf8');
+    assert.match(esbuildSrc, /esbuild\.build\(/, `${esbuildRel} must use esbuild bundler`);
+    assert.match(esbuildSrc, /__dxosHostExternals/, `${esbuildRel} must resolve host externals lexically`);
+    assert.equal(/\$\{JSON\.stringify\((?:dependencies|deps)\)\}/.test(esbuildSrc), false, `${esbuildRel} must not interpolate deps JSON into wrapper function string`);
   }
 
   const backupCoreSrc = readFileSync(join(REPO_ROOT, 'scripts/full-backup-core.mjs'), 'utf8');
@@ -809,13 +912,17 @@ test('CodeQL remediation: build.mjs bundles use top-level __deps, full-backup-co
     'plugins/nocobase/plugin-lattice-foundation/dist/client/index.js',
     'plugins/nocobase/plugin-lattice-foundation/dist/client-v2/index.js',
     'plugins/nocobase/plugin-dxos-ai/dist/client/index.js',
-    'plugins/nocobase/plugin-dxos-blocks/dist/client/index.js',
-    'plugins/nocobase/plugin-dxos-studio/dist/client/index.js',
   ]) {
     const bundleSrc = readFileSync(join(REPO_ROOT, distRel), 'utf8');
     assert.match(bundleSrc, /const __deps = \{/);
     assert.match(bundleSrc, /__modules\[id\]\(module,module\.exports,id\)/);
   }
+  const studioDistSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-studio/dist/client/index.js'), 'utf8');
+  assert.match(studioDistSrc, /define\(['"]@latticedx\/plugin-dxos-studio['"]/);
+  assert.equal(/\bnew Function\s*\(|\beval\s*\(/.test(studioDistSrc), false);
+  const blocksDistSrc = readFileSync(join(REPO_ROOT, 'plugins/nocobase/plugin-dxos-blocks/dist/client/index.js'), 'utf8');
+  assert.match(blocksDistSrc, /define\(['"]@latticedx\/plugin-dxos-blocks['"]/);
+  assert.match(blocksDistSrc, /var __dxosHostExternals = \{/);
 
   // Runtime smoke check on compiled client bundle with top-level __deps + __load
   const origLoad = Module._load;
@@ -930,4 +1037,789 @@ test('LatticeFoundationPlugin.load wires observability resource & middleware whi
     assert.equal(queryOptsCalls.length, 3);
     assert.equal(queryOptsCalls.every((o) => o === undefined), true);
   });
+});
+
+test('runInRlsSavepoint isolates SQL failures inside active PostgreSQL RLS transactions and passes through otherwise', async () => {
+  const pgRls = require('../src/server/pg-rls');
+  const sqlLog = [];
+  let aborted = false;
+  const fakeTx = { id: 'tx-sp-1' };
+  const pgDb = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        aborted = false;
+        return cb(fakeTx);
+      },
+      query: async (sql, opts) => {
+        const text = String(sql);
+        sqlLog.push({ text, tx: opts?.transaction });
+        if (text.startsWith('ROLLBACK TO SAVEPOINT ')) {
+          aborted = false;
+        } else if (aborted) {
+          throw new Error('current transaction is aborted, commands ignored until end of transaction block');
+        }
+        return [[]];
+      },
+    },
+  };
+
+  // Outside RLS tx -> pass-through without issuing SAVEPOINT
+  const outside = await pgRls.runInRlsSavepoint(pgDb, async (tx) => {
+    assert.equal(tx, null);
+    return 'plain';
+  });
+  assert.equal(outside, 'plain');
+  assert.equal(sqlLog.length, 0);
+
+  // Inside PG RLS tx -> SAVEPOINT + RELEASE on success; ROLLBACK TO SAVEPOINT + RELEASE on error leaving outer tx healthy
+  await pgRls.withTenantRlsContext(pgDb, 'org-sp-1', async () => {
+    const okVal = await pgRls.runInRlsSavepoint(pgDb, async (tx) => {
+      assert.equal(tx, fakeTx);
+      return 99;
+    });
+    assert.equal(okVal, 99);
+
+    await assert.rejects(
+      () => pgRls.runInRlsSavepoint(pgDb, async () => {
+        aborted = true;
+        throw Object.assign(new Error('invalid input syntax for type bigint: ""'), { code: '22P02' });
+      }),
+      { code: '22P02' },
+    );
+
+    // Outer tx must still accept queries after savepoint rollback!
+    await pgDb.sequelize.query('SELECT 1', { transaction: fakeTx });
+  });
+
+  assert.ok(sqlLog.some((e) => /^SAVEPOINT "ldx_sp_\d+"$/.test(e.text)));
+  assert.ok(sqlLog.some((e) => /^ROLLBACK TO SAVEPOINT "ldx_sp_\d+"$/.test(e.text)));
+  assert.ok(sqlLog.some((e) => /^RELEASE SAVEPOINT "ldx_sp_\d+"$/.test(e.text)));
+  assert.equal(sqlLog.at(-1).text, 'SELECT 1');
+
+  // Non-postgres dialect passes through cleanly even inside RLS transaction
+  const sqliteLog = [];
+  const sqliteDb = {
+    sequelize: {
+      getDialect: () => 'sqlite',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql) => { sqliteLog.push(sql); return [[]]; },
+    },
+  };
+  const spSqlite = await pgRls.withTenantRlsContext(sqliteDb, 'org-sp-2', () => pgRls.runInRlsSavepoint(sqliteDb, async () => 'sqlite-ok'));
+  assert.equal(spSqlite, 'sqlite-ok');
+  assert.equal(sqliteLog.length, 0);
+});
+
+test('system/auth/observability/bootstrap helpers execute inside withSystemRlsBypass when DX_PG_RLS_SESSION=true', async () => {
+  const { createHash } = require('node:crypto');
+  const { collectDbGauges } = require('../src/server/observability');
+  const { createPaasApiKeyAuthMiddleware } = require('../src/server/paas-api-keys');
+  const { seedFoundation } = require('../src/server/seed');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+
+  const rawPat = 'ldx_pat_12345678_1234567890abcdef1234567890abcdef';
+  const keyHash = createHash('sha256').update(rawPat, 'utf8').digest('hex');
+
+  const sqlLog = [];
+  const fakeTx = { id: 'tx-sys-bypass' };
+  const seenCountTxs = [];
+  const seenPatFindTxs = [];
+  const seenSeedTxs = [];
+
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql, opts) => {
+        sqlLog.push({ sql, opts });
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeApiKeys') {
+        return {
+          findOne: async (opts) => {
+            seenPatFindTxs.push(opts?.transaction || null);
+            return {
+              id: 7,
+              organizationId: 'org-a',
+              keyPrefix: 'ldx_pat_12345678',
+              keyHash,
+              userId: 12,
+              employeeId: 1,
+              roleName: 'ldx_admin',
+              scopesJson: ['read'],
+              active: true,
+              revokedAt: null,
+              expiresAt: null,
+              lastUsedAt: new Date(),
+            };
+          },
+        };
+      }
+      if (name === 'users') {
+        return { findOne: async () => ({ id: 12, active: true }) };
+      }
+      if (name === 'rolesUsers') {
+        return { find: async () => [{ userId: 12, roleName: 'ldx_admin' }] };
+      }
+      if (name === 'latticeEmployees') {
+        return {
+          findOne: async (opts) => {
+            if (opts?.filter?.code) {
+              seenSeedTxs.push(opts?.transaction || null);
+              return null;
+            }
+            seenPatFindTxs.push(opts?.transaction || null);
+            return { id: 1, userId: 12, organizationId: 'org-a', active: true };
+          },
+          create: async (opts) => {
+            seenSeedTxs.push(opts?.transaction || null);
+            return { get: () => 1 };
+          },
+        };
+      }
+      if (['latticeDepartments', 'latticeLocations', 'latticeAssets'].includes(name)) {
+        return {
+          findOne: async (opts) => {
+            seenSeedTxs.push(opts?.transaction || null);
+            return null;
+          },
+          create: async (opts) => {
+            seenSeedTxs.push(opts?.transaction || null);
+            return { get: (k) => (k === 'id' ? 1 : 'org-a') };
+          },
+        };
+      }
+      return {
+        count: async (opts) => {
+          seenCountTxs.push(opts?.transaction || null);
+          return 3;
+        },
+      };
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+
+    // 1. collectDbGauges sets app.rls_bypass='on' and passes transaction to repo.count
+    sqlLog.length = 0;
+    const gauges = await collectDbGauges(db);
+    assert.equal(gauges.ai_audit_logs_total, 3);
+    assert.ok(sqlLog.some((e) => e.sql === "SELECT set_config('app.rls_bypass', 'on', true)" && e.opts?.transaction === fakeTx));
+    assert.ok(seenCountTxs.length > 0 && seenCountTxs.every((tx) => tx === fakeTx));
+
+    // 2. PaaS API key auth middleware looks up key & employee under app.rls_bypass='on' before calling next()
+    sqlLog.length = 0;
+    const patMw = createPaasApiKeyAuthMiddleware(db);
+    const patCtx = {
+      method: 'GET',
+      headers: { 'x-lattice-api-key': rawPat },
+      request: { headers: { 'x-lattice-api-key': rawPat } },
+      state: {},
+      action: { resourceName: 'latticeAssets', actionName: 'list' },
+    };
+    let activeCtxDuringNext = null;
+    const pgRls = require('../src/server/pg-rls');
+    await patMw(patCtx, async () => {
+      activeCtxDuringNext = pgRls.getActiveRlsContext();
+    });
+    assert.equal(patCtx.state.currentUser.id, 12);
+    assert.equal(activeCtxDuringNext, null, 'PaaS auth must exit system bypass before running downstream next()');
+    assert.ok(sqlLog.some((e) => e.sql === "SELECT set_config('app.rls_bypass', 'on', true)" && e.opts?.transaction === fakeTx));
+    assert.ok(seenPatFindTxs.length >= 2 && seenPatFindTxs.every((tx) => tx === fakeTx));
+
+    // 3. seedFoundation sets app.rls_bypass='on' when invoked with a PG transaction
+    sqlLog.length = 0;
+    await seedFoundation(db, fakeTx);
+    assert.ok(sqlLog.some((e) => e.sql === "SELECT set_config('app.rls_bypass', 'on', true)" && e.opts?.transaction === fakeTx));
+    assert.ok(seenSeedTxs.length > 0 && seenSeedTxs.every((tx) => tx === fakeTx));
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});
+
+test('Task 1 remediation: collectDbGauges isolates 42P01 failures via SAVEPOINT so PG 25P02 never poisons subsequent counts', async () => {
+  const { collectDbGauges } = require('../src/server/observability');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+  let txAborted = false;
+  let activeSavepoint = null;
+  let abortedAtSavepoint = false;
+  const fakeTx = { id: 'tx-gauges-sp' };
+
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        txAborted = false;
+        activeSavepoint = null;
+        return cb(fakeTx);
+      },
+      query: async (sql) => {
+        const text = String(sql);
+        if (text.startsWith('SAVEPOINT ')) {
+          if (txAborted) throw Object.assign(new Error('current transaction is aborted'), { code: '25P02' });
+          activeSavepoint = text;
+          abortedAtSavepoint = false;
+          return [[]];
+        }
+        if (text.startsWith('ROLLBACK TO SAVEPOINT ')) {
+          if (activeSavepoint) {
+            txAborted = abortedAtSavepoint;
+          }
+          return [[]];
+        }
+        if (text.startsWith('RELEASE SAVEPOINT ')) {
+          activeSavepoint = null;
+          return [[]];
+        }
+        if (txAborted) throw Object.assign(new Error('current transaction is aborted'), { code: '25P02' });
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      return {
+        count: async () => {
+          if (txAborted) {
+            throw Object.assign(new Error('current transaction is aborted, commands ignored until end of transaction block'), { code: '25P02' });
+          }
+          if (name === 'latticeAiAuditLogs') {
+            txAborted = true;
+            if (!activeSavepoint) abortedAtSavepoint = true;
+            throw Object.assign(new Error('relation "latticeAiAuditLogs" does not exist'), { code: '42P01' });
+          }
+          if (name === 'latticeIncidentCases') return 7;
+          if (name === 'latticeNotifications') return 4;
+          if (name === 'latticeSlaPolicies') return 2;
+          return 1;
+        },
+      };
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const gauges = await collectDbGauges(db);
+    assert.equal(gauges.ai_audit_logs_total, 0);
+    assert.equal(gauges.active_alarms_total, 7);
+    assert.equal(gauges.unread_notifications_total, 4);
+    assert.equal(gauges.sla_policies_active, 2);
+    assert.equal(gauges.outbox_by_state.pending, 1);
+    assert.equal(gauges.event_bus_by_status.queued, 1);
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});
+
+test('Task 1 remediation: foundation custom-resource HTTP handlers wrap DB operations in RLS context and paas-api-keys gates dxosN8n mutating actions', async () => {
+  const { registerEventBus } = require('../src/server/event-bus');
+  const { registerContextResource } = require('../src/server/native-context-delivery');
+  const { registerNotificationCenter } = require('../src/server/notification-center');
+  const { registerChatterResource } = require('../src/server/record-chatter');
+  const { registerVoucherLifecycleResource } = require('../src/server/voucher-lifecycle');
+  const { registerPkiLedger } = require('../src/server/pki-ledger');
+  const { registerDataGovernance } = require('../src/server/data-governance');
+  const { createPaasApiKeyAuthMiddleware } = require('../src/server/paas-api-keys');
+  const { TENANT_RLS_TABLES } = require('../src/server/pg-rls');
+  const { createHash } = require('node:crypto');
+
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+  const rlsTableSet = new Set(TENANT_RLS_TABLES);
+  const txStateMap = new WeakMap();
+  let txSeq = 0;
+
+  const tables = {
+    users: [{ id: 10, username: 'admin-a', active: true }, { id: 1, username: 'root', active: true }],
+    roles: [{ name: 'ldx_admin', allowConfigure: true, snippets: ['pm'] }, { name: 'root', allowAll: true, allowConfigure: true }],
+    rolesUsers: [{ userId: 10, roleName: 'ldx_admin' }, { userId: 1, roleName: 'root' }],
+    latticeEmployees: [{ id: 100, userId: 10, organizationId: 'org-a', active: true, code: 'ADM-A', name: 'Admin A' }],
+    latticeRequests: [{ id: 5, organizationId: 'org-a', code: 'REQ-5', name: 'Cold Box', requesterId: 100, status: 'draft', version: 1, amendmentNo: 0, amendedFromId: null }],
+    latticeNotifications: [{ id: 1, organizationId: 'org-a', recipientUserId: 10, title: 'Alert', category: 'system', severity: 'info', readAt: null, active: true }],
+    latticeRecordChatter: [],
+    latticeContextOutbox: [{ id: 1, eventId: `native-${'a'.repeat(64)}`, organizationId: 'org-a', state: 'failed', attempts: 2 }],
+    latticeEventBus: [{ id: 1, organizationId: 'org-a', eventId: 'ev-1', eventType: 'test.ev', source: 'test', status: 'queued', occurredAt: new Date().toISOString() }],
+    latticeWebhookSubscriptions: [],
+    latticeWebhookDeliveries: [],
+    latticePkiKeys: [],
+    latticeCryptoLedger: [],
+    latticeFrozenSnapshots: [],
+    latticeDataLineage: [],
+    latticeDataQuarantine: [],
+    latticeOrders: [],
+    latticeServiceTickets: [],
+    latticeApiKeys: [],
+  };
+
+  const rawReadPat = 'ldx_pat_aaaaaaaa_11111111111111111111111111111111';
+  const rawIotPat = 'ldx_pat_bbbbbbbb_22222222222222222222222222222222';
+  const rawAiPat = 'ldx_pat_cccccccc_33333333333333333333333333333333';
+  const rawWritePat = 'ldx_pat_dddddddd_44444444444444444444444444444444';
+  tables.latticeApiKeys.push(
+    { id: 1, organizationId: 'org-a', userId: 10, employeeId: 100, roleName: 'ldx_admin', keyPrefix: 'ldx_pat_aaaaaaaa', keyHash: createHash('sha256').update(rawReadPat).digest('hex'), scopesJson: ['read'], active: true },
+    { id: 2, organizationId: 'org-a', userId: 10, employeeId: 100, roleName: 'ldx_admin', keyPrefix: 'ldx_pat_bbbbbbbb', keyHash: createHash('sha256').update(rawIotPat).digest('hex'), scopesJson: ['iot'], active: true },
+    { id: 3, organizationId: 'org-a', userId: 10, employeeId: 100, roleName: 'ldx_admin', keyPrefix: 'ldx_pat_cccccccc', keyHash: createHash('sha256').update(rawAiPat).digest('hex'), scopesJson: ['ai'], active: true },
+    { id: 4, organizationId: 'org-a', userId: 10, employeeId: 100, roleName: 'ldx_admin', keyPrefix: 'ldx_pat_dddddddd', keyHash: createHash('sha256').update(rawWritePat).digest('hex'), scopesJson: ['write'], active: true },
+  );
+
+  const assertRlsVisibility = (tableName, row, opts) => {
+    if (!rlsTableSet.has(tableName)) return true;
+    const tx = opts?.transaction;
+    if (!tx) return false;
+    const st = txStateMap.get(tx);
+    if (!st) return false;
+    if (st.bypass === 'on') return true;
+    return st.orgId && row.organizationId === st.orgId;
+  };
+
+  const assertRlsWrite = (tableName, orgId, opts) => {
+    if (!rlsTableSet.has(tableName)) return;
+    const tx = opts?.transaction;
+    const st = tx ? txStateMap.get(tx) : null;
+    if (!st || (st.bypass !== 'on' && (!st.orgId || st.orgId !== orgId))) {
+      throw Object.assign(new Error(`new row violates row-level security policy for table "${tableName}"`), { code: '42501' });
+    }
+  };
+
+  const match = (row, filter = {}) => Object.entries(filter || {}).every(([k, cond]) => {
+    if (k === '$and' && Array.isArray(cond)) return cond.every((s) => match(row, s));
+    if (k === '$or' && Array.isArray(cond)) return cond.some((s) => match(row, s));
+    if (cond && typeof cond === 'object' && !Array.isArray(cond) && !(cond instanceof Date)) {
+      if (Array.isArray(cond.$in)) return cond.$in.includes(row[k]);
+      if (Object.hasOwn(cond, '$ne')) return row[k] !== cond.$ne;
+    }
+    return row[k] === cond;
+  });
+
+  const wrapRow = (tableName, r) => (r ? {
+    ...r,
+    get: (k) => r[k],
+    toJSON: () => ({ ...r }),
+    update: async (patch, opts) => {
+      assertRlsWrite(tableName, r.organizationId, opts);
+      Object.assign(r, patch);
+      return wrapRow(tableName, r);
+    },
+  } : null);
+
+  const db = {
+    on() {},
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        const tx = { id: `tx-${++txSeq}`, LOCK: { UPDATE: 'UPDATE', SHARE: 'SHARE' } };
+        txStateMap.set(tx, { bypass: '', orgId: '' });
+        return cb(tx);
+      },
+      query: async (sql, opts = {}) => {
+        const text = String(sql);
+        const st = opts?.transaction ? txStateMap.get(opts.transaction) : null;
+        if (text.includes("SELECT current_setting('app.rls_bypass', true) AS prev")) {
+          return [[{ prev: st?.bypass || '' }]];
+        }
+        if (text.includes("set_config('app.rls_bypass', 'on'")) {
+          if (st) st.bypass = 'on';
+          return [[]];
+        }
+        if (text.includes("set_config('app.rls_bypass', :prev")) {
+          if (st) st.bypass = String(opts?.replacements?.prev || '');
+          return [[]];
+        }
+        if (text.includes("set_config('app.current_org'")) {
+          if (st) st.orgId = String(opts?.replacements?.orgId || '');
+          return [[]];
+        }
+        return [[]];
+      },
+    },
+    getModel(name) {
+      if (!(name in tables)) return null;
+      return {
+        findOne: async ({ where, transaction }) => {
+          const hit = tables[name].find((r) => match(r, where) && assertRlsVisibility(name, r, { transaction }));
+          return wrapRow(name, hit);
+        },
+      };
+    },
+    getRepository(name) {
+      if (!(name in tables)) return null;
+      return {
+        find: async (opts = {}) => tables[name]
+          .filter((r) => match(r, opts.filter) && assertRlsVisibility(name, r, opts))
+          .slice(0, opts.limit || 200)
+          .map((r) => wrapRow(name, r)),
+        findOne: async (opts = {}) => {
+          const hit = tables[name].find((r) => match(r, opts.filter) && assertRlsVisibility(name, r, opts));
+          return wrapRow(name, hit);
+        },
+        count: async (opts = {}) => tables[name].filter((r) => match(r, opts.filter) && assertRlsVisibility(name, r, opts)).length,
+        create: async (opts = {}) => {
+          assertRlsWrite(name, opts.values?.organizationId, opts);
+          const row = { id: tables[name].length + 1, createdAt: new Date().toISOString(), ...opts.values };
+          tables[name].push(row);
+          return wrapRow(name, row);
+        },
+        update: async (opts = {}) => {
+          const updated = [];
+          for (const r of tables[name]) {
+            if ((opts.filterByTk == null || Number(r.id) === Number(opts.filterByTk)) && (!opts.filter || match(r, opts.filter))) {
+              if (!assertRlsVisibility(name, r, opts)) continue;
+              assertRlsWrite(name, r.organizationId, opts);
+              Object.assign(r, opts.values);
+              updated.push(wrapRow(name, r));
+            }
+          }
+          return updated;
+        },
+      };
+    },
+  };
+
+  const resources = new Map();
+  const app = {
+    db,
+    resourceManager: { define: (def) => resources.set(def.name, def.actions), use() {} },
+    acl: { allow() {}, registerSnippet() {} },
+    cronJobManager: { addJob() {} },
+    logger: { info() {}, warn() {}, error() {} },
+  };
+
+  registerEventBus(app, { startDrainer: false });
+  registerContextResource(app);
+  registerNotificationCenter(app);
+  registerChatterResource(app);
+  registerVoucherLifecycleResource(app);
+  registerPkiLedger(app);
+  registerDataGovernance(app);
+
+  const makeCtx = (method, params = {}, role = 'ldx_admin', user = { id: 10, username: 'admin-a' }) => ({
+    method,
+    state: { currentUser: user, currentRole: role, currentRoles: [role] },
+    action: { params },
+    throw(status, msg) { throw Object.assign(new Error(msg || `HTTP ${status}`), { status }); },
+  });
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+
+    // 1. dxosEvents
+    const evCtx = makeCtx('GET', {});
+    await resources.get('dxosEvents').listEvents(evCtx, async () => {});
+    assert.equal(evCtx.body.items.length, 1);
+
+    // 2. latticeContextSync (root)
+    const syncCtx = makeCtx('GET', {}, 'root', { id: 1, username: 'root' });
+    await resources.get('latticeContextSync').status(syncCtx, async () => {});
+    assert.equal(syncCtx.body.total, 1);
+
+    // 3. latticeNotifications
+    const notifCtx = makeCtx('GET', {});
+    await resources.get('latticeNotifications').listMine(notifCtx, async () => {});
+    assert.equal(notifCtx.body.unreadCount, 1);
+
+    // 4. latticeChatter
+    const chatPostCtx = makeCtx('POST', { values: { targetCollection: 'latticeRequests', targetRecordId: 5, body: 'RLS OK' } });
+    await resources.get('latticeChatter').post(chatPostCtx, async () => {});
+    assert.equal(chatPostCtx.body.body, 'RLS OK');
+
+    // 5. latticeVoucher
+    const submitCtx = makeCtx('POST', { values: { collection: 'latticeRequests', id: 5, expectedVersion: 1 } });
+    await resources.get('latticeVoucher').submit(submitCtx, async () => {});
+    assert.equal(submitCtx.body.status, 'submitted');
+
+    // 6. dxosLedger
+    const { signCanonicalPayload } = require('../src/server/pki-ledger');
+    const pkCtx = makeCtx('GET', {});
+    await resources.get('dxosLedger').publicKey(pkCtx, async () => {});
+    assert.ok(pkCtx.body.keyId);
+    const signCtx = makeCtx('POST', { values: { targetCollection: 'latticeRequests', targetRecordId: 5 } });
+    await resources.get('dxosLedger').signDocument(signCtx, async () => {});
+    assert.equal(signCtx.body.signed, true);
+    const verifyLedgerCtx = makeCtx('GET', {});
+    await resources.get('dxosLedger').verify(verifyLedgerCtx, async () => {});
+    assert.equal(verifyLedgerCtx.body.valid, true);
+    const signedPayload = await signCanonicalPayload(db, 'org-a', tables.latticeRequests[0]);
+    const verifySigCtx = makeCtx('POST', { values: { payload: tables.latticeRequests[0], signatureBase64: signedPayload.signatureBase64, keyId: signedPayload.keyId } });
+    await resources.get('dxosLedger').verifySignature(verifySigCtx, async () => {});
+    assert.equal(verifySigCtx.body.valid, true);
+
+    // 7. dxosDataGov
+    const tierCtx = makeCtx('GET', {});
+    await resources.get('dxosDataGov').tierSummary(tierCtx, async () => {});
+    assert.equal(tierCtx.body.organizationId, 'org-a');
+    const freezeCtx = makeCtx('POST', { values: { sourceCollection: 'latticeRequests' } });
+    await resources.get('dxosDataGov').freezeSnapshot(freezeCtx, async () => {});
+    assert.equal(freezeCtx.body.recordCount, 1);
+
+    // 8. paas-api-keys gates dxosN8n mutating actions appropriately
+    const patMw = createPaasApiKeyAuthMiddleware(db);
+    const runPatReq = (token, method, actionName) => patMw({
+      method,
+      headers: { 'x-lattice-api-key': token },
+      request: { headers: { 'x-lattice-api-key': token } },
+      state: {},
+      action: { resourceName: 'dxosN8n', actionName, params: {} },
+    }, async () => 'ok');
+
+    for (const mutAct of ['createWorkflow', 'updateWorkflow', 'activateWorkflow', 'retryExecution', 'syncCredential']) {
+      await assert.rejects(() => runPatReq(rawReadPat, 'POST', mutAct), { code: 'API_KEY_SCOPE_INSUFFICIENT' });
+      await assert.rejects(() => runPatReq(rawReadPat, 'GET', mutAct), { code: 'API_KEY_SCOPE_INSUFFICIENT' });
+      await assert.rejects(() => runPatReq(rawIotPat, 'POST', mutAct), { code: 'API_KEY_SCOPE_INSUFFICIENT' });
+      assert.equal(await runPatReq(rawAiPat, 'POST', mutAct), 'ok');
+      assert.equal(await runPatReq(rawWritePat, 'POST', mutAct), 'ok');
+    }
+    assert.equal(await runPatReq(rawReadPat, 'GET', 'workflows'), 'ok');
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});
+
+test('version lock is 0.4.0 across package/openapi/observability and OpenAPI registers dxosForms, dxosApprovals, dxosNotify + server index loads cleanly', async () => {
+  const pkg = require('../package.json');
+  assert.equal(pkg.version, '0.4.0');
+
+  const { buildOpenApiSpec } = require('../src/server/openapi-spec');
+  const spec = buildOpenApiSpec({ serverUrl: 'http://localhost:13015' });
+  assert.equal(spec.info.version, '0.4.0');
+
+  // Public form endpoints have security: []
+  for (const pubPath of ['/api/dxosForms:meta', '/api/dxosForms:submit', '/api/dxosForms:status']) {
+    const method = pubPath.endsWith(':submit') ? 'post' : 'get';
+    assert.ok(spec.paths[pubPath]?.[method], `Missing public OpenAPI path ${method.toUpperCase()} ${pubPath}`);
+    assert.deepEqual(spec.paths[pubPath][method].security, []);
+  }
+  // Authenticated admin/ops endpoints require bearerAuth / latticeApiKey
+  for (const [privPath, method] of [
+    ['/api/dxosForms:list', 'get'],
+    ['/api/dxosForms:get', 'get'],
+    ['/api/dxosForms:save', 'post'],
+    ['/api/dxosForms:delete', 'post'],
+    ['/api/dxosForms:rotateToken', 'post'],
+    ['/api/dxosApprovals:listInbox', 'get'],
+    ['/api/dxosApprovals:decide', 'post'],
+    ['/api/dxosApprovals:request', 'post'],
+    ['/api/dxosApprovals:cancel', 'post'],
+    ['/api/dxosApprovals:listPolicies', 'get'],
+    ['/api/dxosApprovals:savePolicy', 'post'],
+    ['/api/dxosApprovals:deletePolicy', 'post'],
+    ['/api/dxosApprovals:evaluateSlaNow', 'post'],
+    ['/api/dxosNotify:send', 'post'],
+    ['/api/dxosNotify:testSend', 'post'],
+    ['/api/dxosNotify:logs', 'get'],
+    ['/api/dxosNotify:channels', 'get'],
+  ]) {
+    assert.ok(spec.paths[privPath]?.[method], `Missing OpenAPI path ${method.toUpperCase()} ${privPath}`);
+    assert.ok(Array.isArray(spec.paths[privPath][method].security) && spec.paths[privPath][method].security.length > 0);
+  }
+
+  // Verify LatticeFoundationPlugin.load() wires Wave 3 resources, app.latticeApprovals, and middleware order
+  await withMockedNocobase(async () => {
+    const LatticeFoundationPlugin = require('../src/server/index');
+    const defined = new Map();
+    const middlewares = [];
+    const allowed = [];
+    const fakeApp = {
+      db: {
+        sequelize: { getDialect: () => 'sqlite', query: async () => [[]], transaction: async (cb) => cb({}) },
+        getRepository: () => null,
+        on: () => {},
+        off: () => {},
+      },
+      use: () => {},
+      cronJobManager: { addJob: () => {} },
+      resourceManager: {
+        use: (mw, opts) => middlewares.push({ mw, opts }),
+        define: (def) => defined.set(def.name, def.actions),
+      },
+      acl: {
+        allow: (res, actions, role) => allowed.push({ res, actions, role }),
+        registerSnippet: () => {},
+      },
+    };
+    const plugin = new LatticeFoundationPlugin(fakeApp);
+    plugin.app = fakeApp;
+    plugin.db = fakeApp.db;
+    await plugin.load();
+
+    try {
+      assert.ok(defined.has('dxosNotify'));
+      assert.ok(defined.has('dxosApprovals'));
+      assert.ok(defined.has('dxosForms'));
+      assert.ok(fakeApp.latticeOmnichannelNotify);
+      assert.equal(typeof fakeApp.latticeApprovals?.requestApproval, 'function');
+      assert.equal(typeof fakeApp.latticeApprovals?.evaluateApprovalSlas, 'function');
+      assert.equal(typeof LatticeFoundationPlugin.requestApproval, 'function');
+      assert.equal(typeof LatticeFoundationPlugin.dispatchOmnichannel, 'function');
+
+      const approvalGuardIdx = middlewares.findIndex((m) => m.opts?.tag === 'dxosApprovalsDirectGuard');
+      const nativeScopeIdx = middlewares.findIndex((m) => m.opts?.tag === 'latticeNativeScope');
+      assert.ok(approvalGuardIdx >= 0 && nativeScopeIdx > approvalGuardIdx, 'dxosApprovalsDirectGuard must precede latticeNativeScope');
+      assert.ok(allowed.some((a) => a.res === 'dxosForms' && a.role === 'public' && a.actions.includes('submit')));
+    } finally {
+      await plugin.unload();
+    }
+  });
+});
+
+test('pg-rls exports isValidOrganizationId, PROTO_POLLUTION_KEYS, resolveTenantOrgColumn, snake_case discovery, and migration 20261203000100 attaches/detaches FORCE RLS cleanly', async () => {
+  await withMockedNocobase(async () => {
+    const pgRls = require('../src/server/pg-rls');
+
+    assert.equal(pgRls.PROTO_POLLUTION_KEYS.has('__proto__'), true);
+    assert.equal(pgRls.PROTO_POLLUTION_KEYS.has('constructor'), true);
+    assert.equal(pgRls.PROTO_POLLUTION_KEYS.has('prototype'), true);
+
+    assert.equal(pgRls.isValidOrganizationId('org-alpha_01'), true);
+    for (const bad of ['', '   ', null, undefined, 123, 'all', 'ALL', 'All', '__proto__', 'constructor', 'prototype', 'Constructor', 'PROTOTYPE', 'org a', 'org;drop']) {
+      assert.equal(pgRls.isValidOrganizationId(bad), false, `Expected isValidOrganizationId(${String(bad)}) to be false`);
+      assert.throws(() => pgRls.assertValidOrganizationId(bad), { code: 'INVALID_RLS_ORGANIZATION' });
+    }
+
+    assert.equal(pgRls.resolveTenantOrgColumn('latticeOrders'), 'organizationId');
+    assert.equal(pgRls.resolveTenantOrgColumn('lattice_native_request_attachments'), 'organization_id');
+    assert.equal(pgRls.resolveTenantOrgColumn('lattice_native_request_uploads'), 'organization_id');
+    assert.equal(pgRls.resolveTenantOrgColumn('latticeCustomFoo', 'organization_id'), 'organization_id');
+    assert.throws(() => pgRls.resolveTenantOrgColumn('latticeOrders', 'bad;col'), { code: 'INVALID_SQL_IDENTIFIER' });
+
+    const attSql = pgRls.buildRlsPolicySql('lattice_native_request_attachments');
+    assert.match(attSql.enableSql, /ALTER TABLE public\."lattice_native_request_attachments" ENABLE ROW LEVEL SECURITY/);
+    assert.match(attSql.enableSql, /ALTER TABLE public\."lattice_native_request_attachments" FORCE ROW LEVEL SECURITY/);
+    assert.match(attSql.createSql, /FOR ALL TO PUBLIC USING/);
+    assert.match(attSql.createSql, /"organization_id" = nullif\(current_setting\('app\.current_org', true\), ''\)/);
+
+    const queries = [];
+    const fakeTx = { id: 'tx-snake-1' };
+    const fakeDb = {
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (cb) => cb(fakeTx),
+        query: async (sql, opts) => {
+          queries.push({ sql, opts });
+          if (sql.includes('information_schema.columns')) {
+            return [[
+              { table_name: 'latticeRequests' },
+              { table_name: 'lattice_native_request_attachments' },
+              { table_name: 'lattice_native_request_uploads' },
+            ]];
+          }
+          if (sql.includes('information_schema.tables')) {
+            return [[
+              { table_name: 'lattice_native_request_attachments' },
+              { table_name: 'lattice_native_request_uploads' },
+            ]];
+          }
+          return [[]];
+        },
+      },
+    };
+
+    const discovered = await pgRls.discoverTenantRlsTables(fakeDb, { transaction: fakeTx });
+    assert.match(queries[0].sql, /column_name IN \('organizationId', 'organization_id'\)/);
+    assert.deepEqual(discovered, [
+      'latticeRequests',
+      'lattice_native_request_attachments',
+      'lattice_native_request_uploads',
+    ]);
+
+    const MigCls = require('../src/server/migrations/20261203000100-snake-case-rls-attachments-uploads');
+    const mig = new MigCls({ db: fakeDb });
+    assert.equal(mig.on, 'afterSync');
+
+    queries.length = 0;
+    await mig.up();
+    const upSql = queries.map((q) => q.sql).join('\n');
+    assert.match(upSql, /ALTER TABLE public\."lattice_native_request_attachments" ENABLE ROW LEVEL SECURITY;[\s\S]*FORCE ROW LEVEL SECURITY/);
+    assert.match(upSql, /"organization_id" = nullif\(current_setting\('app\.current_org', true\), ''\)/);
+    assert.match(upSql, /ALTER TABLE public\."lattice_native_request_uploads" ENABLE ROW LEVEL SECURITY;[\s\S]*FORCE ROW LEVEL SECURITY/);
+
+    queries.length = 0;
+    await mig.down();
+    const downSql = queries.map((q) => q.sql).join('\n');
+    assert.match(downSql, /DROP POLICY IF EXISTS lattice_tenant_isolation ON public\."lattice_native_request_uploads"/);
+    assert.match(downSql, /DROP POLICY IF EXISTS lattice_tenant_isolation ON public\."lattice_native_request_attachments"/);
+
+    // Non-postgres and missing tables no-op cleanly
+    const sqliteMig = new MigCls({
+      db: { sequelize: { getDialect: () => 'sqlite', transaction: async () => { throw new Error('must not run'); } } },
+    });
+    await sqliteMig.up();
+    await sqliteMig.down();
+
+    const emptyQueries = [];
+    const emptyMig = new MigCls({
+      db: {
+        sequelize: {
+          getDialect: () => 'postgres',
+          transaction: async (cb) => cb({ id: 'tx-empty' }),
+          query: async (sql) => { emptyQueries.push(sql); return [[]]; },
+        },
+      },
+    });
+    await emptyMig.up();
+    assert.equal(emptyQueries.some((s) => s.includes('ALTER TABLE')), false);
+  });
+});
+
+test('LatticeFoundationPlugin registers and unregisters publicFormGatewayHandler via Gateway', async () => {
+  const origLoad = Module._load;
+  const registered = [];
+  const unregistered = [];
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  const MockGateway = {
+    registerRequestHandler: (fn) => registered.push(fn),
+    unregisterRequestHandler: (fn) => unregistered.push(fn),
+  };
+  Module._load = function mockedLoad(request, parent, isMain) {
+    if (request === '@nocobase/server') {
+      return { Migration: class {}, Plugin: MockPlugin, Gateway: MockGateway };
+    }
+    if (request === '@nocobase/database') {
+      return { defineCollection: (def) => def };
+    }
+    return origLoad.call(this, request, parent, isMain);
+  };
+  try {
+    const idxPath = require.resolve('../src/server/index');
+    delete require.cache[idxPath];
+    const LatticeFoundationPlugin = require('../src/server/index');
+    const fakeApp = {
+      db: {
+        sequelize: { getDialect: () => 'sqlite', query: async () => [[]], transaction: async (cb) => cb({}) },
+        getRepository: () => null,
+        on: () => {},
+        off: () => {},
+      },
+      use: () => {},
+      cronJobManager: { addJob: () => {} },
+      resourceManager: { use: () => {}, define: () => {} },
+      acl: { allow: () => {}, registerSnippet: () => {} },
+    };
+    const plugin = new LatticeFoundationPlugin(fakeApp);
+    plugin.app = fakeApp;
+    plugin.db = fakeApp.db;
+    await plugin.load();
+    assert.equal(registered.length, 2);
+    assert.equal(typeof plugin._publicFormGatewayHandler, 'function');
+    assert.equal(typeof plugin._publicTrackGatewayHandler, 'function');
+    assert.ok(registered.includes(plugin._publicFormGatewayHandler));
+    assert.ok(registered.includes(plugin._publicTrackGatewayHandler));
+    await plugin.unload();
+    assert.equal(unregistered.length, 2);
+    assert.ok(unregistered.includes(plugin._publicFormGatewayHandler) === false);
+    assert.equal(plugin._publicFormGatewayHandler, null);
+    assert.equal(plugin._publicTrackGatewayHandler, null);
+  } finally {
+    Module._load = origLoad;
+    delete require.cache[require.resolve('../src/server/index')];
+  }
 });

@@ -1,57 +1,101 @@
 ================================================================================
-LatticeDX — Open Digital Enterprise Platform (DX-OS Open-Core)
+LatticeDX v0.4.0 — Open Digital Enterprise Platform (DX-OS Open-Core)
 Copyright (C) 2026 CTU-OpenPaw (https://github.com/CTU-OpenPaw/lattice-dx)
 All original first-party source code is licensed under Apache License 2.0.
 ================================================================================
 
-LatticeDX ("DX-OS Open-Core") is an open-source digital enterprise platform
-developed by CTU-OpenPaw for OLP PMNM 2026 (VFOSSA). Original first-party code
-under apps/, packages/, plugins/nocobase/, scripts/, infra/, solutions/, and
-tests/ is distributed under the Apache License, Version 2.0 (see LICENSE and
-NOTICE).
+LatticeDX ("DX-OS Open-Core Championship Edition", v0.4.0) is an open-source
+digital enterprise platform developed by CTU-OpenPaw for OLP PMNM 2026 (VFOSSA).
+Original first-party code under apps/, packages/, plugins/nocobase/, scripts/,
+infra/, solutions/, and tests/ is distributed under the Apache License,
+Version 2.0 (see LICENSE and NOTICE).
 
-Upstream NocoBase source code referenced in submodule upstream/nocobase is NOT
-modified, bundled into pnpm workspace builds, or redistributed inside release
-tarballs. First-party plugins declare "nocobase": { "sdkProvidedByHost": true },
-invoke host SDK APIs at runtime, and preserve NocoBase Clause 5.2 attribution
-("Powered by NocoBase", "v2.2.38", "License settings").
+Pure-OSI Source Repository & External Host Runtime Boundary:
+100% of the LatticeDX Git repository (https://github.com/CTU-OpenPaw/lattice-dx)
+and the latticedx-0.4.0-src.tar.gz release archive consists strictly of
+OSI-approved source code (Apache-2.0 first-party code + OSI-compatible npm
+dependencies), with ZERO upstream/nocobase Git submodule and ZERO .gitmodules.
+Host NocoBase runtime (nocobase/nocobase:2.2.50@sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777)
+is loaded strictly at runtime as an external OCI container outside the Git
+repository and is NOT modified, bundled into pnpm workspace builds, or
+redistributed inside release tarballs. First-party plugins declare
+"nocobase": { "sdkProvidedByHost": true }, invoke host SDK APIs at runtime,
+and preserve NocoBase Clause 5.2 attribution ("Powered by NocoBase", "v2.2.50",
+"https://www.nocobase.com", "License settings").
+
+OSS License Purity Guarantee:
+LatticeDX v0.4.0 strictly prohibits BSL-1.1 / Business Source License software
+(including ThingsBoard and EMQX) across workspace code, lockfiles, and OCI
+containers, enforced deterministically by scripts/generate-sbom.mjs and
+scripts/verify-pof-readiness.mjs against docs/sbom-cyclonedx.json. Optional
+external integration services such as n8n (n8nio/n8n:2.48.1) run strictly as
+standalone external OCI containers and are never part of LatticeDX's core
+automation engine.
 
 ================================================================================
 First-Party LatticeDX NocoBase Plugins (Apache-2.0, sdkProvidedByHost: true)
 ================================================================================
 Name                                | Version | License    | Purpose | Path
 ------------------------------------|---------|------------|---------|------------------------------------------------
-@latticedx/plugin-action-bridge     | 0.4.1   | Apache-2.0 | Legacy bridge and action proxy contracts | plugins/nocobase/action-bridge
-@latticedx/plugin-lattice-foundation| 0.25.1  | Apache-2.0 | Core ERP collections, 7 roles, Multi-Portal UI | plugins/nocobase/plugin-lattice-foundation
-@latticedx/plugin-enterprise-auth   | 0.1.0   | Apache-2.0 | Keycloak OIDC + PKCE enterprise authentication | plugins/nocobase/plugin-enterprise-auth
-@latticedx/plugin-dxos-para         | 0.1.0   | Apache-2.0 | [H] P.A.R.A. knowledge space (latticeParaDocuments) | plugins/nocobase/plugin-dxos-para
-@latticedx/plugin-dxos-blocks       | 0.1.0   | Apache-2.0 | [H][P][D][I] 6 configurable Native v2 BlockModels + Dynamic Copilot | plugins/nocobase/plugin-dxos-blocks
-@latticedx/plugin-dxos-studio       | 0.1.0   | Apache-2.0 | [P][H][D] DX-OS Admin Studio, 4 Poka-yoke workflows, Service Tickets | plugins/nocobase/plugin-dxos-studio
-@latticedx/plugin-dxos-ai           | 0.1.0   | Apache-2.0 | [I][P][D][H] Admin-configurable AI Workforce, Admin Builder, 6-Plane Topology, 2-Way MCP | plugins/nocobase/plugin-dxos-ai
+@latticedx/plugin-action-bridge     | 0.4.0   | Apache-2.0 | Legacy bridge and action proxy contracts | plugins/nocobase/action-bridge
+@latticedx/plugin-lattice-foundation| 0.4.0   | Apache-2.0 | Core ERP collections, 7 roles, Multi-Portal + /v/mobile Field PWA + /v/form/:slug Public Forms, Multi-Level Approvals & Unified Inbox, Omnichannel Notifications, PaaS API Keys, Ed25519/Merkle PKI Ledger, Hot-Warm-Cold Data Governance/Lineage/Quarantine/MKT, 52-table PostgreSQL FORCE RLS (+ dynamic latticeCustom* RLS), OTel GenAI (latticeAiTraces), Connector & Secrets Vault (dxosVault), Unified CloudEvents 1.0 + Standard Webhooks Event Bus (dxosEvents), OpenAPI 3.1/AsyncAPI 3.0 & Prometheus metrics | plugins/nocobase/plugin-lattice-foundation
+@latticedx/plugin-enterprise-auth   | 0.4.0   | Apache-2.0 | Keycloak OIDC + PKCE, Valkey 8.1 (Redis-compatible) session cache, Backchannel Logout, 2-way role sync | plugins/nocobase/plugin-enterprise-auth
+@latticedx/plugin-dxos-para         | 0.4.0   | Apache-2.0 | [H] P.A.R.A. knowledge vault (latticeParaDocuments/Chunks), pgvector HNSW RRF search, Office XLSX/PPTX/PDF/DOCX extractor & OCR Form Autofill | plugins/nocobase/plugin-dxos-para
+@latticedx/plugin-dxos-blocks       | 0.4.0   | Apache-2.0 | [H][P][D][I] 12 Native v2 BlockModels (incl. DxosBiChartBlockModel, WebGIS, Kanban/Schedule, WmsOps), aggregateQuery & collectionsMeta, 2-Way Digital Twin Shadow, Mosquitto DynSec + LWT & Orion-LD 2-Way Broker Control (dxosBroker), 2-Phase Bulk Import, IIoT telemetryIngest & Alarms, Governed Export, Chatter & Ctrl+K | plugins/nocobase/plugin-dxos-blocks
+@latticedx/plugin-dxos-studio       | 0.4.0   | Apache-2.0 | [P][H][D] DX-OS Admin Studio (9 tabs + 6 Governance Consoles + Unified Approvals + Public Forms) & LatticeFlow v2 DAG Studio (Draft/Publish versions, Live Trace, ReAct ai.agent, durable Pause/Resume HITL), OMS/WMS/FEFO/ePOD, DMN Engine, Delegations, Rich Schema Domain Builder (hasOne, belongsToMany + RLS, AST formula, validation) + 1-Click Packs + Tenant Provisioning, 4 Poka-yoke workflows, Outbox/DLQ, GitOps Bundle v3 (devDeps @xyflow/react + @dagrejs/dagre MIT bundled at build time via esbuild; host React/Antd/NocoBase external) | plugins/nocobase/plugin-dxos-studio
+@latticedx/plugin-dxos-ai           | 0.4.0   | Apache-2.0 | [I][P][D][H] AI Workforce (7 Starter Profiles), 20 Unified AI Tools (incl. App Builder 2.0 plan/patch/rollback, Memory, Flow Architect), Google/LF A2A Protocol, Trace Waterfall & Eval Lab UI, Proactive Incident Triage, HITL Approval Queue, Persistent Quota + PII Redaction, 2-Way MCP Gateway & Prompts | plugins/nocobase/plugin-dxos-ai
+
+================================================================================
+First-Party Workspace Applications & Shared Packages (Apache-2.0)
+================================================================================
+Name                       | Version | License    | Purpose | Path
+---------------------------|---------|------------|---------|-----------------------
+lattice-dx                 | 0.4.0   | Apache-2.0 | Monorepo root orchestration & PoF/SBOM tooling | package.json
+@dx/contracts              | 0.4.0   | Apache-2.0 | Shared action, expression, workflow & workspace contracts | packages/contracts
+@dx/api                    | 0.4.0   | Apache-2.0 | Fastify headless enterprise API service | apps/api
+@dx/agent-worker           | 0.4.0   | Apache-2.0 | Incident advisory worker (node:http) | apps/agent-worker
+@dx/file-scanner           | 0.4.0   | Apache-2.0 | ClamAV TCP + RustFS S3 file quarantine sidecar | apps/file-scanner
+@latticedx/uc1-procurement | 0.4.0   | Apache-2.0 | Reference procurement package manifests | packages/uc1-procurement
 
 ================================================================================
 Third-Party Dependencies, Host Runtime & External OCI Services
 ================================================================================
-Full license notices remain with their respective upstream projects (see also
-LICENSE, NOTICE, docs/third-party.md, and docs/dependency-inventory.md):
+Full license notices and CycloneDX 1.5 machine-readable SBOM remain with their
+respective upstream projects (see LICENSE, NOTICE, docs/third-party.md,
+docs/dependency-inventory.md, and docs/sbom-cyclonedx.json — 257 components:
+workspace=12, npm=226, oci=19, 256/257 with resolved licenses via pnpm release:sbom;
+only macOS-optional fsevents@2.3.3 unresolved on Windows):
 
-Name                       | Version  | License                 | Description | Url
----------------------------|----------|-------------------------|-------------|---------------------------------------------
-NocoBase Host Runtime      | 2.2.38   | NocoBase License (2026-02-24; Apache-2.0 + Clauses 4.2, 5.1-5.4) | Low-code/No-code runtime container & host SDK | https://github.com/nocobase/nocobase
-Fastify                    | 5.12.5   | MIT                     | Backend HTTP API framework for apps/api | https://github.com/fastify/fastify
-jose                       | 6.2.12   | MIT                     | JWT/JWS/JWK utilities for @dx/api | https://github.com/panva/jose
-node-postgres (pg)         | 8.23.1   | MIT                     | PostgreSQL client for @dx/api | https://github.com/brianc/node-postgres
-openid-client              | 6.8.9    | MIT                     | Bundled OIDC client in plugin-enterprise-auth | https://github.com/panva/openid-client
-jose (plugin-auth)         | 6.2.15   | MIT                     | Bundled JOSE helper in plugin-enterprise-auth | https://github.com/panva/jose
-oauth4webapi               | 3.8.8    | MIT                     | Bundled OAuth/OIDC core in plugin-enterprise-auth | https://github.com/panva/oauth4webapi
-TypeScript                 | 7.0.2    | Apache-2.0              | Static type checker and compiler | https://github.com/microsoft/TypeScript
-Vitest                     | 5.0.3    | MIT                     | Workspace unit & integration test runner | https://github.com/vitest-dev/vitest
-tsx                        | 4.23.15  | MIT                     | TypeScript runner for Node backend services | https://github.com/privatenumber/tsx
-esbuild                    | 0.28.2   | MIT                     | Plugin & runtime bundler | https://github.com/evanw/esbuild
-PostgreSQL                 | 16.13    | PostgreSQL License      | Relational database OCI container | https://www.postgresql.org/about/licence/
-Keycloak                   | 26.8.0   | Apache-2.0              | Identity & Access Management OCI container | https://github.com/keycloak/keycloak
-Apache APISIX              | 3.19.0   | Apache-2.0              | API Gateway OCI container | https://github.com/apache/apisix
-FIWARE Orion-LD            | 1.10.0   | AGPL-3.0                | NGSI-LD Context Broker OCI container (HTTP) | https://github.com/FIWARE/context.Orion-LD
-MongoDB                    | 4.4.29   | SSPL-1.0                | Backing DB container for FIWARE Orion-LD | https://github.com/mongodb/mongo
-n8n                        | 2.42.7   | Sustainable Use License | Standalone workflow automation container | https://github.com/n8n-io/n8n
-ClamAV                     | 1.4.3    | GPL-2.0                 | Standalone antivirus scanner daemon (TCP) | https://github.com/Cisco-Talos/clamav
+Name                                 | Version    | License / SPDX                                                          | Description | Url
+-------------------------------------|------------|-------------------------------------------------------------------------|-------------|---------------------------------------------
+NocoBase Host Runtime                | 2.2.50     | NocoBase License Agreement (2026-02-24; Apache-2.0 + Clauses 4.2, 5.1-5.4) | Low-code/No-code runtime container & host SDK | https://github.com/nocobase/nocobase
+Fastify                              | 5.12.8     | MIT                                                                     | Backend HTTP API framework for apps/api | https://github.com/fastify/fastify
+jose                                 | 6.2.12     | MIT                                                                     | JWT/JWS/JWK utilities for @dx/api | https://github.com/panva/jose
+node-postgres (pg)                   | 8.23.1     | MIT                                                                     | PostgreSQL client for @dx/api | https://github.com/brianc/node-postgres
+openid-client                        | 6.8.9      | MIT                                                                     | Bundled OIDC client in plugin-enterprise-auth | https://github.com/panva/openid-client
+jose (plugin-auth)                   | 6.2.15     | MIT                                                                     | Bundled JOSE helper in plugin-enterprise-auth | https://github.com/panva/jose
+oauth4webapi                         | 3.8.8      | MIT                                                                     | Bundled OAuth/OIDC core in plugin-enterprise-auth | https://github.com/panva/oauth4webapi
+TypeScript                           | 7.0.2      | Apache-2.0                                                              | Static type checker and compiler | https://github.com/microsoft/TypeScript
+Vitest                               | 5.0.3      | MIT                                                                     | Workspace unit & integration test runner | https://github.com/vitest-dev/vitest
+tsx                                  | 4.23.15    | MIT                                                                     | TypeScript runner for Node backend services | https://github.com/privatenumber/tsx
+esbuild                              | 0.28.2     | MIT                                                                     | Plugin & runtime bundler (devDependencies) | https://github.com/evanw/esbuild
+@xyflow/react                        | 12.12.1    | MIT                                                                     | DAG canvas UI bundled in plugin-dxos-studio devDependencies (host React/Antd external) | https://github.com/xyflow/xyflow
+@dagrejs/dagre                       | 3.1.3      | MIT                                                                     | Directed graph auto-layout bundled in plugin-dxos-studio devDependencies | https://github.com/dagrejs/dagre
+PostgreSQL                           | 16.16      | PostgreSQL                                                              | Relational database OCI container | https://www.postgresql.org/about/licence/
+pgvector (PG16)                      | 0.8.1      | PostgreSQL                                                              | HNSW vector extension OCI container | https://github.com/pgvector/pgvector
+Valkey                               | 8.1        | BSD-3-Clause                                                            | Pure-OSI Redis-compatible cache/pubsub/rate-limit OCI container | https://github.com/valkey-io/valkey
+RustFS                               | 1.0.6      | Apache-2.0                                                              | S3-compatible object storage OCI container | https://github.com/rustfs/rustfs
+Caddy                                | 2.10       | Apache-2.0                                                              | TLS ingress & security header reverse proxy OCI container | https://github.com/caddyserver/caddy
+Keycloak                             | 26.8.2     | Apache-2.0                                                              | Identity & Access Management (OIDC/PKCE) OCI container | https://github.com/keycloak/keycloak
+adorsys/keycloak-config-cli          | 6.5.1-26   | Apache-2.0                                                              | Declarative Keycloak realm bootstrapper OCI container | https://github.com/adorsys/keycloak-config-cli
+Apache APISIX                        | 3.19.0     | Apache-2.0                                                              | Zero-Trust API Gateway OCI container | https://github.com/apache/apisix
+FIWARE Orion-LD                      | 1.12.0     | AGPL-3.0-only                                                           | NGSI-LD Context Broker OCI container (HTTP) | https://github.com/FIWARE/context.Orion-LD
+MongoDB                              | 8.0        | SSPL-1.0                                                                | Backing DB container for FIWARE Orion-LD | https://github.com/mongodb/mongo
+n8n                                  | 2.48.1     | Sustainable Use License                                                 | Optional standalone external integration container (not core engine) | https://github.com/n8n-io/n8n
+ClamAV                               | 1.5.5      | GPL-2.0-only                                                            | Standalone antivirus scanner daemon (TCP) | https://github.com/Cisco-Talos/clamav
+Eclipse Mosquitto                    | 2.0.21     | EPL-2.0 OR BSD-3-Clause                                                 | OSI-clean IIoT MQTT broker (Dynamic Security + LWT) OCI container | https://github.com/eclipse-mosquitto/mosquitto
+Node-RED                             | 4.0.9      | Apache-2.0                                                              | IIoT edge normalizer, LWT bridge & Twin downlink OCI container | https://github.com/node-red/node-red
+OpenTelemetry Collector Contrib      | 0.123.0    | Apache-2.0                                                              | Telemetry ingestion & pipeline OCI container | https://github.com/open-telemetry/opentelemetry-collector-contrib
+Prometheus                           | v3.3.0     | Apache-2.0                                                              | Metrics scraper & alert evaluator OCI container | https://github.com/prometheus/prometheus
+Grafana OSS                          | 11.5.8     | AGPL-3.0-only                                                           | Standalone 360° observability dashboard OCI container | https://github.com/grafana/grafana
+Gotenberg                            | 8.20.1     | MIT                                                                     | Optional headless PDF rendering OCI container | https://github.com/gotenberg/gotenberg

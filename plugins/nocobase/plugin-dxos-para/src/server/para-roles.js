@@ -46,7 +46,7 @@ async function installParaRoleGrants(db) {
   const resources = db.getRepository('dataSourcesRolesResources');
   if (!roles || !resources) return { granted: [] };
   const granted = [];
-  await db.sequelize.transaction(async (transaction) => {
+  const run = async (transaction) => {
     for (const roleName of ALL_LDX_ROLES) {
       if (!(await roles.findOne({ filter: { name: roleName }, transaction }))) continue;
       const filter = { name: paraDocuments.name, roleName, dataSourceKey: 'main' };
@@ -54,7 +54,9 @@ async function installParaRoleGrants(db) {
       await resources.create({ values: buildParaGrant(roleName), transaction });
       granted.push(roleName);
     }
-  });
+  };
+  if (typeof db.sequelize?.transaction === 'function') await db.sequelize.transaction(run);
+  else await run(undefined);
   return { granted };
 }
 

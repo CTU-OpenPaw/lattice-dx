@@ -123,8 +123,14 @@ export async function runLogisticsAndRbacAcceptance(callActor, { organizationId 
   // Ensure both workflows exist and are active
   const logInstall = await okActor('root', 'dxosStudio:installWorkflow', {
     method: 'POST',
-    values: buildLogisticsInstallParams(empList, organizationId),
+    values: { ...buildLogisticsInstallParams(empList, organizationId), enabled: true },
   });
+  if (!logInstall?.enabled && logInstall?.workflowId) {
+    await okActor('root', `workflows:update?filterByTk=${logInstall.workflowId}`, {
+      method: 'POST',
+      values: { enabled: true },
+    });
+  }
   const srvInstall = await okActor('root', 'dxosStudio:installWorkflow', {
     method: 'POST',
     values: {
@@ -132,8 +138,15 @@ export async function runLogisticsAndRbacAcceptance(callActor, { organizationId 
       organizationId,
       reviewerEmployeeId: manager.id,
       assigneeEmployeeId: employee.id,
+      enabled: true,
     },
   });
+  if (!srvInstall?.enabled && srvInstall?.workflowId) {
+    await okActor('root', `workflows:update?filterByTk=${srvInstall.workflowId}`, {
+      method: 'POST',
+      values: { enabled: true },
+    });
+  }
 
   const ts = Date.now().toString(36).slice(-6).toUpperCase();
   const orderCode = `ORD-E2E-${ts}`;

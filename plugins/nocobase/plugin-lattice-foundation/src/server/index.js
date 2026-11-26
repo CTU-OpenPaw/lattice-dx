@@ -6,7 +6,7 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-const { Plugin } = require('@nocobase/server');
+const { Plugin, Gateway } = require('@nocobase/server');
 const { seedFoundation } = require('./seed');
 const {createApplicationCatalog}=require('../shared/application-catalog');
 const {registerSampleApplications}=require('../applications/catalog');
@@ -26,11 +26,57 @@ const {registerVoucherLifecycleResource}=require('./voucher-lifecycle');
 const {registerNotificationCenter}=require('./notification-center');
 const {registerSlaEngine}=require('./sla-engine');
 const {registerObservability}=require('./observability');
-const {attachRlsPolicyToTable}=require('./pg-rls');
+const {
+  createOtelExporter,
+  recordGenAiSpan,
+  startGenAiSpan,
+  persistGenAiTrace,
+  listGenAiTraces,
+}=require('./otel-exporter');
+const {registerPaasApiKeys, createPaasApiKeyAuthMiddleware}=require('./paas-api-keys');
+const {registerPkiLedger, appendLedgerEntrySafely}=require('./pki-ledger');
+const {
+  registerDataGovernance,
+  computeMeanKineticTemperature,
+  recordLineageEdge,
+  captureQuarantineRecord,
+}=require('./data-governance');
+const {
+  registerConnectorVault,
+  resolveConnectorSecrets,
+}=require('./connector-vault');
+const {
+  registerEventBus,
+  publishDomainEvent,
+  registerEventBusListener,
+  verifyStandardWebhookSignature,
+}=require('./event-bus');
+const {
+  registerOmnichannelNotify,
+  dispatchOmnichannel,
+  dispatchChannelNotification,
+  createNotificationCenterAdapter,
+}=require('./omnichannel-notify');
+const {
+  registerApprovalEngine,
+  requestApproval,
+  evaluateApprovalSlas,
+  listUnifiedInbox,
+  decideUnifiedInboxItem,
+  saveApprovalPolicy,
+  listApprovalPolicies,
+  deleteApprovalPolicy,
+  decideApprovalRequest,
+  cancelApprovalRequest,
+}=require('./approval-engine');
+const {registerPublicForms}=require('./public-forms');
+const {createPublicFormGatewayHandler}=require('./public-form-html');
+const {createPublicTrackGatewayHandler}=require('./public-track-html');
+const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     this.db.attachLatticeRlsPolicy = (tableName, txOrOpts) => {
-      const opts = txOrOpts && typeof txOrOpts === 'object' && ('transaction' in txOrOpts || 'schema' in txOrOpts || 'policyName' in txOrOpts)
+      const opts = txOrOpts && typeof txOrOpts === 'object' && ('transaction' in txOrOpts || 'schema' in txOrOpts || 'policyName' in txOrOpts || 'orgColumn' in txOrOpts)
         ? txOrOpts
         : (txOrOpts ? { transaction: txOrOpts } : {});
       return attachRlsPolicyToTable(this.db, tableName, opts);
@@ -51,7 +97,45 @@ class LatticeFoundationPlugin extends Plugin {
     registerVoucherLifecycleResource(this.app);
     registerNotificationCenter(this.app);
     registerSlaEngine(this.app);
-    registerObservability(this.app);
+    const otelExporter = createOtelExporter({
+      serviceName: process.env.OTEL_SERVICE_NAME || 'latticedx-nocobase',
+      endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    });
+    this._otelExporter = otelExporter;
+    registerObservability(this.app, { otelExporter });
+    registerPaasApiKeys(this.app);
+    registerPkiLedger(this.app);
+    registerDataGovernance(this.app);
+    const vaultApi = registerConnectorVault(this.app);
+    const eventBusApi = registerEventBus(this.app, { startDrainer: true });
+    this.app.latticeVault = vaultApi;
+    this.app.latticeEvents = eventBusApi;
+    this._stopEventBusDrainer = eventBusApi.stopDrainer;
+    registerOmnichannelNotify(this.app);
+    registerApprovalEngine(this.app);
+    this.app.latticeApprovals = {
+      requestApproval,
+      evaluateApprovalSlas,
+      listUnifiedInbox,
+      decideUnifiedInboxItem,
+      saveApprovalPolicy,
+      listApprovalPolicies,
+      deleteApprovalPolicy,
+      decideApprovalRequest,
+      cancelApprovalRequest,
+    };
+    registerPublicForms(this.app);
+    this.unregisterPublicFormGatewayHandler();
+    this._publicFormGatewayHandler = createPublicFormGatewayHandler({ getDb: () => this.db });
+    if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
+      Gateway.registerRequestHandler(this._publicFormGatewayHandler);
+    }
+    this.unregisterPublicTrackGatewayHandler();
+    this._publicTrackGatewayHandler = createPublicTrackGatewayHandler();
+    if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
+      Gateway.registerRequestHandler(this._publicTrackGatewayHandler);
+    }
+    this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
     registerSampleApplications(catalog);
@@ -73,9 +157,83 @@ class LatticeFoundationPlugin extends Plugin {
     }});
     this.app.acl.allow('latticeApps', ['list', 'get'], 'loggedIn');
   }
+  stopEventBusDrainer() {
+    if (typeof this._stopEventBusDrainer === 'function') {
+      this._stopEventBusDrainer();
+      this._stopEventBusDrainer = null;
+    }
+  }
+  async stopOtelExporter() {
+    if (this._otelExporter && typeof this._otelExporter.shutdown === 'function') {
+      const exporter = this._otelExporter;
+      this._otelExporter = null;
+      await exporter.shutdown().catch(() => {});
+    }
+  }
+  unregisterPublicFormGatewayHandler() {
+    if (this._publicFormGatewayHandler) {
+      if (Gateway && typeof Gateway.unregisterRequestHandler === 'function') {
+        Gateway.unregisterRequestHandler(this._publicFormGatewayHandler);
+      }
+      this._publicFormGatewayHandler = null;
+    }
+  }
+  unregisterPublicTrackGatewayHandler() {
+    if (this._publicTrackGatewayHandler) {
+      if (Gateway && typeof Gateway.unregisterRequestHandler === 'function') {
+        Gateway.unregisterRequestHandler(this._publicTrackGatewayHandler);
+      }
+      this._publicTrackGatewayHandler = null;
+    }
+  }
+  async unload() {
+    this.unregisterPublicFormGatewayHandler();
+    this.unregisterPublicTrackGatewayHandler();
+    this.stopEventBusDrainer();
+    await this.stopOtelExporter();
+    if (typeof super.unload === 'function') await super.unload();
+  }
+  async remove() {
+    this.unregisterPublicFormGatewayHandler();
+    this.unregisterPublicTrackGatewayHandler();
+    this.stopEventBusDrainer();
+    await this.stopOtelExporter();
+    if (typeof super.remove === 'function') await super.remove();
+  }
+  async destroy() {
+    this.unregisterPublicFormGatewayHandler();
+    this.unregisterPublicTrackGatewayHandler();
+    this.stopEventBusDrainer();
+    await this.stopOtelExporter();
+    if (typeof super.destroy === 'function') await super.destroy();
+  }
   async install() {
-    await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction));
+    if (canUsePgRlsSession(this.db)) {
+      await withSystemRlsBypass(this.db, (transaction) => seedFoundation(this.db, transaction, { env: process.env }));
+      return;
+    }
+    await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction, { env: process.env }));
   }
 }
+LatticeFoundationPlugin.appendLedgerEntrySafely = appendLedgerEntrySafely;
+LatticeFoundationPlugin.computeMeanKineticTemperature = computeMeanKineticTemperature;
+LatticeFoundationPlugin.recordLineageEdge = recordLineageEdge;
+LatticeFoundationPlugin.captureQuarantineRecord = captureQuarantineRecord;
+LatticeFoundationPlugin.registerDataGovernance = registerDataGovernance;
+LatticeFoundationPlugin.publishDomainEvent = publishDomainEvent;
+LatticeFoundationPlugin.registerEventBusListener = registerEventBusListener;
+LatticeFoundationPlugin.verifyStandardWebhookSignature = verifyStandardWebhookSignature;
+LatticeFoundationPlugin.resolveConnectorSecrets = resolveConnectorSecrets;
+LatticeFoundationPlugin.recordGenAiSpan = recordGenAiSpan;
+LatticeFoundationPlugin.startGenAiSpan = startGenAiSpan;
+LatticeFoundationPlugin.persistGenAiTrace = persistGenAiTrace;
+LatticeFoundationPlugin.listGenAiTraces = listGenAiTraces;
+LatticeFoundationPlugin.dispatchOmnichannel = dispatchOmnichannel;
+LatticeFoundationPlugin.dispatchChannelNotification = dispatchChannelNotification;
+LatticeFoundationPlugin.createNotificationCenterAdapter = createNotificationCenterAdapter;
+LatticeFoundationPlugin.requestApproval = requestApproval;
+LatticeFoundationPlugin.evaluateApprovalSlas = evaluateApprovalSlas;
+LatticeFoundationPlugin.listUnifiedInbox = listUnifiedInbox;
+LatticeFoundationPlugin.decideUnifiedInboxItem = decideUnifiedInboxItem;
 module.exports = LatticeFoundationPlugin;
 module.exports.default = LatticeFoundationPlugin;

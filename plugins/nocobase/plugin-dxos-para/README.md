@@ -1,6 +1,6 @@
 # `@latticedx/plugin-dxos-para`
 
-Plugin NocoBase 2.2.38 cung cấp không gian lưu trữ tri thức & tài liệu chuẩn **P.A.R.A.** (*Projects, Areas, Resources, Archives*) thuộc tầng **[H] Nhân sự & Không gian làm việc** trong kiến trúc DX-OS.
+Plugin NocoBase 2.2.50 cung cấp không gian lưu trữ tri thức & tài liệu chuẩn **P.A.R.A.** (*Projects, Areas, Resources, Archives*) thuộc tầng **[H] Nhân sự & Không gian làm việc** trong kiến trúc DX-OS.
 
 ## Thành phần cung cấp
 - **Collection native `latticeParaDocuments` (`uiManageable: true`):** Quản lý trực tiếp từ NocoBase Collection Manager với các trường `code`, `title`, `organizationId`, `paraSpace`, `summary`, `contentMarkdown`, `tags`, `status`, `attachmentUrl`, `relatedCollection`, `relatedRecordId`, `active`, và quan hệ `department` (`latticeDepartments`), `owner` (`latticeEmployees`).

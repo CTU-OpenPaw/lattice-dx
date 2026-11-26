@@ -14,21 +14,126 @@
   }
 })(function (client, React, antd) {
   'use strict';
-  const { createDxosStudioSettingsPage } = require('./studio-settings');
+  const { createDxosStudioSettingsPage, createFlowPinStorage } = require('./studio-settings');
+  const { createFlowStudioApp } = require('./flow/flow-studio-app');
+  const { createConnectedAppsPanel } = require('./flow/connected-apps-panel');
+  const { createPublicFormBuilderPanel, PublicFormBuilderPanel } = require('./public-form-builder');
+  const { createApprovalInboxPanel, ApprovalInboxPanel } = require('./approval-inbox-panel');
+
+  function createWorkflowConnectorsPage(app) {
+    const h = React.createElement;
+    const ConnectedAppsPanel = createConnectedAppsPanel(client, React, antd, app);
+    const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+    return function WorkflowConnectorsPage() {
+      const api = useApi();
+      const [selectedOrg, setSelectedOrg] = React.useState('');
+      const [organizations, setOrganizations] = React.useState([]);
+      const [orgReady, setOrgReady] = React.useState(false);
+      React.useEffect(() => {
+        if (!api?.request) { setOrgReady(true); return; }
+        api.request({ url: 'dxosStudio:listEmployees', method: 'get', skipNotify: true })
+          .then((res) => {
+            const orgs = res?.data?.data?.organizations || res?.data?.organizations || [];
+            if (Array.isArray(orgs) && orgs.length) {
+              setOrganizations(orgs);
+              setSelectedOrg((cur) => cur || orgs[0]);
+            }
+          })
+          .catch(() => {})
+          .finally(() => setOrgReady(true));
+      }, [Boolean(api?.request)]);
+      const openRoute = (p) => { if (app?.router?.navigate) app.router.navigate(p); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(p) || p); };
+      return h('div', { 'data-testid': 'dxos-workflow-connectors-tab', style: { padding: 14, background: '#f8fafc', minHeight: 520 } },
+        orgReady
+          ? h(ConnectedAppsPanel, { api, selectedOrg, organizations, openRoute })
+          : h('div', { style: { padding: 20, fontSize: 13, color: '#64748b' } }, 'Đang tải danh sách tổ chức & Connected Apps…'),
+      );
+    };
+  }
+
+  function registerStudioSettings(app, Page, FlowPage, ConnectorsPage) {
+    const psm = app?.pluginSettingsManager;
+    if (!psm || typeof psm.add !== 'function') return;
+
+    const existingWf = typeof psm.getSetting === 'function' ? psm.getSetting('workflow') : psm.settings?.workflow;
+    const existingWfComp = existingWf?.Component;
+    const existingWfLoader = existingWf?.componentLoader;
+    const isOutletComp = Boolean(existingWfComp && (existingWfComp.name === 'Outlet' || existingWfComp.displayName === 'Outlet'));
+    const hasWorkflowsChild = Boolean(
+      typeof psm.getSetting === 'function' ? psm.getSetting('workflow.workflows') : psm.settings?.['workflow.workflows'],
+    );
+
+    if (existingWf && !hasWorkflowsChild && (existingWfLoader || (existingWfComp && !isOutletComp))) {
+      // Omit Component so NocoBase pluginSettingsManager.add promotes 'workflow' back to Outlet.
+      psm.add('workflow', {
+        title: existingWf.title || 'Workflow',
+        icon: existingWf.icon || 'PartitionOutlined',
+        isPinned: existingWf.isPinned ?? true,
+        sort: existingWf.sort ?? 300,
+        aclSnippet: existingWf.aclSnippet || 'pm.workflow.workflows',
+        componentLoader: undefined,
+      });
+      psm.add('workflow.workflows', {
+        title: existingWf.title || 'Workflow',
+        icon: existingWf.icon || 'PartitionOutlined',
+        ...(existingWfComp ? { Component: existingWfComp } : {}),
+        ...(existingWfLoader ? { componentLoader: existingWfLoader } : {}),
+        aclSnippet: existingWf.aclSnippet || 'pm.workflow.workflows',
+        sort: 10,
+      });
+    }
+
+    psm.add('workflow.automation', {
+      title: 'Workflow Automation',
+      icon: 'ApartmentOutlined',
+      Component: FlowPage,
+      aclSnippet: 'pm',
+      sort: 20,
+    });
+    if (ConnectorsPage) {
+      psm.add('workflow.connectors', {
+        title: 'Connectors & n8n',
+        icon: 'ApiOutlined',
+        Component: ConnectorsPage,
+        aclSnippet: 'pm',
+        sort: 30,
+      });
+    }
+    psm.add('dxos-flow-studio', {
+      title: 'Workflow Automation',
+      icon: 'ApartmentOutlined',
+      Component: FlowPage,
+      aclSnippet: 'pm',
+      hidden: true,
+      link: '/admin/settings/workflow/automation',
+    });
+    psm.add('dxos-studio', {
+      title: 'DX-OS Studio',
+      icon: 'ControlOutlined',
+      Component: Page,
+      aclSnippet: 'pm',
+    });
+  }
 
   class DxosStudioClientPlugin extends client.Plugin {
     async load() {
       const Page = createDxosStudioSettingsPage(client, React, antd, this.app);
-      if (this.app?.pluginSettingsManager && typeof this.app.pluginSettingsManager.add === 'function') {
-        this.app.pluginSettingsManager.add('dxos-studio', {
-          title: 'DX-OS Studio',
-          icon: 'ControlOutlined',
-          Component: Page,
-          aclSnippet: 'pm',
-        });
-      }
+      const pinStorage = typeof createFlowPinStorage === 'function' ? createFlowPinStorage() : null;
+      const FlowPage = createFlowStudioApp(client, React, antd, this.app, { pinStorage });
+      const ConnectorsPage = createWorkflowConnectorsPage(this.app);
+      registerStudioSettings(this.app, Page, FlowPage, ConnectorsPage);
     }
   }
 
-  return { __esModule: true, default: DxosStudioClientPlugin, createDxosStudioSettingsPage };
+  return {
+    __esModule: true,
+    default: DxosStudioClientPlugin,
+    createDxosStudioSettingsPage,
+    createFlowStudioApp,
+    registerStudioSettings,
+    createPublicFormBuilderPanel,
+    PublicFormBuilderPanel,
+    createApprovalInboxPanel,
+    ApprovalInboxPanel,
+  };
 });

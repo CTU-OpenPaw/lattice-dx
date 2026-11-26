@@ -1,0 +1,220 @@
+{
+  "blueprintKey": "auto_cmms_on_coldchain_fault",
+  "ruleKey": "auto_cmms_on_coldchain_fault",
+  "name": "Ứng cứu khẩn Chuỗi lạnh & Bảo trì CMMS (DAG v2)",
+  "description": "Đánh giá bảng quyết định cmms_priority_routing_v1, tạo phiếu bảo trì CMMS trên latticeCustomWorkOrders, gửi thông báo vai trò phụ trách và rẽ nhánh song song khi workOrderPriority = critical để hạ nhiệt Digital Twin (HITL), chạy AI Triage và đẩy điều phối sang n8n.",
+  "category": "cold-chain",
+  "triggerEventType": "alarm.triggered,device.offline",
+  "dmnTableKey": "cmms_priority_routing_v1",
+  "cooldownSec": 60,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "alarm.triggered",
+    "source": "/dxos/alarm-engine",
+    "subject": "urn:ngsi-ld:Asset:org-a:native:1",
+    "data": {
+      "severity": "critical",
+      "deviceKey": "freezer-01",
+      "assetId": 1,
+      "assetEntityId": "urn:ngsi-ld:Asset:org-a:native:1",
+      "metricName": "temperature",
+      "numericValue": 11.5,
+      "message": "Nhiệt độ kho lạnh vượt ngưỡng 8°C (11.5°C)"
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_coldchain",
+        "type": "trigger.event",
+        "label": "Nhận sự cố Chuỗi lạnh",
+        "position": { "x": 80, "y": 240 },
+        "config": {
+          "eventType": "alarm.triggered,device.offline",
+          "filterJson": null
+        }
+      },
+      {
+        "id": "dmn_priority",
+        "type": "logic.dmn",
+        "label": "Định tuyến ưu tiên CMMS (DMN)",
+        "position": { "x": 360, "y": 240 },
+        "config": {
+          "tableKey": "cmms_priority_routing_v1",
+          "facts": {
+            "severity": "{{data.severity}}",
+            "eventType": "{{event.type}}"
+          }
+        }
+      },
+      {
+        "id": "create_work_order",
+        "type": "data.create",
+        "label": "Tạo phiếu bảo trì CMMS",
+        "position": { "x": 640, "y": 240 },
+        "config": {
+          "collection": "latticeCustomWorkOrders",
+          "values": {
+            "workOrderCode": "WO-{{event.id}}",
+            "title": "Cold-Chain Fault: {{data.deviceKey}}",
+            "assetId": "{{data.assetId}}",
+            "deviceKey": "{{data.deviceKey}}",
+            "priority": "{{dmn.workOrderPriority}}",
+            "status": "open",
+            "faultSummary": "{{data.message}}",
+            "assignedRole": "{{dmn.assignedRole}}"
+          }
+        }
+      },
+      {
+        "id": "notify_assigned",
+        "type": "notify.send",
+        "label": "Thông báo vai trò phụ trách",
+        "position": { "x": 920, "y": 240 },
+        "config": {
+          "roleNames": ["{{dmn.assignedRole}}"],
+          "category": "cmms",
+          "severity": "warning",
+          "title": "CMMS Work Order ({{dmn.workOrderPriority}})",
+          "body": "Tự tạo phiếu #{{steps.create_work_order.id}} cho thiết bị {{data.deviceKey}}",
+          "targetCollection": "latticeCustomWorkOrders",
+          "targetRecordId": "{{steps.create_work_order.id}}",
+          "targetPath": "/p/cmms"
+        }
+      },
+      {
+        "id": "if_critical",
+        "type": "control.if",
+        "label": "Kiểm tra mức độ critical",
+        "position": { "x": 1200, "y": 240 },
+        "config": {
+          "condition": {
+            "field": "dmn.workOrderPriority",
+            "op": "eq",
+            "value": "critical"
+          }
+        }
+      },
+      {
+        "id": "parallel_critical",
+        "type": "control.parallel",
+        "label": "Điều phối khẩn song song",
+        "position": { "x": 1480, "y": 240 },
+        "config": {}
+      },
+      {
+        "id": "twin_cool_down",
+        "type": "iot.twin_command",
+        "label": "Hạ nhiệt khẩn Digital Twin (HITL)",
+        "position": { "x": 1760, "y": 100 },
+        "config": {
+          "assetId": "{{data.assetId}}",
+          "assetEntityId": "{{data.assetEntityId}}",
+          "desiredPatch": {
+            "targetTempC": 4.0,
+            "fanMode": "high"
+          }
+        }
+      },
+      {
+        "id": "ai_triage_wo",
+        "type": "ai.agent",
+        "label": "Phân tích sự cố bằng AI Triage",
+        "position": { "x": 1760, "y": 240 },
+        "config": {
+          "targetCollection": "latticeCustomWorkOrders",
+          "targetRecordId": "{{steps.create_work_order.id}}",
+          "severity": "critical",
+          "recommendation": "Sự cố chuỗi lạnh nghiêm trọng trên {{data.deviceKey}}: kiểm tra máy nén, xác nhận lệnh hạ nhiệt 4°C và xử lý phiếu CMMS #{{steps.create_work_order.id}}."
+        }
+      },
+      {
+        "id": "http_n8n_dispatch",
+        "type": "integration.http",
+        "label": "Đẩy điều phối sang n8n",
+        "position": { "x": 1760, "y": 380 },
+        "config": {
+          "connectorKey": "n8n-coldchain-orchestrator",
+          "method": "POST",
+          "path": "",
+          "body": {
+            "eventType": "{{event.type}}",
+            "deviceKey": "{{data.deviceKey}}",
+            "workOrderId": "{{steps.create_work_order.id}}",
+            "priority": "{{dmn.workOrderPriority}}",
+            "assignedRole": "{{dmn.assignedRole}}",
+            "slaHours": "{{dmn.slaHours}}"
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_trig_dmn",
+        "source": "trig_coldchain",
+        "sourceHandle": "main",
+        "target": "dmn_priority",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_dmn_create",
+        "source": "dmn_priority",
+        "sourceHandle": "main",
+        "target": "create_work_order",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_create_notify",
+        "source": "create_work_order",
+        "sourceHandle": "main",
+        "target": "notify_assigned",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_notify_if",
+        "source": "notify_assigned",
+        "sourceHandle": "main",
+        "target": "if_critical",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_if_parallel",
+        "source": "if_critical",
+        "sourceHandle": "true",
+        "target": "parallel_critical",
+        "targetHandle": "in",
+        "label": "Khi ưu tiên = critical"
+      },
+      {
+        "id": "e_par_twin",
+        "source": "parallel_critical",
+        "sourceHandle": "main",
+        "target": "twin_cool_down",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_par_ai",
+        "source": "parallel_critical",
+        "sourceHandle": "main",
+        "target": "ai_triage_wo",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_par_http",
+        "source": "parallel_critical",
+        "sourceHandle": "main",
+        "target": "http_n8n_dispatch",
+        "targetHandle": "in"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 60,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

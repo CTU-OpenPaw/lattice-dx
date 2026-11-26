@@ -311,6 +311,31 @@ export function createDefaultRunners() {
       .toString()
       .trim();
 
+  const inspectPgWalReadiness = (container, user, database, walArchiveDir) => {
+    const archiveMode = psqlContainer(container, user, database, 'SHOW archive_mode;');
+    const archiveCommand = psqlContainer(container, user, database, 'SHOW archive_command;');
+    let walDirReady = false;
+    let archiveScriptReady = false;
+    try {
+      dockerExecNoStdin(container, ['test', '-d', walArchiveDir]);
+      walDirReady = true;
+    } catch {
+      walDirReady = false;
+    }
+    try {
+      dockerExecNoStdin(container, ['test', '-r', '/etc/postgresql/pitr-archive.sh']);
+      archiveScriptReady = true;
+    } catch {
+      archiveScriptReady = false;
+    }
+    return {
+      archiveMode,
+      archiveCommand,
+      walDirReady,
+      archiveScriptReady,
+    };
+  };
+
   const restorePgStream = (container, user, dumpPath, target) => {
     assertRestoreTarget(target);
     return runRestoreFixture(
@@ -635,6 +660,26 @@ export function createDefaultRunners() {
       return {
         ok: Boolean(nb?.metadataVerified && nb?.applicationHealthVerified !== false),
         migrationsCount: nb?.migrationsCount ?? 0,
+      };
+    },
+    checkWalArchiveReadiness: ({ walArchiveDir = process.env.PITR_WAL_DIR || '/var/lib/postgresql/wal-archive' } = {}) => {
+      const postgresStatus = inspectPgWalReadiness(keycloakDb, keycloakUser, 'postgres', walArchiveDir);
+      const nocobaseDbUser = process.env.NOCOBASE_DB_USER?.trim() || 'nocobase';
+      const nocobaseStatus = inspectPgWalReadiness(nocobaseDb, nocobaseDbUser, 'nocobase', walArchiveDir);
+      const targets = { postgres: postgresStatus, 'nocobase-db': nocobaseStatus };
+      const ready = Object.values(targets).every(
+        (t) =>
+          t.archiveMode === 'on' &&
+          typeof t.archiveCommand === 'string' &&
+          t.archiveCommand.trim() !== '' &&
+          t.archiveCommand.trim() !== '/bin/true' &&
+          t.walDirReady &&
+          t.archiveScriptReady,
+      );
+      return {
+        ready,
+        walArchiveDir,
+        targets,
       };
     },
     applyRestoreComponent: (component, { bundleDir, dryRun }) => {
@@ -1102,6 +1147,10 @@ export function rehearseStack(
   const fullRecoverability = Boolean(
     fullStackVerified && ephemeralContainerVerified && objectsVerified && applicationHealthVerified,
   );
+  const walArchive =
+    typeof runners.checkWalArchiveReadiness === 'function'
+      ? verifyWalArchiveReadiness({ runners })
+      : null;
 
   const report = {
     format: STACK_REHEARSAL_FORMAT,
@@ -1114,12 +1163,46 @@ export function rehearseStack(
     objectsVerified,
     applicationHealthVerified,
     fullRecoverability,
+    ...(walArchive ? { walArchiveReady: walArchive.ready, walArchive } : {}),
     skippedComponents,
     components: results,
   };
   const reportPath = join(absBundle, `stack-rehearsal-${randomUUID().replaceAll('-', '')}.json`);
   writePrivateFile(reportPath, JSON.stringify(report, null, 2) + '\n');
   return { reportPath, ...report };
+}
+
+export function verifyWalArchiveReadiness({
+  runners = createDefaultRunners(),
+  walArchiveDir = process.env.PITR_WAL_DIR || '/var/lib/postgresql/wal-archive',
+  strict = false,
+} = {}) {
+  if (typeof runners?.checkWalArchiveReadiness !== 'function') {
+    throw new Error('WAL archive readiness check runner is unavailable');
+  }
+  const result = runners.checkWalArchiveReadiness({ walArchiveDir });
+  const targets = result?.targets && typeof result.targets === 'object' ? result.targets : {};
+  const entries = Object.entries(targets);
+  const allTargetsReady =
+    entries.length > 0 &&
+    entries.every(
+      ([, target]) =>
+        target?.archiveMode === 'on' &&
+        typeof target?.archiveCommand === 'string' &&
+        target.archiveCommand.trim() !== '' &&
+        target.archiveCommand.trim() !== '/bin/true' &&
+        Boolean(target?.walDirReady) &&
+        Boolean(target?.archiveScriptReady),
+    );
+  const ready = Boolean(result?.ready && allTargetsReady);
+  if (strict && !ready) {
+    throw new Error('PostgreSQL PITR WAL archive readiness check failed');
+  }
+  return {
+    ready,
+    walArchiveDir: result?.walArchiveDir || walArchiveDir,
+    targets,
+  };
 }
 
 export function restoreStack(

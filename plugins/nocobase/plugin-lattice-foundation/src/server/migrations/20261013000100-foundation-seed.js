@@ -12,7 +12,7 @@ class FoundationSeed extends Migration {
   on = 'afterSync';
   async up() {
     const db = this.context.db;
-    await db.sequelize.transaction((transaction) => seedFoundation(db, transaction));
+    await db.sequelize.transaction((transaction) => seedFoundation(db, transaction, { env: process.env }));
   }
   async down() {
     const db = this.context.db;

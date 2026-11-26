@@ -10,6 +10,7 @@
 
 const { listWorkflowTemplates, buildWorkflowTemplate } = require('./workflow-templates');
 const { composePortals } = require('./portal-composer');
+const { resolveServiceActor } = require('./service-scope');
 const {
   exportSolutionBundle,
   diffSolutionBundle,
@@ -75,19 +76,75 @@ function readParams(ctx) {
   return { ...p, ...v };
 }
 
+function readHeaderRole(ctx) {
+  if (typeof ctx?.get === 'function') {
+    const h = ctx.get('X-Role') || ctx.get('x-role');
+    if (h != null && String(h).trim()) return String(h).trim();
+  }
+  const raw = ctx?.headers?.['x-role']
+    ?? ctx?.headers?.['X-Role']
+    ?? ctx?.request?.headers?.['x-role']
+    ?? ctx?.request?.headers?.['X-Role'];
+  return raw != null ? String(raw).trim() : '';
+}
+
+function extractClaimedStudioRoles(ctx) {
+  const activeRole = ctx?.state?.currentRole != null ? String(ctx.state.currentRole).trim() : '';
+  if (activeRole) return [activeRole];
+  const headerRole = readHeaderRole(ctx);
+  if (headerRole) return [headerRole];
+  if (Array.isArray(ctx?.state?.currentRoles) && ctx.state.currentRoles.length) {
+    return ctx.state.currentRoles.map((r) => String(r || '').trim()).filter(Boolean);
+  }
+  return [];
+}
+
+async function resolveStudioCallerRoles(ctx, db) {
+  if (!ctx?.state?.currentUser) return [];
+  const claimed = extractClaimedStudioRoles(ctx);
+  const userId = val(ctx.state.currentUser, 'id');
+  const ruRepo = db?.getRepository?.('rolesUsers');
+  if (ruRepo && typeof ruRepo.find === 'function') {
+    if (userId == null || !/^[1-9]\d*$/.test(String(userId))) return [];
+    const bindings = (await ruRepo.find({ filter: { userId: Number(userId) } })) || [];
+    const assigned = new Set(
+      bindings
+        .filter((r) => val(r, 'userId') == null || Number(val(r, 'userId')) === Number(userId))
+        .map((r) => String(val(r, 'roleName') || '').trim())
+        .filter(Boolean),
+    );
+    if (assigned.size === 0) return [];
+    return claimed.length > 0 ? claimed.filter((r) => assigned.has(r)) : [...assigned];
+  }
+  return claimed;
+}
+
+async function isRootCaller(ctx, db) {
+  const roleNames = await resolveStudioCallerRoles(ctx, db);
+  return roleNames.includes('root');
+}
+
 async function isStudioAdmin(ctx, db) {
-  if (!ctx?.state?.currentUser) return false;
-  const roleNames = Array.isArray(ctx.state.currentRoles) && ctx.state.currentRoles.length
-    ? ctx.state.currentRoles
-    : ctx.state.currentRole ? [ctx.state.currentRole] : [];
+  const roleNames = await resolveStudioCallerRoles(ctx, db);
+  if (!roleNames.length) return false;
   if (roleNames.includes('root')) return true;
   const rolesRepo = db?.getRepository?.('roles');
-  if (!rolesRepo || !roleNames.length) return false;
-  const matched = (await rolesRepo.find({ filter: { name: { $in: roleNames } } })) || [];
+  if (!rolesRepo) return false;
+  let matched = [];
+  if (typeof rolesRepo.find === 'function') {
+    matched = (await rolesRepo.find({ filter: { name: { $in: roleNames } } })) || [];
+  } else if (typeof rolesRepo.findOne === 'function') {
+    for (const rName of roleNames) {
+      const row = await rolesRepo.findOne({ filter: { name: rName } });
+      if (row) matched.push(row);
+    }
+  }
   return matched.some((r) => {
-    if (val(r, 'allowConfigure') === true) return true;
+    const rName = String(val(r, 'name') || '').trim();
+    if (!rName || !roleNames.includes(rName)) return false;
+    if (val(r, 'allowAll') === true || val(r, 'allowConfigure') === true) return true;
     const snippets = val(r, 'snippets');
-    return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*'));
+    return Array.isArray(snippets) && (snippets.includes('pm') || snippets.includes('pm.*') || snippets.includes('*'));
   });
 }
 
@@ -136,7 +193,7 @@ function buildPluginStatusList(rows) {
       sdkProvidedByHost: true,
       installed: Boolean(row),
       enabled: val(row, 'enabled') === true,
-      version: val(row, 'version') || '0.1.0',
+      version: val(row, 'version') || '0.4.0',
     };
   });
 }
@@ -153,6 +210,58 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
     } catch {
       throw fail('INVALID_SOLUTION_BUNDLE', 400, 'Invalid Solution Bundle JSON');
     }
+  }
+
+  async function resolveSolutionBundleScope(ctx, params, incomingBundle = null, { allowAllString = false } = {}) {
+    const requestedOrg = params.organizationId != null ? String(params.organizationId).trim() : '';
+    if (await isRootCaller(ctx, db)) {
+      const metaOrg = incomingBundle?.metadata?.organizationId != null
+        ? String(incomingBundle.metadata.organizationId).trim()
+        : '';
+      const resolved = requestedOrg || (metaOrg && metaOrg !== 'all' ? metaOrg : '');
+      if (!allowAllString && resolved === 'all') {
+        return { isRoot: true, organizationId: null };
+      }
+      return { isRoot: true, organizationId: resolved || null };
+    }
+
+    const actor = await resolveServiceActor(db, ctx.state?.currentUser);
+    if (requestedOrg && requestedOrg !== actor.organizationId) {
+      throw fail(
+        'DXOS_ORG_MISMATCH',
+        403,
+        'Chỉ tài khoản root mới được thao tác gói giải pháp toàn hệ thống hoặc tổ chức khác.',
+      );
+    }
+    if (incomingBundle && typeof incomingBundle === 'object') {
+      const metaOrg = incomingBundle.metadata?.organizationId != null
+        ? String(incomingBundle.metadata.organizationId).trim()
+        : '';
+      if (metaOrg && metaOrg !== actor.organizationId) {
+        throw fail(
+          'DXOS_ORG_MISMATCH',
+          403,
+          'Gói giải pháp thuộc tổ chức khác hoặc phạm vi toàn hệ thống (all), vượt quá phạm vi tổ chức của bạn.',
+        );
+      }
+      const gov = incomingBundle.governance;
+      if (gov && typeof gov === 'object' && !Array.isArray(gov)) {
+        for (const key of ['decisionTables', 'slaPolicies', 'incidentRules', 'automationRules', 'webhookSubscriptions']) {
+          const items = Array.isArray(gov[key]) ? gov[key] : [];
+          for (const item of items) {
+            const itemOrg = item?.organizationId != null ? String(item.organizationId).trim() : '';
+            if (itemOrg && itemOrg !== actor.organizationId) {
+              throw fail(
+                'DXOS_ORG_MISMATCH',
+                403,
+                `Bản ghi governance (${key}) thuộc tổ chức "${itemOrg}", vượt quá phạm vi "${actor.organizationId}".`,
+              );
+            }
+          }
+        }
+      }
+    }
+    return { isRoot: false, organizationId: actor.organizationId };
   }
 
   return {
@@ -416,8 +525,8 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
-      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.3.0' });
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
+      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.4.0' });
       return next();
     },
 
@@ -425,10 +534,11 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
+      await resolveSolutionBundleScope(ctx, params, null);
       const incoming = parseIncomingBundle(params.bundle);
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, incoming);
       const validation = validateSolutionBundle(incoming);
       if (!validation.valid) throw fail('INVALID_SOLUTION_BUNDLE', 400, validation.errors.join('; '));
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : (incoming.metadata?.organizationId !== 'all' ? incoming.metadata?.organizationId : null);
       const current = await exportSolutionBundle(db, { organizationId });
       ctx.body = diffSolutionBundle(current, incoming);
       return next();
@@ -438,8 +548,9 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
+      await resolveSolutionBundleScope(ctx, params, null);
       const incoming = parseIncomingBundle(params.bundle);
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, incoming);
       const dryRun = params.dryRun === false ? false : true;
       const enableWorkflows = typeof params.enableWorkflows === 'string'
         ? params.enableWorkflows === 'true'
@@ -452,7 +563,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const organizationId = params.organizationId ? String(params.organizationId).trim() : null;
+      const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
       const snapshotUid = params.snapshotUid ? String(params.snapshotUid).trim() : '';
       ctx.body = await rollbackLastSolutionBundle(db, { organizationId, snapshotUid });
       return next();
@@ -460,4 +571,11 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
   };
 }
 
-module.exports = { DXOS_PLUGINS_CATALOG, isStudioAdmin, createDefaultApplyBlueprint, createDxosStudioActions };
+module.exports = {
+  DXOS_PLUGINS_CATALOG,
+  isStudioAdmin,
+  isRootCaller,
+  resolveStudioCallerRoles,
+  createDefaultApplyBlueprint,
+  createDxosStudioActions,
+};

@@ -7,7 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 const {randomBytes}=require('node:crypto');
-const {denied,deploymentConfig,safeReturnTo,consumeBound,resolveMappedUser,parseGroupRoleMap,syncMappedUserRoles}=require('./policy');
+const {denied,deploymentConfig,safeReturnTo,consumeBound,withOptionalSystemRlsBypass,resolveMappedUser,parseGroupRoleMap,syncMappedUserRoles}=require('./policy');
 const {createOidc}=require('./oidc');
 const TYPE='lattice-keycloak',COOKIE='ldx_enterprise_binding';
 const random=()=>randomBytes(32).toString('base64url');
@@ -73,7 +73,7 @@ function createActions(app,cache,verifiedIdentity){
       await authenticator(name);
       if(typeof subject!=='string'||!subject.trim()||subject!==subject.trim()||subject.length>255||!/^\d+$/.test(String(userId)))ctx.throw(400,'Subject and native user ID are required.');
       await app.lockManager.runExclusive('enterprise-link:'+name,async()=>{
-        const employee=await app.db.getRepository('latticeEmployees').findOne({filter:{userId,active:true}});
+        const employee=await withOptionalSystemRlsBypass(app.db,(transaction)=>app.db.getRepository('latticeEmployees').findOne({filter:{userId,active:true},...(transaction?{transaction}:{})}));
         const user=await app.db.getRepository('users').findOne({filter:{id:userId}});
         if(!employee?.organizationId||!user)throw denied();
         const repo=app.db.getRepository('usersAuthenticators');

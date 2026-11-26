@@ -22,6 +22,7 @@
   const { registerDxosBlockModels } = require('./block-models');
   const { createCommandPaletteProvider } = require('./command-palette');
   const { createRecordChatterView } = require('./chatter-panel');
+  const { createBiChartBlockView } = require('./bi-chart-block');
 
   class DxosBlocksClientPlugin extends client.Plugin {
     async load() {
@@ -39,5 +40,6 @@
     registerDxosBlockModels,
     createCommandPaletteProvider,
     createRecordChatterView,
+    createBiChartBlockView,
   };
 });

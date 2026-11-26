@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { runInRlsSavepoint } = require('./ai-rls');
+
 const EMBEDDING_DIM = 256;
 const STOP_WORDS = new Set(['va', 'cua', 'cho', 'trong', 'voi', 'cac', 'nhung', 'mot', 'tai', 've', 'la', 'co', 'khong', 'duoc', 'bi']);
 
@@ -146,15 +148,97 @@ function buildParaChunkPoolEntries(chunks = [], { organizationId, visibleDocMap 
       paraCitation: `[latticeParaDocuments:${code}#${targetDocId} · ${paraSpace} · ${sectionTag}]`,
       citation: `[latticeParaDocuments:${code}#${targetDocId} · ${sectionTag}]`,
     };
+    const pgSimRaw = read(chunk, 'pgVectorSim') ?? read(chunk, '_pgVectorSim');
+    const pgVectorSim = pgSimRaw != null && Number.isFinite(Number(pgSimRaw)) ? Number(pgSimRaw) : null;
     entries.push({
       item,
       titleText: `${code} ${docTitle} ${sectionTitle}`.trim(),
       hayText: `${docTitle} ${sectionTitle} ${code} ${content}`.trim(),
       rawSummary: content,
       embedding: read(chunk, 'embeddingJson'),
+      ...(pgVectorSim != null ? { pgVectorSim } : {}),
     });
   }
   return entries;
+}
+
+const PGVECTOR_TABLE_SPECS = new Map([
+  ['latticeParaChunks', 1536],
+  ['latticeParaDocuments', 256],
+]);
+const ALLOWED_PGVECTOR_TABLES = new Set(PGVECTOR_TABLE_SPECS.keys());
+
+/**
+ * Safely probes PostgreSQL pgvector cosine similarity over allowlisted P.A.R.A. tables.
+ * Enforces exact vector dimension matching (1536 for latticeParaChunks, 256 for latticeParaDocuments)
+ * and returns [] on non-postgres dialects, invalid embeddings, or dimension mismatches.
+ */
+async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, table = 'latticeParaChunks', paraSpace = null, limit = 20 } = {}) {
+  const tableName = typeof table === 'string' && table.trim() ? table.trim() : 'latticeParaChunks';
+  if (!ALLOWED_PGVECTOR_TABLES.has(tableName)) return [];
+  const expectedDim = PGVECTOR_TABLE_SPECS.get(tableName);
+
+  const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
+  if (!orgId) return [];
+  if (db?.sequelize?.getDialect?.() !== 'postgres' || typeof db?.sequelize?.query !== 'function') {
+    return [];
+  }
+  if (!Array.isArray(queryEmbedding) || queryEmbedding.length !== expectedDim) {
+    return [];
+  }
+  let magSq = 0;
+  const floats = new Array(queryEmbedding.length);
+  for (let i = 0; i < queryEmbedding.length; i += 1) {
+    const val = queryEmbedding[i];
+    if (typeof val !== 'number' || !Number.isFinite(val)) return [];
+    floats[i] = val;
+    magSq += val * val;
+  }
+  if (magSq <= 0) return [];
+
+  const vectorLiteral = `[${floats.join(',')}]`;
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
+  const cleanSpace = typeof paraSpace === 'string' && paraSpace.trim() ? paraSpace.trim() : null;
+  const replacements = {
+    organizationId: orgId,
+    vectorLiteral,
+    limit: safeLimit,
+    ...(cleanSpace ? { paraSpace: cleanSpace } : {}),
+  };
+  const spaceClause = cleanSpace ? '\n      AND "paraSpace" = :paraSpace' : '';
+  const sql = tableName === 'latticeParaDocuments'
+    ? `SELECT id, "organizationId", code, title, "paraSpace",
+           summary, "contentMarkdown", tags, status, "searchText", "embeddingJson",
+           1 - (embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
+    FROM "latticeParaDocuments"
+    WHERE active = true
+      AND embedding IS NOT NULL
+      AND "organizationId" = :organizationId${spaceClause}
+    ORDER BY embedding <=> CAST(:vectorLiteral AS vector) ASC
+    LIMIT :limit`
+    : `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
+           "chunkIndex", "sectionTitle", "pageNumber", content, "embeddingJson",
+           1 - (embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
+    FROM "latticeParaChunks"
+    WHERE active = true
+      AND embedding IS NOT NULL
+      AND "organizationId" = :organizationId${spaceClause}
+    ORDER BY embedding <=> CAST(:vectorLiteral AS vector) ASC
+    LIMIT :limit`;
+
+  try {
+    const res = await runInRlsSavepoint(db, () => db.sequelize.query(sql, { replacements }));
+    const rows = Array.isArray(res) && Array.isArray(res[0]) ? res[0] : (Array.isArray(res) ? res : []);
+    const read = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
+    return rows.filter((row) => {
+      if (!row || read(row, 'organizationId') !== orgId) return false;
+      if (read(row, 'active') === false) return false;
+      if (cleanSpace && read(row, 'paraSpace') !== cleanSpace) return false;
+      return true;
+    });
+  } catch {
+    return [];
+  }
 }
 
 function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
@@ -182,10 +266,11 @@ function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
       }
     }
     if (queryTokens.length > 0 && matched === queryTokens.length) lex += 3;
+    const hasPgSim = cand.pgVectorSim != null && Number.isFinite(Number(cand.pgVectorSim));
     const vec = Array.isArray(cand.embedding) && cand.embedding.length === EMBEDDING_DIM
       ? cand.embedding
       : computeEmbedding(hayNorm);
-    const sem = cosineSimilarity(queryVec, vec);
+    const sem = hasPgSim ? Number(cand.pgVectorSim) : cosineSimilarity(queryVec, vec);
     if (lex > 0 || sem >= 0.24) {
       scoredPool.push({ cand, lex, sem });
     }
@@ -214,6 +299,9 @@ function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
 
 module.exports = {
   normalizeSearchText,
+  computeEmbedding,
+  cosineSimilarity,
+  executePgVectorParaQuery,
   rankHybridRecords,
   buildParaChunkPoolEntries,
 };

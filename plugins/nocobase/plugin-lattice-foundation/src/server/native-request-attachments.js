@@ -11,6 +11,7 @@
 const { randomUUID } = require('node:crypto');
 const { createConnection } = require('node:net');
 const { resolveNativeActor, scopeNativeRead } = require('./native-scope');
+const { canUsePgRlsSession, getActiveRlsContext, setTransactionRlsOrg } = require('./pg-rls');
 const { createSharedUploadReceipts } = require('./native-shared-upload');
 
 const resource = 'latticeRequestAttachments';
@@ -94,6 +95,9 @@ function registerNativeRequestAttachments(app, scannerHost, submitOrganization, 
     }
     return db.sequelize.transaction(async transaction => {
       const actor = await resolveNativeActor(db, ctx.state.currentUser, { transaction, lock: transaction.LOCK.SHARE });
+      if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction) {
+        await setTransactionRlsOrg(db, actor.organizationId, transaction);
+      }
       const request = await db.getModel(requestCollection).findOne({
         where: { id, organizationId: actor.organizationId },
         transaction,

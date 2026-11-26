@@ -313,7 +313,7 @@ test('validateSolutionBundle rejects privileged roles and invalid schema/collect
   // Modified incoming bundle adds 1 role and 1 AI profile
   const incoming = structuredClone(current);
   incoming.roles.push({ name: 'ldx_cold_lead', title: 'Trưởng ca lạnh', snippets: ['lattice.integrations.propose'] });
-  incoming.aiProfiles.push({ username: 'dxos-cold-copilot', nickname: 'Copilot Lạnh', organizationId: 'foreign-org', enabled: true });
+  incoming.aiProfiles.push({ username: 'dxos-cold-agent', nickname: 'Agent Kho Lạnh', organizationId: 'foreign-org', enabled: true });
 
   const diff = diffSolutionBundle(current, incoming);
   assert.equal(diff.summary.added, 2);
@@ -324,7 +324,7 @@ test('validateSolutionBundle rejects privileged roles and invalid schema/collect
   assert.equal(dryRes.dryRun, true);
   assert.equal(dryRes.applied, null);
   assert.equal(roles.some((r) => r.name === 'ldx_cold_lead'), false);
-  assert.equal(aiProfiles.some((p) => p.username === 'dxos-cold-copilot'), false);
+  assert.equal(aiProfiles.some((p) => p.username === 'dxos-cold-agent'), false);
 
   // Apply (dryRun: false) idempotently upserts scoped to caller org without escalation
   const applyRes = await importSolutionBundle(db, incoming, { dryRun: false, organizationId: 'org-a' });
@@ -335,7 +335,7 @@ test('validateSolutionBundle rejects privileged roles and invalid schema/collect
   assert.ok(newRole);
   assert.equal(newRole.allowAll, false);
   assert.equal(newRole.allowConfigure, false);
-  const newAi = aiProfiles.find((p) => p.username === 'dxos-cold-copilot');
+  const newAi = aiProfiles.find((p) => p.username === 'dxos-cold-agent');
   assert.equal(newAi.organizationId, 'org-a');
 });
 
@@ -376,17 +376,25 @@ test('v2 schema export + backward-compatible v1/v2 validation + privilege escala
     validateSolutionBundle,
   } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
 
-  assert.equal(BUNDLE_SCHEMA_VERSION, 'latticedx.solution-bundle/v2');
+  assert.equal(BUNDLE_SCHEMA_VERSION, 'latticedx.solution-bundle/v3');
   assert.ok(ACCEPTED_SCHEMA_VERSIONS instanceof Set);
   assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v1'), true);
   assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v2'), true);
+  assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v3'), true);
 
   const { db } = makeSolutionBundleDbHarness();
-  const v2Bundle = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.3.0' });
-  assert.equal(v2Bundle.metadata.schemaVersion, 'latticedx.solution-bundle/v2');
+  const v3Bundle = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.0' });
+  assert.equal(v3Bundle.metadata.schemaVersion, 'latticedx.solution-bundle/v3');
+  assert.equal(v3Bundle.metadata.platformVersion, '0.4.0');
+  assert.equal(validateSolutionBundle(v3Bundle).valid, true);
+
+  // Accepts v1 and v2 bundles cleanly
+  const v2Bundle = structuredClone(v3Bundle);
+  v2Bundle.metadata.schemaVersion = 'latticedx.solution-bundle/v2';
+  delete v2Bundle.routesAndBlocks;
+  delete v2Bundle.governance;
   assert.equal(validateSolutionBundle(v2Bundle).valid, true);
 
-  // Accepts v1 bundles cleanly
   const v1Bundle = structuredClone(v2Bundle);
   v1Bundle.metadata.schemaVersion = 'latticedx.solution-bundle/v1';
   assert.equal(validateSolutionBundle(v1Bundle).valid, true);
@@ -871,11 +879,11 @@ test('Fix Round 1 (Important): AI profile toolPermissions validation & stale adm
   mixed.aiProfiles[0].toolPermissions = {
     dxos_manage_rbac_permissions: 'ALLOW',
     dxos_search_enterprise_context: 'ask',
-    dxos_my_tasks_copilot: 'OFF',
+    dxos_my_workflow_tasks: 'OFF',
   };
   await importSolutionBundle(db, mixed, { dryRun: false, organizationId: 'org-a' });
   assert.deepEqual(aiProfiles[0].toolPermissions, {
-    dxos_my_tasks_copilot: 'OFF',
+    dxos_my_workflow_tasks: 'OFF',
     dxos_search_enterprise_context: 'ASK',
   });
 });
@@ -1035,4 +1043,141 @@ test('applyCustomCollectionsSection invokes db.attachLatticeRlsPolicy after coll
   assert.equal(res.dryRun, false);
   assert.equal(res.applied.customCollectionsUpserted, 1);
   assert.deepEqual(rlsAttached, [{ tableName: 'latticeCustomColdChainLog', hasTx: true }]);
+});
+
+test('Task 16: solution-bundle resolves organizationId dynamically from active latticeOrganizations and fails cleanly when none exists', async () => {
+  const { importSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db, customCollections, aiProfiles } = makeSolutionBundleDbHarness();
+  const orgRows = [
+    { id: 1, organizationId: 'inactive-org', active: false, status: 'inactive' },
+    { id: 2, organizationId: 'acme-pharma', active: true, status: 'active' },
+  ];
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'latticeOrganizations') {
+      return { find: async () => [...orgRows] };
+    }
+    return origGetRepo(name);
+  };
+
+  const bundleNoOrg = {
+    metadata: { schemaVersion: 'latticedx.solution-bundle/v2' },
+    customCollections: [
+      { name: 'latticeCustomPharmaBatch', title: 'Pharma Batch', fields: [{ name: 'batchNo', type: 'string' }] },
+    ],
+    aiProfiles: [
+      { username: 'pharma-bot', nickname: 'Pharma Bot', enabled: true, isAdminBuilder: false, allowedRoles: ['ops_manager'] },
+    ],
+  };
+
+  const res = await importSolutionBundle(db, bundleNoOrg, { dryRun: false });
+  assert.equal(res.applied.customCollectionsUpserted, 1);
+  assert.equal(res.applied.aiProfilesUpserted, 1);
+  const createdCol = customCollections.find((c) => c.name === 'latticeCustomPharmaBatch');
+  assert.equal(createdCol.fields.find((f) => f.name === 'organizationId').defaultValue, 'acme-pharma');
+  const createdAi = aiProfiles.find((p) => p.username === 'pharma-bot');
+  assert.equal(createdAi.organizationId, 'acme-pharma');
+
+  // Empty latticeOrganizations with no targetOrg/clean.organizationId fails cleanly
+  orgRows.length = 0;
+  await assert.rejects(
+    () => importSolutionBundle(db, bundleNoOrg, { dryRun: false }),
+    (err) => err.status === 400 && err.code === 'ORGANIZATION_REQUIRED',
+  );
+});
+
+test('exportSolutionBundle unwraps Sequelize Model instances inside desktopRoutes.dataValues.uiLayouts without crashing on toJSON cloneDeep', async () => {
+  const { exportSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db } = makeSolutionBundleDbHarness();
+
+  // Simulate Sequelize Model instance inside uiLayouts association where super.toJSON() throws on nested Model._options/delegates
+  const nestedLayoutModel = {
+    dataValues: {
+      uid: 'ldx-portal-work',
+      title: 'Công việc',
+      desktopRoutesUiLayouts: { dataValues: { desktopRouteId: 10, uiLayoutUid: 'ldx-portal-work' } },
+    },
+    toJSON() {
+      return { uid: 'ldx-portal-work', title: 'Công việc' };
+    },
+  };
+  const routeModelWithThrowingToJson = {
+    dataValues: {
+      id: 10,
+      title: 'Ops Page',
+      type: 'flowPage',
+      schemaUid: 'ops_schema_1',
+      uiLayouts: [nestedLayoutModel],
+    },
+    toJSON() {
+      throw new TypeError("Cannot read properties of undefined (reading 'length')");
+    },
+  };
+
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'desktopRoutes') {
+      return { find: async () => [routeModelWithThrowingToJson] };
+    }
+    if (name === 'desktopRoutesUiLayouts') {
+      return { find: async () => [{ desktopRouteId: 10, uiLayoutUid: 'ldx-portal-work' }] };
+    }
+    if (name === 'rolesDesktopRoutes' || name === 'flowModels') {
+      return { find: async () => [] };
+    }
+    return origGetRepo(name);
+  };
+
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.0' });
+  assert.equal(Array.isArray(exported.routesAndBlocks?.routes), true);
+  assert.equal(exported.routesAndBlocks.routes.some((r) => r.title === 'Ops Page' && r.layoutUid === 'ldx-portal-work'), true);
+});
+
+test('toObj preserves diamond DAG shared Model references, terminates cycles, and strips forbidden prototype keys', async () => {
+  const { toObj, exportSolutionBundle } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { db } = makeSolutionBundleDbHarness();
+
+  const sharedLayout = {
+    dataValues: { uid: 'ldx-portal-work', title: 'Công việc' },
+    toJSON() { throw new TypeError('force nested dataValues fallback'); },
+  };
+  const diamondRoute = {
+    dataValues: {
+      id: 12,
+      title: 'Diamond Route',
+      type: 'flowPage',
+      schemaUid: 'diamond_schema_1',
+      uiLayouts: [sharedLayout, sharedLayout],
+    },
+    toJSON() { throw new TypeError('force dataValues fallback'); },
+  };
+  Object.defineProperty(diamondRoute.dataValues, '__proto__', { value: { polluted: true }, enumerable: true, configurable: true });
+
+  const plainDiamond = toObj(diamondRoute);
+  assert.equal(plainDiamond.uiLayouts.length, 2, 'Diamond DAG must preserve both references to sharedLayout');
+  assert.equal(plainDiamond.uiLayouts[0].uid, 'ldx-portal-work');
+  assert.equal(plainDiamond.uiLayouts[1].uid, 'ldx-portal-work');
+  assert.equal(Object.hasOwn(plainDiamond, '__proto__'), false);
+
+  // True cycle still terminates safely without stack overflow
+  const cyclic = {
+    dataValues: { id: 99 },
+    toJSON() { throw new TypeError('force cyclic fallback'); },
+  };
+  cyclic.dataValues.self = cyclic;
+  const plainCyclic = toObj(cyclic);
+  assert.equal(plainCyclic.id, 99);
+  assert.equal(plainCyclic.self, undefined);
+
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'desktopRoutes') return { find: async () => [diamondRoute] };
+    if (name === 'desktopRoutesUiLayouts') return { find: async () => [{ desktopRouteId: 12, uiLayoutUid: 'ldx-portal-work' }] };
+    if (name === 'rolesDesktopRoutes' || name === 'flowModels') return { find: async () => [] };
+    return origGetRepo(name);
+  };
+
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.0' });
+  const hit = exported.routesAndBlocks.routes.find((r) => r.title === 'Diamond Route' && r.layoutUid === 'ldx-portal-work');
+  assert.ok(hit);
 });

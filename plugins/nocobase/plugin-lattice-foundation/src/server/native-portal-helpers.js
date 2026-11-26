@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { isBusinessPortalRole } = require('../shared/portal-roles');
+
 const BUILTIN_UIDS = new Set(['admin-layout-model', 'mobile-layout-model']);
 const RESERVED_SLUGS = new Set([
   'admin', 'settings', 'signin', 'signup', 'p', 'v', 'api', 'static', 'storage', 'files', 'lattice',
@@ -161,13 +163,19 @@ function createPortalMetaStore(db) {
 }
 
 async function loadPortalData(db) {
-  const [layoutsRaw, linksRaw, routesRaw, grantsRaw] = await Promise.all([
+  const [layoutsRaw, linksRaw, routesRaw, grantsRaw, rolesRaw] = await Promise.all([
     getRepo(db, 'uiLayouts')?.find({ sort: ['uid'] }) || [],
     getRepo(db, 'desktopRoutesUiLayouts')?.find({}) || [],
     getRepo(db, 'desktopRoutes')?.find({}) || [],
     getRepo(db, 'rolesDesktopRoutes')?.find({}) || [],
+    getRepo(db, 'roles')?.find({}) || [],
   ]);
   const routeById = new Map(routesRaw.map(toPlain).filter(r => r?.id != null).map(r => [String(r.id), r]));
+  const excludedRoles = new Set();
+  for (const role of rolesRaw) {
+    const rName = String(val(role, 'name') || '').trim();
+    if (rName && !isBusinessPortalRole(role)) excludedRoles.add(rName);
+  }
   const routesByPortal = new Map(), routeIdsByPortal = new Map(), rolesByRoute = new Map();
   for (const link of linksRaw) {
     const uid = val(link, 'uiLayoutUid'), rid = val(link, 'desktopRouteId');
@@ -186,14 +194,17 @@ async function loadPortalData(db) {
     if (!rolesByRoute.has(String(rid))) rolesByRoute.set(String(rid), new Set());
     rolesByRoute.get(String(rid)).add(roleName);
   }
-  return { layouts: layoutsRaw.map(toPlain), routesByPortal, routeIdsByPortal, rolesByRoute };
+  return { layouts: layoutsRaw.map(toPlain), routesByPortal, routeIdsByPortal, rolesByRoute, excludedRoles };
 }
 
-function grantedLdxRoles(routeIds, rolesByRoute, fallbackRoles) {
+function grantedLdxRoles(routeIds, rolesByRoute, fallbackRoles, excludedRoles = null) {
   if (!routeIds || !routeIds.size) return Array.isArray(fallbackRoles) ? [...fallbackRoles] : [];
   const roles = new Set();
   for (const rid of routeIds) {
-    for (const r of rolesByRoute.get(rid) || []) if (String(r).startsWith('ldx_')) roles.add(r);
+    for (const r of rolesByRoute.get(rid) || []) {
+      const name = String(r || '').trim();
+      if (isBusinessPortalRole(name) && !(excludedRoles && excludedRoles.has(name))) roles.add(name);
+    }
   }
   return [...roles].sort();
 }
@@ -211,6 +222,6 @@ function buildPortalDto(layout, meta, routes, roles) {
 
 module.exports = {
   BUILTIN_UIDS, RESERVED_SLUGS, SLUG_RE, PLUGIN_NAME,
-  val, toPlain, getRepo, callerRoles, normalizePortalInput, inspectPortalRoutes,
+  val, toPlain, getRepo, callerRoles, isBusinessPortalRole, normalizePortalInput, inspectPortalRoutes,
   sanitizeRouteTree, sortPortals, createPortalMetaStore, loadPortalData, grantedLdxRoles, buildPortalDto,
 };

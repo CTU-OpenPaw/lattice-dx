@@ -37,12 +37,12 @@ Kết quả trực tiếp từ `pnpm acceptance:dxos-ai-mcp -- --origin=http://l
 | Nhân viên (`ldx_employee`) gọi `tools/list` trên `/api/dxos-mcp` | PASS | Chỉ trả về các tool tác nghiệp/cá nhân, ẩn hoàn toàn 5 Admin Builder tools |
 | Nhân viên gọi trực tiếp `dxos_compose_page_blocks` qua MCP | PASS | Bị từ chối JSON-RPC `-32003` và ghi log `denied` |
 | Nhân viên gọi `dxosAi:enterpriseTopology` | PASS | Bị chặn HTTP `403` (`DXOS_ADMIN_REQUIRED`) |
-| Nhân viên gọi `dxosAi:portalCopilot?portalSlug=services` | PASS | Chỉ trả trợ lý thuộc role & portal; không rò rỉ `dxos-architect` |
+| Nhân viên gọi `dxosAi:portalAgents?portalSlug=services` | PASS | Chỉ trả trợ lý thuộc role & portal; không rò rỉ `dxos-architect` |
 | Admin (`root`) gọi MCP `initialize` & `tools/list` trên `/api/dxos-mcp` | PASS | Phản hồi `protocolVersion: "2025-03-26"`, liệt kê đủ 8 Unified Tools (`scope: 'CUSTOM'`) |
 | Admin gọi MCP `dxos_inspect_architecture` & `dxos_compose_page_blocks` (`dryRun: true`) | PASS | Thành công (`isError: false`, trả preview blueprint `dryRun: true`) |
 | Admin đọc MCP Resource `dxos://topology/planes` | PASS | Trả về đủ **6 phân hệ** và `clause52Preserved: true` |
 | Endpoint MCP IT/OT `/api/dxos-mcp/it-ot` (`tools/list`, health, telemetry) | PASS | Liệt kê 4 IT/OT tools; `get_stack_connector_health` & `get_live_ngsi_telemetry` trả live OK |
-| Vòng đời AI Employee Admin tự tạo (`saveProfile` → `portalCopilot` → `deleteProfile`) | PASS | Tạo động `dxos-e2e-custom-bc5p0`, nhân viên thấy ngay trên `/p/services`, sau đó dọn sạch |
+| Vòng đời AI Employee Admin tự tạo (`saveProfile` → `portalAgents` → `deleteProfile`) | PASS | Tạo động `dxos-e2e-custom-bc5p0`, nhân viên thấy ngay trên `/p/services`, sau đó dọn sạch |
 | Nhật ký kiểm toán `latticeAiAuditLogs` (`dxosAi:auditLogs`) | PASS | Ghi đầy đủ lịch sử `aiProfileCount: 5`, `aiAuditCount: 17` |
 
 ---
@@ -73,17 +73,17 @@ Thực thi `pnpm acceptance:logistics-rbac -- --origin=http://localhost:13014` n
 
 ## 5. Nâng cấp v2 — Admin System Builder & 2 Đại Use Cases Live (`@latticedx/plugin-dxos-ai` v2)
 
-Mở rộng `@latticedx/plugin-dxos-ai` từ 8 tool lên **11 Unified Tools** (7 Admin Builder + 4 Operational/Copilot) tương thích Zod v4 / Gemini / OpenAI (`propertyNames`-free, typed arrays, JSON coercion), kết nối `local-9router` (`http://host.docker.internal:20128/v1`, model `ag/gemini-3.8-flash`):
+Mở rộng `@latticedx/plugin-dxos-ai` từ 8 tool lên **11 Unified Tools** (7 Admin Builder + 4 Operational) tương thích Zod v4 / Gemini / OpenAI (`propertyNames`-free, typed arrays, JSON coercion), kết nối `local-9router` (`http://host.docker.internal:20128/v1`, model `ag/gemini-3.8-flash`):
 
 - **7 Admin Builder Tools (`root`/`admin` only):**
   - `dxos_inspect_architecture`, `dxos_compose_page_blocks` (`listBlocks`, `composePageBlueprint`, `updateBlock`, `reorderBlocks`, `removeBlock`), `dxos_manage_portal_and_acl` (`grant`, `revoke`), `dxos_extend_collection_schema` (`createCollection`, `addFields`, `inspectCollection`), `dxos_manage_rbac_permissions` (`inspectRole`, `ensureCustomRole`, `grantResource`, `lockFields`, `revokeResource`), `dxos_deploy_workflow`, `dxos_configure_workflow` (`inspectWorkflow`, `updateNodeConfig`, `addNode`, `buildCustomWorkflow`, `toggleWorkflow`).
-- **4 Operational & Cross-Dept Copilot Tools:**
-  - `dxos_search_enterprise_context` (tự động dò cả `latticeCustom*`), `dxos_execute_record_action` (kiểm soát RBAC từng trường), `dxos_my_tasks_copilot`, `dxos_orchestrate_enterprise_case` (`radar`, `correlateCase`, `executeCoordinatedResponse`).
+- **4 Operational & Cross-Dept Enterprise Agent Tools:**
+  - `dxos_search_enterprise_context` (tự động dò cả `latticeCustom*`), `dxos_execute_record_action` (kiểm soát RBAC từng trường), `dxos_my_workflow_tasks`, `dxos_orchestrate_enterprise_case` (`radar`, `correlateCase`, `executeCoordinatedResponse`).
 - **Nghiệm thu Live E2E v2 (`pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014`):**
   - Đạt **19/19 kiểm tra (`result: "PASS"`)**, bổ sung `adminMcpToolsListed11`, `adminMcpRbacInspectAndRootBlocked`, `adminMcpWorkflowInspectOk`, `employeeCrossDeptRadarOk`.
 - **Kiểm chứng Trực quan 2 Đại Use Cases trên `http://localhost:13014` (Full HD 1920x1080 · 30 fps · `190.0s`):**
   1. **Use Case 1 — Admin System Builder + Live `dxos-architect`:** Tạo bảng tùy biến `latticeCustomColdAudits`, dựng portal `/p/cold-qa` (`Hero` + `KPI` + `NativeTable` + `CreateForm`), trò chuyện live với `@dxos-architect` (`ag/gemini-3.8-flash`) gọi `dxos_inspect_architecture`, cập nhật trực tiếp Hero Block (`#1677ff` → `#0d9488`, `(v2 · Live Edited)`), khóa trường `auditVerdict` cho `ldx_employee`, mở quyền cho `ldx_manager`, dựng & bật workflow `Quy trình Kiểm định Kho lạnh Tự động` (`workflowId: 398974587568128`, tinh chỉnh node điều kiện `> -16°C`).
-  2. **Use Case 2 — Nhân viên Cross-Dept Copilot & Thực thi RBAC Cấp trường:** Nhân viên (`ldx_employee`) vào `/p/cold-qa`, bấm `Allow use` chạy `dxos_orchestrate_enterprise_case`, điều phối tạo đồng bộ **3 phân hệ** `QA-COLD-001` (`latticeCustomColdAudits`) + `SRV-COLD-001` (`latticeServiceTickets`, `serviceType: "facilities"`) + `PARA-HO-001` (`latticeParaDocuments`, `status: "active"`), KPI tăng thực tế `0→1` / `0→1` / `4→5`; nhân viên cố ghi trường khóa `auditVerdict` bị chặn `RBAC_FIELD_LOCKED` (`status: "denied"`), Quản lý (`ldx_manager`) phê duyệt `CANH_BAO_BAO_TRI` hiển thị live trên bảng và toàn bộ vết được ghi rõ trong Tab 4 `Nhật ký Kiểm toán`.
+  2. **Use Case 2 — Nhân viên Cross-Dept Enterprise Agent & Thực thi RBAC Cấp trường:** Nhân viên (`ldx_employee`) vào `/p/cold-qa`, bấm `Allow use` chạy `dxos_orchestrate_enterprise_case`, điều phối tạo đồng bộ **3 phân hệ** `QA-COLD-001` (`latticeCustomColdAudits`) + `SRV-COLD-001` (`latticeServiceTickets`, `serviceType: "facilities"`) + `PARA-HO-001` (`latticeParaDocuments`, `status: "active"`), KPI tăng thực tế `0→1` / `0→1` / `4→5`; nhân viên cố ghi trường khóa `auditVerdict` bị chặn `RBAC_FIELD_LOCKED` (`status: "denied"`), Quản lý (`ldx_manager`) phê duyệt `CANH_BAO_BAO_TRI` hiển thị live trên bảng và toàn bộ vết được ghi rõ trong Tab 4 `Nhật ký Kiểm toán`.
 
 ---
 
@@ -91,7 +91,7 @@ Mở rộng `@latticedx/plugin-dxos-ai` từ 8 tool lên **11 Unified Tools** (7
 
 Nâng cấp kiến trúc DX-OS AI + Blocks theo **Phương án C (v3)** để `@dxos-architect` có thể tương tác, đề xuất, chỉnh sửa sâu giao diện NocoBase lẫn tự sáng tạo block mới trong khuôn khổ an toàn ngay trên trang đang mở:
 
-- **15 Unified Tools (11 Admin Builder + 4 Operational/Copilot):**
+- **15 Unified Tools (11 Admin Builder + 4 Operational):**
   - Bổ sung 4 công cụ Kiến trúc sư v3 (chỉ `root`/`admin`): `dxos_recommend_page_blueprint`, `dxos_design_creative_block`, `dxos_snapshot_or_rollback_page` (sao lưu/hoàn tác bằng bảng `latticeUiSnapshots`), `dxos_provision_role_workspace` (1 lệnh tạo vai trò `ldx_*` + RBAC cấp trường + cập nhật Portal ACL + trang mới + `DxosCreativeStudioBlockModel` + trợ lý AI riêng không có quyền Admin).
   - Mở rộng `dxos_compose_page_blocks` hỗ trợ chèn inline `addBlock` (cả block chuẩn NocoBase thông qua `flowSurfaces:addBlock` lẫn 7 DX-OS BlockModel), chia lưới đa cột `setGridLayout` (vd: `[12, 12]`), cấu hình sâu `configureNativeBlock` (trường, nút hành động, rule liên kết), tự chụp snapshot trước biến đổi và phát xung `bumpSurfaceRevision`.
 - **`DxosCreativeStudioBlockModel` (`@latticedx/plugin-dxos-blocks` v3):**
@@ -112,7 +112,7 @@ Nâng cấp kiến trúc DX-OS AI + Blocks theo **Phương án C (v3)** để `@
 Khắc phục phản hồi trải nghiệm UI v3: loại bỏ toàn bộ thanh công cụ / nút AI inline khỏi mặt trang nghiệp vụ, chỉ giữ **duy nhất 1 nút Agent nổi chuẩn NocoBase** trên toàn hệ thống và hỗ trợ điều khiển Kiến trúc sư AI **100% bằng tiếng Việt đời thường**.
 
 - **Loại bỏ nút & strip AI trên nội dung Portal (`@latticedx/plugin-dxos-blocks`):**
-  - Gỡ hoàn toàn `Trợ lý AI ngữ cảnh` strip (`dxos-block-copilot-strip`), thanh `Studio Kiến trúc Sống` (`dxos-admin-architect-bar`, picker/hoàn tác inline) khỏi `DxosPortalHeroView` và loại bỏ quick-action `askAi` khỏi `DxosCreativeStudioBlockModel`.
+  - Gỡ hoàn toàn `Trợ lý AI ngữ cảnh` strip (`dxos-block-agent-strip` — tiền thân Dynamic Block Agent Strip), thanh `Studio Kiến trúc Sống` (`dxos-admin-architect-bar`, picker/hoàn tác inline) khỏi `DxosPortalHeroView` và loại bỏ quick-action `askAi` khỏi `DxosCreativeStudioBlockModel`.
 - **Duy nhất 1 nút Agent nổi toàn ứng dụng (`PortalAgentLauncher` trong `@latticedx/plugin-dxos-ai`):**
   - `@nocobase/plugin-ai` ẩn nút nổi gốc ngoài `/admin/*`; `PortalAgentLauncher` (`app.use(...)`) chỉ hiển thị `[data-testid="dxos-portal-ai-float-btn"]` (`aria-label="Open AI chat"`, góc dưới phải chuẩn NocoBase) trên đường dẫn `/p/*` và tự ẩn trên `/admin/*`, khi khung chat gốc đang mở hoặc khi user chưa có nhân sự AI được phép.
   - Bấm nút mở thẳng khung chat gốc `@nocobase/plugin-ai` qua `triggerTask({ autoSend: false, message: { system } })` với ô nhập rỗng, focus sạch và ngữ cảnh ngầm `[Ngữ cảnh trang hiện tại: portalSlug, pageTitle, path]`, kèm vòng đồng bộ `dxosAi:pageSurfaceState` tự hoãn reload khi hộp thoại chat còn mở.

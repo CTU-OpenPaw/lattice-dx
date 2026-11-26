@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 const {resolveNativeActor}=require('./native-scope');
+const {canUsePgRlsSession,getActiveRlsContext,setTransactionRlsOrg,withTenantRlsContext}=require('./pg-rls');
 const {readNativeRecord,boundedJson}=require('./native-integration-reader');
 const {failure,strict,identifier,envelope,recordInput,proposalInput,receiptKey,fingerprint}=require('./native-integration-policy');
 const {brokerConfig}=require('./native-context-delivery');
@@ -31,6 +32,9 @@ async function saveReceipt(ctx,collection,key,contentHash,values){
   // direct model.create) preserves native collection workflow event semantics.
   await ctx.app.db.sequelize.query('SELECT pg_advisory_xact_lock(hashtextextended(:key,0))',{replacements:{key:collection+':'+key},transaction});
   const current=await resolveNativeActor(ctx.app.db,ctx.state.currentUser,{transaction});
+  if(canUsePgRlsSession(ctx.app.db)&&!getActiveRlsContext()?.transaction){
+   await setTransactionRlsOrg(ctx.app.db,current.organizationId,transaction);
+  }
   if(current.organizationId!==values.organizationId||String(current.employeeId)!==String(values.sourceEmployeeId)||String(current.userId)!==String(values.sourceUserId))throw failure('INTEGRATION_MEMBERSHIP_CHANGED',403);
   const repo=ctx.app.db.getRepository(collection);
   const existing=await repo.findOne({filter:{receiptKey:key},transaction});
@@ -76,6 +80,9 @@ function createIntegrationActions(){return {
    const db=ctx.app.db;
    await db.sequelize.query('SELECT pg_advisory_xact_lock(hashtextextended(:code,0))',{replacements:{code},transaction});
    const current=await resolveNativeActor(db,ctx.state.currentUser,{transaction});
+   if(canUsePgRlsSession(db)&&!getActiveRlsContext()?.transaction){
+    await setTransactionRlsOrg(db,current.organizationId,transaction);
+   }
    if(current.organizationId!==actor.organizationId||String(current.employeeId)!==String(actor.employeeId))throw failure('INTEGRATION_MEMBERSHIP_CHANGED',403);
    const cases=db.getRepository('latticeIncidentCases');
    const existing=await cases.findOne({filter:{code,organizationId:actor.organizationId},transaction});
@@ -123,7 +130,10 @@ function createIntegrationActions(){return {
    targetCollection:visible.collection,
    targetRecordId:visible.recordId,
   };
-  const row=await ctx.app.db.getRepository('latticeAgentProposals').findOne({filter,fields:['id']});
+  const findProposal=transaction=>ctx.app.db.getRepository('latticeAgentProposals').findOne({filter,fields:['id'],...(transaction?{transaction}:{})});
+  const row=canUsePgRlsSession(ctx.app.db)&&!getActiveRlsContext()?.transaction
+   ?await withTenantRlsContext(ctx.app.db,actor.organizationId,findProposal)
+   :await findProposal(undefined);
   ctx.body=row?{found:true,id:row.id}:{found:false};
  },
  propose:async ctx=>{
@@ -145,14 +155,22 @@ function createIntegrationActions(){return {
   if(!Number.isInteger(page)||page<1||page>100000||!Number.isInteger(pageSize)||pageSize<1||pageSize>100)throw failure('INTEGRATION_INVALID_PAGE');
   const visible=await readNativeRecord(ctx,{collection:input.collection,recordId:input.recordId});
   const filter={organizationId:visible.actor.organizationId,targetCollection:visible.collection,targetRecordId:visible.recordId},repo=ctx.app.db.getRepository('latticeAgentProposals');
-  const rows=await repo.find({filter,offset:(page-1)*pageSize,limit:pageSize,sort:['-id']});
+  const readProposals=async transaction=>{
+   const txOpt=transaction?{transaction}:{};
+   const foundRows=await repo.find({filter,offset:(page-1)*pageSize,limit:pageSize,sort:['-id'],...txOpt});
+   const foundTotal=await repo.count({filter,...txOpt});
+   return {rows:foundRows,total:foundTotal};
+  };
+  const {rows,total}=canUsePgRlsSession(ctx.app.db)&&!getActiveRlsContext()?.transaction
+   ?await withTenantRlsContext(ctx.app.db,visible.actor.organizationId,readProposals)
+   :await readProposals(undefined);
   let currentContext;
   if(rows.some(row=>row.evidence?.some(e=>e.kind==='ngsi-ld'))){try{currentContext=await readContext(ctx,{collection:visible.collection,recordId:visible.recordId});}catch{currentContext=null;}}
   ctx.body={items:rows.map(row=>{
    const brokerEvidence=row.evidence?.find(e=>e.kind==='ngsi-ld');
    const stale=row.recordFingerprint!==visible.fingerprint||(!!brokerEvidence&&brokerEvidence.fingerprint!==currentContext?.fingerprint);
    return {id:row.id,state:row.state,stale,...(!stale?{recommendation:row.recommendation,evidence:row.evidence}:{})};
-  }),page,pageSize,total:await repo.count({filter})};
+  }),page,pageSize,total};
  },
 };}
 function registerNativeIntegrations(app){

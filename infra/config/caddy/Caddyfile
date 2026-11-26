@@ -11,7 +11,7 @@
     X-Content-Type-Options "nosniff"
     X-Frame-Options "SAMEORIGIN"
     Referrer-Policy "strict-origin-when-cross-origin"
-    Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    Permissions-Policy "camera=(self), microphone=(), geolocation=(self)"
     -Server
   }
 }
@@ -20,8 +20,16 @@
   import security_headers
   encode gzip zstd
 
-  handle /v1/* {
-    reverse_proxy gateway:9080
+  handle /.well-known/agent-card.json {
+    reverse_proxy gateway:9080 {
+      flush_interval -1
+    }
+  }
+
+  handle /api/* {
+    reverse_proxy gateway:9080 {
+      flush_interval -1
+    }
   }
 
   handle {
@@ -34,6 +42,14 @@
 {$KEYCLOAK_DOMAIN} {
   import security_headers
   reverse_proxy keycloak:8080
+}
+
+{$N8N_DOMAIN} {
+  import security_headers
+  encode gzip zstd
+  reverse_proxy n8n:5678 {
+    flush_interval -1
+  }
 }
 
 http://:2020 {

@@ -246,7 +246,7 @@ test('dispatchNotification validates tenant/recipient, writes row, and deduplica
 });
 
 test('dispatchNotification validates external webhook/apprise/telegram URLs against SSRF and degrades non-fatally', async () => {
-  const { dispatchNotification, isSafeExternalWebhookUrl } = require('../src/server/notification-center');
+  const { dispatchNotification, isSafeExternalWebhookUrl, isSafeExternalWebhookUrlAsync } = require('../src/server/notification-center');
 
   // SSRF-unsafe URLs rejected
   for (const unsafe of [
@@ -257,10 +257,22 @@ test('dispatchNotification validates external webhook/apprise/telegram URLs agai
     'http://[fd00:ec2::254]/latest/meta-data',
     'http://[fe80::1]/hook',
     'http://[::ffff:169.254.169.254]/hook',
+    'http://[::ffff:127.0.0.1]/hook',
+    'http://[0:0:0:0:0:ffff:169.254.169.254]/hook',
+    'http://[::169.254.169.254]/hook',
+    'http://2130706433/hook',
+    'http://0x7f000001/hook',
+    'http://0177.0.0.1/hook',
+    'http://127.1/hook',
+    'http://redis:6379/',
+    'http://postgres:5432/',
+    'http://keycloak:8080/',
+    'http://n8n:5678/webhook',
     'http://0.0.0.0/hook',
     'http://10.0.0.5/hook',
     'http://192.168.1.10/hook',
     'http://metadata.google.internal/computeMetadata/v1/',
+    'http://metadata.azure.com/metadata/instance',
     'https://user:secret@hooks.example.com/notify',
     'ftp://hooks.example.com/notify',
     'file:///etc/passwd',
@@ -269,6 +281,26 @@ test('dispatchNotification validates external webhook/apprise/telegram URLs agai
   }
   assert.equal(isSafeExternalWebhookUrl('https://hooks.example.com/apprise'), true);
   assert.equal(isSafeExternalWebhookUrl('https://fcm.googleapis.com/fcm/send'), true);
+
+  // Async DNS-rebinding rejection in notification-center
+  assert.equal(
+    await isSafeExternalWebhookUrlAsync('https://rebind.example.com/hook', {
+      lookupImpl: async () => [{ address: '::ffff:127.0.0.1', family: 6 }],
+    }),
+    false,
+  );
+  assert.equal(
+    await isSafeExternalWebhookUrlAsync('https://rebind.example.com/hook', {
+      lookupImpl: async () => [{ address: '169.254.169.254', family: 4 }],
+    }),
+    false,
+  );
+  assert.equal(
+    await isSafeExternalWebhookUrlAsync('https://public.example.com/hook', {
+      lookupImpl: async () => [{ address: '93.184.216.34', family: 4 }],
+    }),
+    true,
+  );
 
   const calls = [];
   const { db } = makeEnterpriseHarness();
@@ -291,6 +323,28 @@ test('dispatchNotification validates external webhook/apprise/telegram URLs agai
   });
   assert.equal(calls.length, 0);
   assert.deepEqual(blockedRes.channelsDispatched, ['in_app']);
+
+  // DNS rebinding to loopback/link-local blocks fetchImpl in dispatchNotification
+  const dnsRebindRes = await dispatchNotification(db, {
+    organizationId: 'org-a',
+    recipientUserId: 101,
+    title: 'DNS rebinding guard test',
+    dedupKey: 'ssrf-dns-rebind',
+  }, {
+    env: {
+      DX_APPRISE_URL: 'https://rebind-apprise.example.com/notify',
+      DX_NOTIFICATION_WEBHOOK_URL: 'https://rebind-hook.example.com/hook',
+    },
+    lookupImpl: async (host) => (host.includes('apprise')
+      ? [{ address: '127.0.0.1', family: 4 }]
+      : [{ address: '::ffff:169.254.169.254', family: 6 }]),
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return { ok: true };
+    },
+  });
+  assert.equal(calls.length, 0);
+  assert.deepEqual(dnsRebindRes.channelsDispatched, ['in_app']);
 
   // Valid external endpoints fan out with timeout + redirect: 'error'
   const okRes = await dispatchNotification(db, {
@@ -1062,5 +1116,1309 @@ test('Task 2.1 src files have zero Math.random() and src/client/*.js has zero no
         assert.ok(m[1].startsWith('./') || m[1].startsWith('../'), `${file} has non-relative require(${m[1]})`);
       }
     }
+  }
+});
+
+test('computeElapsedSlaMinutes excludes Vietnamese weekends/holidays/lunch in GMT+7 when businessHoursOnly=true and preserves wall-clock when false', () => {
+  const {
+    VN_FIXED_HOLIDAYS,
+    VN_BUSINESS_WINDOWS,
+    VN_UTC_OFFSET_MS,
+    computeElapsedSlaMinutes,
+  } = require('../src/server/sla-engine');
+
+  assert.equal(typeof computeElapsedSlaMinutes, 'function');
+  assert.ok(VN_FIXED_HOLIDAYS instanceof Set);
+  for (const h of ['01-01', '04-30', '05-01', '09-02']) {
+    assert.equal(VN_FIXED_HOLIDAYS.has(h), true, `Missing Vietnamese fixed holiday ${h}`);
+  }
+  assert.ok(Array.isArray(VN_BUSINESS_WINDOWS) && VN_BUSINESS_WINDOWS.length === 2);
+  assert.equal(VN_UTC_OFFSET_MS, 7 * 60 * 60_000);
+
+  // Wall-clock mode untouched
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-21T08:00:00+07:00', '2026-11-21T10:30:00+07:00'),
+    150,
+  );
+  assert.equal(computeElapsedSlaMinutes(null, '2026-11-21T10:30:00+07:00'), 0);
+  assert.equal(computeElapsedSlaMinutes('2026-11-21T12:00:00+07:00', '2026-11-21T10:00:00+07:00'), 0);
+
+  // Weekend (Saturday & Sunday in GMT+7) = 0 business minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-21T08:00:00+07:00', '2026-11-22T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+
+  // Vietnamese fixed holidays = 0 business minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-09-02T08:00:00+07:00', '2026-09-02T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2026-01-01T08:00:00+07:00', '2026-01-01T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2026-04-30T08:00:00+07:00', '2026-05-01T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+
+  // Lunch break 12:00-13:30 GMT+7 excluded: 11:30 to 14:00 = 30 + 30 = 60 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-23T11:30:00+07:00', '2026-11-23T14:00:00+07:00', { businessHoursOnly: true }),
+    60,
+  );
+
+  // Crossing National Day holiday (Tue 2026-09-01 17:00 -> Thu 2026-09-03 09:00) = 30 + 0 + 60 = 90 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-09-01T17:00:00+07:00', '2026-09-03T09:00:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+
+  // Multi-day Mon..Wed full working days = 3 * 480 = 1440 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-23T08:00:00+07:00', '2026-11-25T17:30:00+07:00', { businessHoursOnly: true }),
+    1440,
+  );
+
+  // Friday 16:30+07:00 to Monday 10:00+07:00 = 60 (Fri) + 0 (Sat/Sun) + 120 (Mon) = 180 minutes
+  assert.equal(
+    computeElapsedSlaMinutes('2026-11-20T16:30:00+07:00', '2026-11-23T10:00:00+07:00', { businessHoursOnly: true }),
+    180,
+  );
+});
+
+test('SLA engine pushes active:{$ne:false} to DB filter and honors saved businessHoursOnly policies cleanly', async () => {
+  const { evaluateSlaBreaches, registerSlaEngine } = require('../src/server/sla-engine');
+  const { db, tables } = makeEnterpriseHarness({
+    serviceTickets: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        code: 'TKT-INACTIVE',
+        name: 'Soft deleted',
+        status: 'open',
+        priority: 'high',
+        active: false,
+        createdAt: '2026-11-10T01:00:00.000Z',
+      },
+      {
+        id: 2,
+        organizationId: 'org-a',
+        code: 'TKT-WEEKEND',
+        name: 'Opened Fri afternoon',
+        status: 'open',
+        priority: 'high',
+        active: true,
+        createdAt: '2026-11-20T17:00:00+07:00',
+      },
+    ],
+  });
+
+  const capturedFilters = [];
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (!repo || !['latticeRequests', 'latticeOrders', 'latticeServiceTickets', 'latticeIncidentCases'].includes(name)) {
+      return repo;
+    }
+    return {
+      ...repo,
+      find: async (opts) => {
+        capturedFilters.push({ collection: name, filter: opts?.filter });
+        return repo.find(opts);
+      },
+    };
+  };
+
+  // Admin saves businessHoursOnly: true policy with notifyChannels: ['apprise']
+  const { app, resources } = makeAppHarness(db);
+  registerSlaEngine(app);
+  const slaActions = resources.get('latticeSla');
+  const saveCtx = makeCtx({
+    user: { id: 102 },
+    role: 'ldx_admin',
+    method: 'POST',
+    values: {
+      organizationId: 'org-a',
+      targetCollection: 'latticeServiceTickets',
+      priority: 'high',
+      warnAfterMinutes: 45,
+      breachAfterMinutes: 90,
+      escalateToRole: 'ldx_manager',
+      notifyChannels: ['apprise'],
+      businessHoursOnly: true,
+    },
+  });
+  await slaActions.savePolicy(saveCtx, async () => {});
+  assert.equal(saveCtx.body.businessHoursOnly, true);
+  assert.deepEqual(saveCtx.body.notifyChannels, ['apprise']);
+
+  const polCtx = makeCtx({ user: { id: 101 }, role: 'ldx_employee', method: 'GET' });
+  await slaActions.policies(polCtx, async () => {});
+  assert.equal(polCtx.body.items[0].businessHoursOnly, true);
+  assert.deepEqual(polCtx.body.items[0].notifyChannels, ['apprise']);
+
+  // At Mon 2026-11-23 08:30+07:00 -> 60 business minutes (Fri 17:00-17:30 + Mon 08:00-08:30): warning (not breached)
+  const monWarn = await evaluateSlaBreaches(db, {
+    organizationId: 'org-a',
+    now: new Date('2026-11-23T08:30:00+07:00'),
+    dryRun: true,
+  });
+  assert.equal(capturedFilters.length, 4);
+  for (const call of capturedFilters) {
+    assert.deepEqual(call.filter.active, { $ne: false }, `${call.collection} must push down active: { $ne: false }`);
+  }
+  assert.equal(monWarn.scanned, 1); // TKT-INACTIVE excluded at DB layer
+  assert.equal(monWarn.warningCount, 1);
+  assert.equal(monWarn.breachedCount, 0);
+  assert.equal(monWarn.items[0].elapsedMinutes, 60);
+
+  // At Mon 2026-11-23 09:00+07:00 -> 90 business minutes: breached
+  const monBreach = await evaluateSlaBreaches(db, {
+    organizationId: 'org-a',
+    now: new Date('2026-11-23T09:00:00+07:00'),
+    dryRun: false,
+  });
+  assert.equal(monBreach.breachedCount, 1);
+  assert.equal(monBreach.escalatedCount, 1);
+  assert.equal(monBreach.items[0].elapsedMinutes, 90);
+  assert.equal(tables.latticeNotifications.filter((n) => n.category === 'sla').length, 1);
+});
+
+test('SLA engine handles weekend-holiday overlaps (01-01/04-30/05-01/09-02), parses JSON-string notifyChannels, and dispatches unwrapped channels via fetchImpl', async () => {
+  const { computeElapsedSlaMinutes, evaluateSlaBreaches, registerSlaEngine } = require('../src/server/sla-engine');
+
+  // 1. Weekend-holiday overlap coverage in GMT+7 (Sat/Sun overlapping fixed holidays must stay 0 with no boundary drift)
+  // 2028-01-01 (Saturday)
+  assert.equal(
+    computeElapsedSlaMinutes('2028-01-01T08:00:00+07:00', '2028-01-02T17:30:00+07:00', { businessHoursOnly: true }),
+    0,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2027-12-31T17:00:00+07:00', '2028-01-03T09:00:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+  // 2028-04-30 (Sunday) followed by 2028-05-01 (Monday)
+  assert.equal(
+    computeElapsedSlaMinutes('2028-04-28T17:00:00+07:00', '2028-05-02T09:00:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+  // 2027-05-01 (Saturday) preceded by 2027-04-30 (Friday)
+  assert.equal(
+    computeElapsedSlaMinutes('2027-04-29T16:30:00+07:00', '2027-05-03T08:30:00+07:00', { businessHoursOnly: true }),
+    90,
+  );
+  // 2028-09-02 (Saturday) & 2029-09-02 (Sunday)
+  assert.equal(
+    computeElapsedSlaMinutes('2028-09-01T17:00:00+07:00', '2028-09-04T08:30:00+07:00', { businessHoursOnly: true }),
+    60,
+  );
+  assert.equal(
+    computeElapsedSlaMinutes('2029-08-31T17:00:00+07:00', '2029-09-03T08:30:00+07:00', { businessHoursOnly: true }),
+    60,
+  );
+
+  // 2. End-to-end fetchImpl dispatch with businessHoursOnly: true wrapper + raw JSON string notifyChannels from ORM/DB driver
+  const { db, tables } = makeEnterpriseHarness({
+    slaPolicies: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        targetCollection: 'latticeServiceTickets',
+        priority: 'high',
+        warnAfterMinutes: 45,
+        breachAfterMinutes: 90,
+        escalateToRole: 'ldx_manager',
+        notifyChannels: '{"channels":["apprise"],"businessHoursOnly":true}',
+        active: true,
+      },
+      {
+        id: 2,
+        organizationId: 'org-a',
+        targetCollection: 'latticeRequests',
+        priority: 'normal',
+        warnAfterMinutes: 120,
+        breachAfterMinutes: 240,
+        escalateToRole: 'ldx_manager',
+        notifyChannels: '["webhook"]',
+        active: true,
+      },
+      {
+        id: 3,
+        organizationId: 'org-a',
+        targetCollection: 'latticeOrders',
+        priority: 'low',
+        warnAfterMinutes: 120,
+        breachAfterMinutes: 240,
+        escalateToRole: 'ldx_manager',
+        notifyChannels: '{invalid-json',
+        active: true,
+      },
+    ],
+    serviceTickets: [
+      {
+        id: 10,
+        organizationId: 'org-a',
+        code: 'TKT-BH-FETCH',
+        name: 'Apprise unwrap test',
+        status: 'open',
+        priority: 'high',
+        active: true,
+        createdAt: '2026-11-20T17:00:00+07:00',
+      },
+    ],
+  });
+
+  // policies action deserializes raw JSON string rows cleanly
+  const { app, resources } = makeAppHarness(db);
+  registerSlaEngine(app);
+  const slaActions = resources.get('latticeSla');
+  const polCtx = makeCtx({ user: { id: 101 }, role: 'ldx_employee', method: 'GET' });
+  await slaActions.policies(polCtx, async () => {});
+  const ticketPolicy = polCtx.body.items.find((p) => p.targetCollection === 'latticeServiceTickets');
+  const reqPolicy = polCtx.body.items.find((p) => p.targetCollection === 'latticeRequests');
+  const ordPolicy = polCtx.body.items.find((p) => p.targetCollection === 'latticeOrders');
+  assert.deepEqual(ticketPolicy.notifyChannels, ['apprise']);
+  assert.equal(ticketPolicy.businessHoursOnly, true);
+  assert.deepEqual(reqPolicy.notifyChannels, ['webhook']);
+  assert.equal(reqPolicy.businessHoursOnly, false);
+  assert.equal(ordPolicy.notifyChannels, null);
+  assert.equal(ordPolicy.businessHoursOnly, false);
+
+  // Breach evaluation at Mon 09:00+07:00 (90 business mins) dispatches ONLY to unwrapped 'apprise' URL via fetchImpl
+  const fetchedUrls = [];
+  const report = await evaluateSlaBreaches(db, {
+    organizationId: 'org-a',
+    now: new Date('2026-11-23T09:00:00+07:00'),
+    dryRun: false,
+    env: {
+      DX_APPRISE_URL: 'https://apprise.example.com/sla-notify',
+      DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.com/should-not-fire',
+    },
+    fetchImpl: async (url, init) => {
+      fetchedUrls.push({ url: String(url), method: init?.method, body: JSON.parse(init?.body || '{}') });
+      return { ok: true, status: 200, body: { cancel: async () => {} } };
+    },
+  });
+
+  assert.equal(report.breachedCount, 1);
+  assert.equal(report.escalatedCount, 1);
+  assert.equal(report.items[0].businessHoursOnly, true);
+  assert.equal(report.items[0].elapsedMinutes, 90);
+  assert.equal(fetchedUrls.length, 1);
+  assert.equal(fetchedUrls[0].url, 'https://apprise.example.com/sla-notify');
+  assert.equal(fetchedUrls[0].method, 'POST');
+  assert.equal(fetchedUrls[0].body.tag, 'sla');
+
+  const notifRows = tables.latticeNotifications.filter((n) => n.category === 'sla');
+  assert.equal(notifRows.length, 1);
+  assert.deepEqual(notifRows[0].channelsDispatched, ['in_app', 'apprise']);
+});
+
+test('Task 1 remediation: evaluateSlaBreaches never holds a DB transaction open across fetchImpl, forwards transaction, and isolates chatter 25P02 failures', async () => {
+  const { evaluateSlaBreaches } = require('../src/server/sla-engine');
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+  let openTxCount = 0;
+  let txAborted = false;
+  let activeSp = null;
+  const chatterFindTxs = [];
+  const chatterCreateTxs = [];
+  const savepointQueries = [];
+
+  const { db, tables } = makeEnterpriseHarness({
+    requests: [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        code: 'REQ-SLA-TX',
+        name: 'Breached Request',
+        status: 'submitted',
+        priority: 'critical',
+        active: true,
+        submittedAt: new Date(Date.now() - 120 * 60_000).toISOString(),
+      },
+    ],
+  });
+
+  db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (cb) => {
+      openTxCount += 1;
+      txAborted = false;
+      activeSp = null;
+      try {
+        return await cb({ id: `tx-sla-${openTxCount}`, LOCK: { UPDATE: 'UPDATE' } });
+      } finally {
+        openTxCount -= 1;
+      }
+    },
+    query: async (sql) => {
+      const text = String(sql);
+      savepointQueries.push(text);
+      if (text.startsWith('SAVEPOINT ')) {
+        activeSp = text;
+        return [[]];
+      }
+      if (text.startsWith('ROLLBACK TO SAVEPOINT ')) {
+        txAborted = false;
+        return [[]];
+      }
+      if (text.startsWith('RELEASE SAVEPOINT ')) {
+        activeSp = null;
+        return [[]];
+      }
+      return [[]];
+    },
+  };
+
+  const origGetRepo = db.getRepository.bind(db);
+  let failChatterFindOnce = true;
+  db.getRepository = (name) => {
+    const repo = origGetRepo(name);
+    if (name === 'latticeRecordChatter') {
+      return {
+        ...repo,
+        find: async (opts) => {
+          chatterFindTxs.push(opts?.transaction || null);
+          if (failChatterFindOnce) {
+            failChatterFindOnce = false;
+            txAborted = true;
+            throw Object.assign(new Error('simulated chatter lookup error'), { code: '42P01' });
+          }
+          if (txAborted) throw Object.assign(new Error('25P02 aborted'), { code: '25P02' });
+          return repo.find(opts);
+        },
+        create: async (opts) => {
+          chatterCreateTxs.push(opts?.transaction || null);
+          if (txAborted) throw Object.assign(new Error('25P02 aborted'), { code: '25P02' });
+          return repo.create(opts);
+        },
+      };
+    }
+    return repo;
+  };
+
+  let fetchSawOpenTx = null;
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const report = await evaluateSlaBreaches(db, {
+      organizationId: 'org-a',
+      now: new Date(),
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.com/sla-tx-test' },
+      fetchImpl: async () => {
+        fetchSawOpenTx = openTxCount;
+        return { ok: true, status: 200, body: { cancel: async () => {} } };
+      },
+    });
+    assert.equal(report.breachedCount, 1);
+    assert.equal(report.escalatedCount, 1);
+    assert.equal(fetchSawOpenTx, 0, 'DB transaction must NOT be open during outbound HTTP fetch');
+    assert.equal(chatterFindTxs.length, 1);
+    assert.ok(chatterFindTxs[0], 'hasRecentSlaChatter must receive explicit transaction');
+    assert.equal(chatterCreateTxs.length, 1);
+    assert.ok(chatterCreateTxs[0], 'recordChatterEntry must receive explicit transaction after savepoint rollback');
+    assert.ok(savepointQueries.some((q) => q.startsWith('ROLLBACK TO SAVEPOINT ')));
+    assert.equal(tables.latticeRecordChatter.length, 1);
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});
+
+test('Task 16: Notification Bell supports /v/mobile, Topbar variant, authenticated fetch SSE updates/reconnect/cleanup, and server pub/sub bridge', async () => {
+  const {
+    isVisibleBellPath,
+    resolveBellPortalSlug,
+    createTopbarNotificationBell,
+    createNotificationBellProvider,
+  } = require('../src/client/notification-bell');
+  const { dispatchNotification } = require('../src/server/notification-center');
+
+  // 1. Visibility & portal slug resolution for /v/mobile and /mobile
+  for (const p of ['/v/mobile', '/v/mobile/outbox', '/mobile', '/mobile/field', '/p/logistics', '/admin/lattice-workspace']) {
+    assert.equal(isVisibleBellPath(p), true, `Expected bell visible on ${p}`);
+  }
+  for (const p of ['', '/', '/signin', '/signin/oidc', '/signup']) {
+    assert.equal(isVisibleBellPath(p), false, `Expected bell hidden on ${p}`);
+  }
+  assert.equal(resolveBellPortalSlug('/v/mobile/outbox'), 'mobile');
+  assert.equal(resolveBellPortalSlug('/mobile'), 'mobile');
+  assert.equal(resolveBellPortalSlug('/p/incidents/case-1'), 'incidents');
+  assert.equal(resolveBellPortalSlug('/admin/lattice-workspace'), 'admin');
+
+  // 2. Topbar Bell renders inline variant, subscribes via authenticated fetch() SSE, updates badge, and aborts on unmount
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  try {
+    const encoder = new TextEncoder();
+    const fetchCalls = [];
+    let pushChunk = null;
+    let closeStream = null;
+
+    globalThis.fetch = async (url, init) => {
+      const controller = {
+        aborted: false,
+        signal: init?.signal || null,
+      };
+      init?.signal?.addEventListener?.('abort', () => {
+        controller.aborted = true;
+        closeStream?.();
+      });
+      fetchCalls.push({ url, init, controller });
+      const pendingChunks = [
+        'event: snapshot\ndata: {"portalSlug":"incidents","revision":1}\n\n',
+      ];
+      let waitingResolve = null;
+      let closed = false;
+      pushChunk = (raw) => {
+        if (closed) return;
+        if (waitingResolve) {
+          const r = waitingResolve;
+          waitingResolve = null;
+          r({ done: false, value: encoder.encode(raw) });
+        } else {
+          pendingChunks.push(raw);
+        }
+      };
+      closeStream = () => {
+        closed = true;
+        if (waitingResolve) {
+          const r = waitingResolve;
+          waitingResolve = null;
+          r({ done: true });
+        }
+      };
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: async () => {
+              if (pendingChunks.length) {
+                return { done: false, value: encoder.encode(pendingChunks.shift()) };
+              }
+              if (closed) return { done: true };
+              return new Promise((resolve) => {
+                waitingResolve = resolve;
+              });
+            },
+            cancel: async () => {
+              closeStream();
+            },
+          }),
+        },
+      };
+    };
+
+    globalThis.window = {
+      location: { pathname: '/v/mobile', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    globalThis.document = {
+      visibilityState: 'visible',
+      addEventListener() {},
+      removeEventListener() {},
+    };
+
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const cleanups = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+
+    let serverUnread = 2;
+    let unreadCalls = 0;
+    const api = {
+      auth: { role: 'ldx_driver', getToken: () => 'tok-mobile' },
+      request: async ({ url }) => {
+        if (url === 'latticeNotifications:unreadCount') {
+          unreadCalls += 1;
+          return { data: { data: { unreadCount: serverUnread } } };
+        }
+        return { data: { data: { items: [], unreadCount: serverUnread } } };
+      },
+    };
+
+    const TopbarBell = createTopbarNotificationBell({ useAPIClient: () => api }, React, {}, {});
+    const find = (node, pred) => {
+      if (!node || typeof node !== 'object') return null;
+      if (pred(node)) return node;
+      if (typeof node.type === 'function') return find(node.type(node.props), pred);
+      return node.children?.flat(Infinity).map((c) => find(c, pred)).find(Boolean) || null;
+    };
+    const renderTopbar = (props) => {
+      cursor = 0;
+      const ui = TopbarBell(props);
+      while (effects.length) {
+        const { fn } = effects.shift();
+        const cleanup = fn();
+        if (typeof cleanup === 'function') cleanups.push(cleanup);
+      }
+      return ui;
+    };
+
+    let ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+    await new Promise((r) => setTimeout(r, 15));
+    ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+
+    const wrap = find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap');
+    assert.ok(wrap);
+    assert.equal(wrap.props['data-variant'], 'topbar');
+    assert.equal(wrap.props.style.position, 'relative');
+    assert.equal(wrap.props.style.height, 46);
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, '/api/dxosAi:surfaceEvents?portalSlug=incidents');
+    assert.equal(fetchCalls[0].init.headers.Authorization, 'Bearer tok-mobile');
+    assert.equal(fetchCalls[0].init.headers.Accept, 'text/event-stream');
+    assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '2');
+
+    // Direct unreadCount SSE update on 'unread_count'
+    pushChunk('event: unread_count\ndata: {"unreadCount":5}\n\n');
+    await new Promise((r) => setTimeout(r, 15));
+    ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+    assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '5');
+
+    // 'update' frame emitted by surface-events.js with type: 'notification' triggers unreadCount refresh
+    serverUnread = 9;
+    const beforeUpdateCalls = unreadCalls;
+    pushChunk('event: update\ndata: {"kind":"notification","type":"notification","portalSlug":"incidents"}\n\n');
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(unreadCalls, beforeUpdateCalls + 1);
+    ui = renderTopbar({ variant: 'topbar', pathname: '/p/incidents' });
+    assert.equal(find(ui, (n) => n.props?.['data-testid'] === 'ldx-notification-badge').children[0], '9');
+
+    // Unmount aborts active SSE fetch stream cleanly
+    while (cleanups.length) cleanups.pop()();
+    assert.equal(fetchCalls[0].controller.aborted, true);
+
+    // Floating provider suppresses duplicate desktop pill when hasTopbar: true, but still renders on /v/mobile
+    state.length = 0;
+    const FloatingWithTopbar = createNotificationBellProvider({ useAPIClient: () => api }, React, {}, {}, { hasTopbar: true });
+    cursor = 0;
+    globalThis.window.location.pathname = '/p/incidents';
+    const suppressedDesktop = FloatingWithTopbar({ children: React.createElement('div', null, 'app') });
+    assert.equal(find(suppressedDesktop, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap'), null);
+
+    state.length = 0;
+    cursor = 0;
+    globalThis.window.location.pathname = '/v/mobile';
+    const mobileFallback = FloatingWithTopbar({ children: React.createElement('div', null, 'mobile') });
+    while (effects.length) {
+      const { fn } = effects.shift();
+      const cleanup = fn();
+      if (typeof cleanup === 'function') cleanups.push(cleanup);
+    }
+    const mobileWrap = find(mobileFallback, (n) => n.props?.['data-testid'] === 'ldx-notification-bell-wrap');
+    assert.ok(mobileWrap, 'Floating bell fallback must remain visible on /v/mobile');
+    while (cleanups.length) cleanups.pop()();
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window;
+    else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document;
+    else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch;
+    else globalThis.fetch = prevFetch;
+  }
+
+  // 3. Server dispatchNotification publishes to 'latticedx:surface-updates'
+  const published = [];
+  const { db } = makeEnterpriseHarness();
+  const mockApp = {
+    pubSubManager: {
+      publish: async (channel, msg) => {
+        published.push({ channel, msg });
+      },
+    },
+  };
+  const created = await dispatchNotification(db, {
+    organizationId: 'org-a',
+    recipientUserId: 101,
+    category: 'sla',
+    severity: 'high',
+    title: 'SLA Warning',
+    targetCollection: 'latticeIncidentCases',
+    dedupKey: 'task16-sse-bridge-1',
+  }, { app: mockApp });
+  assert.equal(created.deduplicated, false);
+  assert.equal(published.length, 1);
+  assert.equal(published[0].channel, 'latticedx:surface-updates');
+  assert.equal(published[0].msg.kind, 'notification');
+  assert.equal(published[0].msg.type, 'notification');
+  assert.equal(published[0].msg.portalSlug, 'incidents');
+  assert.equal(published[0].msg.organizationId, 'org-a');
+  assert.equal(published[0].msg.recipientUserId, 101);
+  assert.equal(published[0].msg.category, 'sla');
+  assert.equal(published[0].msg.severity, 'high');
+
+  // Deduplicated call does not emit duplicate pub/sub event
+  const deduped = await dispatchNotification(db, {
+    organizationId: 'org-a',
+    recipientUserId: 101,
+    category: 'sla',
+    severity: 'high',
+    title: 'SLA Warning',
+    targetCollection: 'latticeIncidentCases',
+    dedupKey: 'task16-sse-bridge-1',
+  }, { app: mockApp });
+  assert.equal(deduped.deduplicated, true);
+  assert.equal(published.length, 1);
+});
+
+test('Task 4 (Review Focus #1): Notification Bell skips /api/dxosAi:surfaceEvents completely when NOCOBASE_TOKEN is empty and aborts reconnect on 401', async () => {
+  const { createTopbarNotificationBell, isAuthenticatedClient } = require('../src/client/notification-bell');
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  const prevStorage = globalThis.localStorage;
+  try {
+    const fetchCalls = [];
+    globalThis.fetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return { ok: false, status: 401, body: null };
+    };
+    globalThis.localStorage = { getItem: () => '' };
+    globalThis.window = {
+      location: { pathname: '/p/incidents', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+
+    let apiCalls = 0;
+    const unauthApi = {
+      auth: { role: 'ldx_driver', getToken: () => '' },
+      request: async () => { apiCalls += 1; return { data: {} }; },
+    };
+    assert.equal(isAuthenticatedClient(unauthApi), false, 'Unauthenticated client without token must return false even if role is set');
+
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const cleanups = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+
+    const TopbarBell = createTopbarNotificationBell({ useAPIClient: () => unauthApi }, React, {}, {});
+    cursor = 0;
+    const ui = TopbarBell({ variant: 'topbar', pathname: '/p/incidents' });
+    while (effects.length) {
+      const cln = effects.shift().fn();
+      if (typeof cln === 'function') cleanups.push(cln);
+    }
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(ui, null);
+    assert.equal(fetchCalls.length, 0, 'Unauthenticated Bell must make ZERO fetch SSE calls');
+    assert.equal(apiCalls, 0, 'Unauthenticated Bell must make ZERO API calls');
+    while (cleanups.length) cleanups.pop()();
+
+    // Token present but server returns 401 -> stops without retry spam
+    state.length = 0;
+    const expiredApi = {
+      auth: { role: 'ldx_driver', getToken: () => 'expired-tok' },
+      request: async () => ({ data: { data: { unreadCount: 0 } } }),
+    };
+    const ExpiredBell = createTopbarNotificationBell({ useAPIClient: () => expiredApi }, React, {}, {});
+    cursor = 0;
+    ExpiredBell({ variant: 'topbar', pathname: '/p/incidents' });
+    while (effects.length) {
+      const cln = effects.shift().fn();
+      if (typeof cln === 'function') cleanups.push(cln);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].init.headers.Authorization, 'Bearer expired-tok');
+    while (cleanups.length) cleanups.pop()();
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document; else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch; else globalThis.fetch = prevFetch;
+    if (prevStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = prevStorage;
+  }
+});
+
+test('SSE Hub pools 1 stream per portalSlug, ignores AbortError on unmount, and bell guards against duplicate DOM mount', async () => {
+  const { createTopbarNotificationBell } = require('../src/client/notification-bell');
+  const { subscribeSurfaceEvents, isAbortError } = require('../src/client/sse-hub');
+
+  assert.equal(isAbortError(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' })), true);
+
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  try {
+    const fetchCalls = [];
+    const rejectHandlers = [];
+    const mockWin = {
+      location: { pathname: '/p/logistics', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    globalThis.window = mockWin;
+
+    // 1. Two subscribers on same portalSlug open ONLY 1 fetch SSE stream and cancel rejects with AbortError silently
+    let abortRejectFn = null;
+    const mockFetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () => new Promise((_, reject) => {
+              abortRejectFn = reject;
+              init?.signal?.addEventListener?.('abort', () => {
+                reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' }));
+              });
+            }),
+            cancel: async () => {
+              throw Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' });
+            },
+          }),
+        },
+      };
+    };
+
+    const eventsA = [];
+    const eventsB = [];
+    const unsubA = subscribeSurfaceEvents({
+      portalSlug: 'logistics',
+      sseUrl: '/api/dxosAi:surfaceEvents?portalSlug=logistics',
+      token: 'tok-pool-1',
+      fetchFn: mockFetch,
+      win: mockWin,
+      onEvent: (e, d) => eventsA.push({ e, d }),
+    });
+    const unsubB = subscribeSurfaceEvents({
+      portalSlug: 'logistics',
+      sseUrl: '/api/dxosAi:surfaceEvents?portalSlug=logistics',
+      token: 'tok-pool-1',
+      fetchFn: mockFetch,
+      win: mockWin,
+      onEvent: (e, d) => eventsB.push({ e, d }),
+    });
+
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(fetchCalls.length, 1, 'Shared SSE hub must open at most 1 stream per portalSlug');
+    assert.ok(mockWin.__LATTICEDX_SSE_HUB__);
+
+    unsubA();
+    assert.equal(fetchCalls[0].init.signal.aborted, false, 'Stream stays open while 2nd subscriber remains');
+    unsubB();
+    assert.equal(fetchCalls[0].init.signal.aborted, true, 'Last unsubscribe aborts stream cleanly without unhandled rejection');
+    await new Promise((r) => setTimeout(r, 15));
+
+    // 2. Duplicate bell guard suppresses rendering & SSE when [data-latticedx-notification-bell] is already in DOM
+    globalThis.fetch = mockFetch;
+    globalThis.document = {
+      visibilityState: 'visible',
+      addEventListener() {},
+      removeEventListener() {},
+      querySelectorAll(sel) {
+        if (sel === '[data-latticedx-notification-bell]') {
+          return [{ getAttribute: (k) => (k === 'data-ldx-bell-instance' ? 'existing-host-bell' : 'topbar') }];
+        }
+        return [];
+      },
+    };
+    const api = {
+      auth: { role: 'ldx_manager', getToken: () => 'tok-dup-check' },
+      request: async () => ({ data: { data: { unreadCount: 1 } } }),
+    };
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+    const DupBell = createTopbarNotificationBell({ useAPIClient: () => api }, React, {}, {});
+    const fetchCountBeforeDup = fetchCalls.length;
+    const dupUi = DupBell({ variant: 'topbar', pathname: '/p/logistics' });
+    while (effects.length) effects.shift().fn();
+    assert.equal(dupUi, null, 'Duplicate notification bell must suppress itself when existing bell is present');
+    assert.equal(fetchCalls.length, fetchCountBeforeDup, 'Suppressed duplicate bell must NOT open SSE');
+    void rejectHandlers;
+    void abortRejectFn;
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document; else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch; else globalThis.fetch = prevFetch;
+  }
+});
+
+test('notification-center integrates omnichannel Vault adapter (channelConfig + no duplicate webhook + skipOmnichannel)', async () => {
+  const { dispatchNotification } = require('../src/server/notification-center');
+  const { encryptVaultSecrets } = require('../src/server/connector-vault');
+  const { registerOmnichannelNotify } = require('../src/server/omnichannel-notify');
+
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  try {
+    const encryptedWebhook = encryptVaultSecrets({
+      webhookUrl: 'https://hooks.example.test/vault-notify',
+      signingSecret: 'whsec_test_123',
+    });
+
+    const { db, tables } = makeEnterpriseHarness();
+    tables.latticeConnectors = [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        connectorKey: 'wh-ops',
+        connectorType: 'webhook',
+        name: 'Ops Webhook',
+        baseUrl: 'https://hooks.example.test/vault-notify',
+        secretsEncrypted: encryptedWebhook,
+        active: true,
+      },
+    ];
+    tables.latticeNotificationDeliveries = [];
+    const origGetRepo = db.getRepository.bind(db);
+    let deliverySeq = 0;
+    db.getRepository = (name) => {
+      if (name === 'latticeConnectors' || name === 'latticeNotificationDeliveries') {
+        return {
+          find: async ({ filter } = {}) => tables[name].filter((r) => (!filter?.organizationId || r.organizationId === filter.organizationId)).map((r) => ({ ...r, get: (k) => r[k] })),
+          findOne: async ({ filter } = {}) => {
+            const found = tables[name].find((r) => Object.entries(filter || {}).every(([k, v]) => r[k] === v));
+            return found ? { ...found, get: (k) => found[k] } : null;
+          },
+          create: async ({ values }) => {
+            deliverySeq += 1;
+            const row = { id: deliverySeq, ...values };
+            tables[name].push(row);
+            return { ...row, get: (k) => row[k], update: async (patch) => Object.assign(row, patch) };
+          },
+          update: async ({ filterByTk, values }) => {
+            const row = tables[name].find((r) => r.id === filterByTk);
+            if (row) Object.assign(row, values);
+            return row ? [row] : [];
+          },
+        };
+      }
+      return origGetRepo(name);
+    };
+
+    const mockApp = {
+      db,
+      resourceManager: { use: () => {}, define: () => {} },
+      acl: { allow: () => {} },
+    };
+    registerOmnichannelNotify(mockApp);
+
+    const calls = [];
+    const mockFetch = async (url, init) => {
+      calls.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => 'ok', body: { cancel: async () => {} } };
+    };
+
+    // 1. Singular channelConfig (like notify.send flow node) dispatches via Vault and avoids duplicate env webhook
+    const res1 = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'Vault Alert',
+      body: 'Something happened',
+      notifyChannels: ['webhook'],
+      channelConfig: { connectorKey: 'wh-ops' },
+      templateKey: 'incident_alert',
+      dedupKey: 'vault-int-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.test/env-fallback' },
+    });
+
+    assert.deepEqual(res1.channelsDispatched, ['in_app', 'webhook']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, 'https://hooks.example.test/vault-notify');
+    assert.equal(tables.latticeNotificationDeliveries.length, 1);
+    assert.equal(tables.latticeNotificationDeliveries[0].templateKey, 'incident_alert');
+
+    // 2. skipOmnichannel: true skips Vault adapter completely
+    const res2 = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'Skip Omni',
+      notifyChannels: ['webhook'],
+      skipOmnichannel: true,
+      dedupKey: 'vault-int-2',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      env: {},
+    });
+    assert.deepEqual(res2.channelsDispatched, ['in_app']);
+    assert.equal(calls.length, 1);
+    assert.equal(tables.latticeNotificationDeliveries.length, 1);
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('sla-engine aggregates evaluateApprovalSlas when latticeApprovalRequests repo exists and guards cron re-entrancy', async () => {
+  const { evaluateSlaBreaches, registerSlaEngine } = require('../src/server/sla-engine');
+  const now = new Date('2026-11-25T15:00:00.000Z');
+  const { db, tables } = makeEnterpriseHarness({
+    serviceTickets: [
+      { id: 1, organizationId: 'org-a', code: 'TKT-1', name: 'Open Ticket', status: 'open', priority: 'high', createdAt: '2026-11-25T12:00:00.000Z' },
+    ],
+  });
+  tables.latticeApprovalRequests = [
+    {
+      id: 10,
+      organizationId: 'org-a',
+      requestUid: 'apr-sla-1',
+      targetCollection: 'latticeOrders',
+      targetRecordId: 55,
+      title: 'Overdue PO Approval',
+      status: 'pending',
+      currentStageIndex: 0,
+      dueAt: '2026-11-25T13:00:00.000Z',
+      stagesStateJson: [{
+        name: 'Manager',
+        mode: 'sequential',
+        requiredApprovals: 1,
+        approverRoles: ['ldx_manager'],
+        escalateToRole: 'ldx_manager',
+        dueAt: '2026-11-25T13:00:00.000Z',
+        status: 'pending',
+        decisions: [],
+      }],
+      payloadJson: {},
+      active: true,
+    },
+  ];
+  const origGetRepo = db.getRepository.bind(db);
+  db.getRepository = (name) => {
+    if (name === 'latticeApprovalRequests') {
+      return {
+        find: async ({ filter } = {}) => tables.latticeApprovalRequests
+          .filter((r) => (!filter?.organizationId || r.organizationId === filter.organizationId))
+          .map((r) => ({ ...r, get: (k) => r[k], update: async (patch) => Object.assign(r, patch) })),
+        update: async ({ filterByTk, values }) => {
+          const row = tables.latticeApprovalRequests.find((r) => r.id === filterByTk);
+          if (row) Object.assign(row, values);
+          return row ? [row] : [];
+        },
+      };
+    }
+    return origGetRepo(name);
+  };
+
+  const report = await evaluateSlaBreaches(db, { organizationId: 'org-a', now, dryRun: false });
+  assert.equal(report.scanned, 2);
+  assert.equal(report.breachedCount, 2);
+  assert.equal(report.escalatedCount, 2);
+  assert.ok(report.approvalSlas);
+  assert.equal(report.approvalSlas.breachedCount, 1);
+  const approvalItem = report.items.find((i) => i.collection === 'latticeApprovalRequests' && i.requestUid === 'apr-sla-1');
+  assert.ok(approvalItem);
+  assert.equal(approvalItem.status, 'breached');
+  assert.equal(approvalItem.slaState, 'breached');
+
+  // Cron re-entrancy guard prevents overlapping ticks
+  const prevCron = process.env.DX_SLA_CRON_ENABLED;
+  process.env.DX_SLA_CRON_ENABLED = 'true';
+  try {
+    let addedJob = null;
+    let releaseFind;
+    const slowGate = new Promise((resolve) => { releaseFind = resolve; });
+    let findCalls = 0;
+    const slowDb = {
+      ...db,
+      getRepository: (name) => {
+        const repo = db.getRepository(name);
+        if (name !== 'latticeSlaPolicies') return repo;
+        return {
+          ...repo,
+          find: async (opts) => {
+            findCalls += 1;
+            await slowGate;
+            return repo.find(opts);
+          },
+        };
+      },
+    };
+    const cronApp = {
+      db: slowDb,
+      resourceManager: { define: () => {} },
+      acl: { allow: () => {} },
+      cronJobManager: { addJob: (job) => { addedJob = job; } },
+      logger: { error: () => {} },
+    };
+    registerSlaEngine(cronApp);
+    assert.ok(addedJob && typeof addedJob.onTick === 'function');
+    const tick1 = addedJob.onTick();
+    const tick2 = addedJob.onTick();
+    releaseFind();
+    await Promise.all([tick1, tick2]);
+    assert.equal(findCalls, 1, 'Overlapping SLA cron tick must be skipped while previous tick is in flight');
+  } finally {
+    if (prevCron === undefined) delete process.env.DX_SLA_CRON_ENABLED;
+    else process.env.DX_SLA_CRON_ENABLED = prevCron;
+  }
+});
+
+test('notification-center deduplicates channel aliases (partner_webhook/webhook, email_smtp/smtp) without double-dispatch', async () => {
+  const {
+    dispatchNotification,
+    dispatchRoleNotifications,
+    normalizeNotificationChannelConfigs,
+  } = require('../src/server/notification-center');
+  const { encryptVaultSecrets } = require('../src/server/connector-vault');
+  const { registerOmnichannelNotify } = require('../src/server/omnichannel-notify');
+
+  // 1. Unit check on normalizeNotificationChannelConfigs alias normalization & deduplication
+  const webhookCfg = normalizeNotificationChannelConfigs(
+    ['partner_webhook', 'webhook'],
+    { channel: 'webhook', url: 'https://hooks.example.test/alias-hook' },
+    null,
+    'tpl_alias',
+  );
+  assert.equal(webhookCfg.length, 1);
+  assert.deepEqual(webhookCfg[0], {
+    channel: 'webhook',
+    url: 'https://hooks.example.test/alias-hook',
+    templateKey: 'tpl_alias',
+  });
+
+  const smtpCfg = normalizeNotificationChannelConfigs(
+    ['email_smtp', 'smtp_notify', 'email'],
+    { channel: 'smtp', to: 'ops@example.test' },
+    null,
+    'tpl_smtp',
+  );
+  assert.equal(smtpCfg.length, 1);
+  assert.deepEqual(smtpCfg[0], {
+    channel: 'smtp',
+    to: 'ops@example.test',
+    templateKey: 'tpl_smtp',
+  });
+
+  const multiCfg = normalizeNotificationChannelConfigs(
+    ['webhook', 'partner_webhook', 'email_smtp'],
+    { connectorKey: 'wh-ops' },
+    null,
+    'tpl_multi',
+  );
+  assert.deepEqual(multiCfg, [
+    { connectorKey: 'wh-ops', templateKey: 'tpl_multi', channel: 'webhook' },
+    { connectorKey: 'wh-ops', templateKey: 'tpl_multi', channel: 'smtp' },
+  ]);
+
+  // 2. End-to-end dispatchNotification & dispatchRoleNotifications with aliases
+  const prevMaster = process.env.DX_VAULT_MASTER_KEY;
+  process.env.DX_VAULT_MASTER_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+  try {
+    const encryptedWebhook = encryptVaultSecrets({
+      webhookUrl: 'https://hooks.example.test/vault-alias',
+      signingSecret: 'whsec_alias_123',
+    });
+    const encryptedSmtp = encryptVaultSecrets({
+      host: 'smtp.example.test',
+      port: 587,
+      username: 'alerts@example.test',
+      password: 'smtp-secret-value',
+      fromEmail: 'alerts@example.test',
+      defaultTo: 'ops@example.test',
+    });
+
+    const { db, tables } = makeEnterpriseHarness();
+    tables.latticeConnectors = [
+      {
+        id: 1,
+        organizationId: 'org-a',
+        connectorKey: 'wh-ops',
+        connectorType: 'webhook',
+        appType: 'partner_webhook',
+        name: 'Ops Webhook',
+        baseUrl: 'https://hooks.example.test/vault-alias',
+        secretsEncrypted: encryptedWebhook,
+        active: true,
+      },
+      {
+        id: 2,
+        organizationId: 'org-a',
+        connectorKey: 'smtp-ops',
+        connectorType: 'smtp_notify',
+        appType: 'email_smtp',
+        name: 'Ops SMTP',
+        baseUrl: 'smtp://smtp.example.test:587',
+        secretsEncrypted: encryptedSmtp,
+        active: true,
+      },
+    ];
+    tables.latticeNotificationDeliveries = [];
+    const origGetRepo = db.getRepository.bind(db);
+    let deliverySeq = 0;
+    db.getRepository = (name) => {
+      if (name === 'latticeConnectors' || name === 'latticeNotificationDeliveries') {
+        return {
+          find: async ({ filter } = {}) => tables[name]
+            .filter((r) => (!filter?.organizationId || r.organizationId === filter.organizationId))
+            .map((r) => ({ ...r, get: (k) => r[k] })),
+          findOne: async ({ filter } = {}) => {
+            const found = tables[name].find((r) => Object.entries(filter || {}).every(([k, v]) => r[k] === v));
+            return found ? { ...found, get: (k) => found[k] } : null;
+          },
+          create: async ({ values }) => {
+            deliverySeq += 1;
+            const row = { id: deliverySeq, ...values };
+            tables[name].push(row);
+            return { ...row, get: (k) => row[k], update: async (patch) => Object.assign(row, patch) };
+          },
+          update: async ({ filterByTk, values }) => {
+            const row = tables[name].find((r) => r.id === filterByTk);
+            if (row) Object.assign(row, values);
+            return row ? [row] : [];
+          },
+        };
+      }
+      return origGetRepo(name);
+    };
+
+    const mockApp = {
+      db,
+      resourceManager: { use: () => {}, define: () => {} },
+      acl: { allow: () => {} },
+    };
+    registerOmnichannelNotify(mockApp);
+
+    const fetchCalls = [];
+    const mockFetch = async (url, init) => {
+      fetchCalls.push({ url: String(url), init });
+      return { ok: true, status: 200, text: async () => 'ok', body: { cancel: async () => {} } };
+    };
+    const dnsLookup = async () => [{ address: '93.184.216.34', family: 4 }];
+
+    // 2a. notifyChannels: ['partner_webhook'] + channelConfig: { channel: 'webhook', ... } -> exactly 1 webhook
+    const whRes = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'Partner Webhook Alias',
+      notifyChannels: ['partner_webhook'],
+      channelConfig: { channel: 'webhook', url: 'https://hooks.example.test/explicit-hook' },
+      templateKey: 'tpl_wh',
+      dedupKey: 'alias-wh-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      lookupImpl: dnsLookup,
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.test/env-fallback' },
+    });
+    assert.deepEqual(whRes.channelsDispatched, ['in_app', 'webhook']);
+    assert.equal(fetchCalls.length, 1, 'Expected exactly 1 webhook delivery for partner_webhook + webhook');
+    assert.equal(fetchCalls[0].url, 'https://hooks.example.test/explicit-hook');
+    assert.equal(tables.latticeNotificationDeliveries.length, 1);
+
+    // 2b. dispatchRoleNotifications with ['webhook', 'partner_webhook'] (no channelConfig) -> 1 webhook
+    const roleRes = await dispatchRoleNotifications(db, {
+      organizationId: 'org-a',
+      roleNames: ['ldx_manager'],
+      title: 'Role Alias Dedup',
+      notifyChannels: ['webhook', 'partner_webhook'],
+      dedupKey: 'alias-role-wh-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      lookupImpl: dnsLookup,
+      env: { DX_NOTIFICATION_WEBHOOK_URL: 'https://hooks.example.test/env-fallback' },
+    });
+    assert.equal(roleRes.dispatchedCount, 1);
+    assert.equal(fetchCalls.length, 2, 'Expected exactly 1 additional webhook delivery for duplicate alias array');
+
+    // 2c. notifyChannels: ['email_smtp'] + channelConfig: { channel: 'smtp', dryRun: true } -> exactly 1 SMTP delivery
+    const smtpRes = await dispatchNotification(db, {
+      organizationId: 'org-a',
+      recipientUserId: 101,
+      title: 'SMTP Alias',
+      body: 'Body text',
+      notifyChannels: ['email_smtp'],
+      channelConfig: { channel: 'smtp', connectorKey: 'smtp-ops', to: 'ops@example.test', dryRun: true },
+      templateKey: 'tpl_smtp_1',
+      dedupKey: 'alias-smtp-1',
+    }, {
+      app: mockApp,
+      fetchImpl: mockFetch,
+      lookupImpl: dnsLookup,
+      env: {},
+    });
+    assert.ok(smtpRes);
+    const smtpDeliveries = tables.latticeNotificationDeliveries.filter((d) => d.channel === 'smtp');
+    assert.equal(smtpDeliveries.length, 1, 'Expected exactly 1 canonical SMTP delivery for email_smtp + smtp');
+    assert.equal(smtpDeliveries[0].status, 'dry_run');
+    assert.equal(smtpDeliveries[0].templateKey, 'tpl_smtp_1');
+  } finally {
+    if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
+    else process.env.DX_VAULT_MASTER_KEY = prevMaster;
   }
 });

@@ -196,9 +196,13 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   assert.equal(assigned.at(-1), '/p/new-portal/home');
 
   assert.equal(manager.hasTopbarSwitcher, true);
+  assert.equal(manager.hasTopbarNotificationBell, true);
   const topbarModel = new registeredModels.PortalSwitcherTopbarActionModel();
   assert.equal(topbarModel.sort, -50);
   assert.equal(topbarModel.actionId, 'portal-switcher');
+  const bellModel = new registeredModels.NotificationBellTopbarActionModel();
+  assert.equal(bellModel.sort, -40);
+  assert.equal(bellModel.actionId, 'notification-bell');
   const employeeBar = manager.PortalBar({ portals: portalRows, pathname: '/p/hr/home', allowConfigUI: false, onSwitch: to => navigated.push(to) });
   assert.equal(employeeBar.type, 'span');
   assert.equal(employeeBar.props.style.height, 46);
@@ -219,7 +223,13 @@ test('preloadPortals awaits uiLayouts:listEnabled, navigateToPortal handles hot-
   assert.equal(app.flowEngine.flowSettings.enabled, true);
   assert.equal(store.get('NOCOBASE_V2_FLOW_SETTINGS_ENABLED'), '1');
   assert.equal(navigated.at(-1), '/p/hr/home');
-  assert.ok(usedProviders.some(u => u.prov === 'PinnedPluginListProvider' && u.cfg?.items?.ldxPortalSwitcher?.order === -50 && u.cfg?.items?.ldxPortalSwitcher?.snippet === '*'));
+  assert.ok(usedProviders.some(u => (
+    u.prov === 'PinnedPluginListProvider'
+    && u.cfg?.items?.ldxPortalSwitcher?.order === -50
+    && u.cfg?.items?.ldxPortalSwitcher?.snippet === '*'
+    && u.cfg?.items?.ldxNotificationBell?.order === -40
+    && u.cfg?.items?.ldxNotificationBell?.snippet === '*'
+  )));
   manager.requestBuilderMode(false);
   assert.equal(store.get('NOCOBASE_V2_FLOW_SETTINGS_ENABLED'), '0');
 });
@@ -326,4 +336,43 @@ test('resolveLegacyMobileRedirect bridges /mobile* to /{prefix}/mobile* only in 
       null,
     );
   }
+});
+
+test('MultiPortalSettingsPage includes custom non-ldx enterprise roles while excluding system/builder roles', async () => {
+  const React = createReactMock();
+  const antd = Object.fromEntries(['Modal', 'Input', 'Select', 'Switch', 'Alert', 'Button', 'Space', 'Tag', 'Dropdown', 'Popconfirm'].map(n => [n, n]));
+  const rolesFromServer = [
+    { name: 'root', title: 'Root', allowConfigure: true, snippets: ['*'] },
+    { name: 'admin', title: 'Admin', allowConfigure: true, snippets: ['pm'] },
+    { name: 'anonymous', title: 'Anonymous', allowConfigure: false, snippets: [] },
+    { name: 'member', title: 'Member', allowConfigure: false, snippets: [] },
+    { name: 'ui_builder', title: 'UI Builder', allowConfigure: true, snippets: ['pm.*'] },
+    { name: 'ldx_employee', title: 'Nhân viên', allowConfigure: false, snippets: [] },
+    { name: 'custom_auditor', title: 'Kiểm toán viên', allowConfigure: false, snippets: [] },
+  ];
+  const client = {
+    useAPIClient: () => ({
+      request: async req => {
+        if (req.url === 'latticePortals:list') return { data: { data: [] } };
+        if (req.url === 'roles:list') return { data: { data: rolesFromServer } };
+        return { data: { data: {} } };
+      },
+    }),
+  };
+  const settings = [];
+  const app = {
+    layoutManager: { hasLayout: () => false, registerLayout() {} },
+    pluginSettingsManager: { add: (name, cfg) => settings.push({ name, ...cfg }) },
+  };
+  createNativePortalManager(client, React, antd, app, { Link: 'Link', useNavigate: () => () => {} });
+  const Page = settings[0].Component;
+  React.reset();
+  Page();
+  React.flush();
+  await new Promise(r => setImmediate(r));
+  React.reset();
+  const ui = Page();
+  const modal = find(ui, n => Array.isArray(n.props?.roles));
+  assert.ok(modal);
+  assert.deepEqual(modal.props.roles.map(r => r.name), ['ldx_employee', 'custom_auditor']);
 });

@@ -9,6 +9,10 @@
 'use strict';
 
 const { createHash, timingSafeEqual } = require('node:crypto');
+const { buildOpenApiSpec, buildAsyncApiSpec } = require('./openapi-spec');
+const { registerMobilePwaActions } = require('./mobile-pwa');
+const { canUsePgRlsSession, getActiveRlsContext, runInRlsSavepoint, withSystemRlsBypass } = require('./pg-rls');
+const { createOtelExporter } = require('./otel-exporter');
 
 const ALLOWED_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
 const HISTOGRAM_BUCKETS = Object.freeze([
@@ -18,6 +22,9 @@ const HISTOGRAM_BUCKETS = Object.freeze([
   { le: 2.0, label: '2.0' },
 ]);
 const OUTBOX_STATES = Object.freeze(['pending', 'retry', 'processing', 'delivered', 'failed']);
+const EVENT_BUS_STATUSES = Object.freeze(['queued', 'dispatched', 'partial_failed']);
+const WEBHOOK_DELIVERY_STATUSES = Object.freeze(['pending', 'processing', 'delivered', 'retry_wait', 'dlq']);
+const WEBHOOK_CIRCUIT_STATES = Object.freeze(['closed', 'open', 'half_open']);
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 const METRICS_ALLOWED_ROLES = new Set(['root', 'ldx_admin']);
 
@@ -32,7 +39,7 @@ function resolvePackageVersion() {
   } catch {
     // Fallback below
   }
-  return '0.3.0';
+  return '0.4.0';
 }
 
 function failObs(ctx, status, message, code) {
@@ -173,35 +180,79 @@ function toStatusClass(status) {
   return 'other';
 }
 
-async function safeCount(db, collection, filter) {
+async function hasQueryableRepo(db, collection) {
+  try {
+    if (typeof db?.hasCollection === 'function' && !db.hasCollection(collection)) {
+      return false;
+    }
+    const repo = db?.getRepository?.(collection);
+    return Boolean(repo && typeof repo.count === 'function');
+  } catch {
+    return false;
+  }
+}
+
+async function safeCount(db, collection, filter, transaction) {
   try {
     if (typeof db?.hasCollection === 'function' && !db.hasCollection(collection)) {
       return 0;
     }
     const repo = db?.getRepository?.(collection);
     if (!repo || typeof repo.count !== 'function') return 0;
-    const count = await repo.count(filter ? { filter } : undefined);
-    const num = Number(count);
-    return Number.isFinite(num) && num >= 0 ? num : 0;
+    const executeCount = async (tx) => {
+      const opts = filter || tx
+        ? { ...(filter ? { filter } : {}), ...(tx ? { transaction: tx } : {}) }
+        : undefined;
+      const count = await repo.count(opts);
+      const num = Number(count);
+      return Number.isFinite(num) && num >= 0 ? num : 0;
+    };
+    if (transaction && getActiveRlsContext()?.transaction === transaction) {
+      return await runInRlsSavepoint(db, executeCount);
+    }
+    return await executeCount(transaction);
   } catch {
     return 0;
   }
 }
 
-async function collectDbGauges(db) {
-  const [aiAuditLogsTotal, activeAlarmsTotal, unreadNotificationsTotal, slaPoliciesActive, ...outboxCounts] =
-    await Promise.all([
-      safeCount(db, 'latticeAiAuditLogs'),
-      safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }),
-      safeCount(db, 'latticeNotifications', { readAt: null, active: true }),
-      safeCount(db, 'latticeSlaPolicies', { active: true }),
-      ...OUTBOX_STATES.map((state) => safeCount(db, 'latticeContextOutbox', { state })),
-    ]);
+async function collectDbGaugesWithTx(db, transaction = undefined) {
+  const aiAuditLogsTotal = await safeCount(db, 'latticeAiAuditLogs', undefined, transaction);
+  const activeAlarmsTotal = await safeCount(db, 'latticeIncidentCases', { status: { $in: ['open', 'acknowledged'] } }, transaction);
+  const unreadNotificationsTotal = await safeCount(db, 'latticeNotifications', { readAt: null, active: true }, transaction);
+  const slaPoliciesActive = await safeCount(db, 'latticeSlaPolicies', { active: true }, transaction);
+  const hasEventBusRepo = await hasQueryableRepo(db, 'latticeEventBus');
+  const hasDeliveriesRepo = await hasQueryableRepo(db, 'latticeWebhookDeliveries');
+  const hasSubscriptionsRepo = await hasQueryableRepo(db, 'latticeWebhookSubscriptions');
 
   const outboxByState = {};
-  OUTBOX_STATES.forEach((state, idx) => {
-    outboxByState[state] = outboxCounts[idx] ?? 0;
-  });
+  for (const state of OUTBOX_STATES) {
+    outboxByState[state] = await safeCount(db, 'latticeContextOutbox', { state }, transaction);
+  }
+
+  let eventBusByStatus = null;
+  if (hasEventBusRepo) {
+    eventBusByStatus = {};
+    for (const status of EVENT_BUS_STATUSES) {
+      eventBusByStatus[status] = await safeCount(db, 'latticeEventBus', { status }, transaction);
+    }
+  }
+
+  let webhookDeliveriesByStatus = null;
+  if (hasDeliveriesRepo) {
+    webhookDeliveriesByStatus = {};
+    for (const status of WEBHOOK_DELIVERY_STATUSES) {
+      webhookDeliveriesByStatus[status] = await safeCount(db, 'latticeWebhookDeliveries', { status }, transaction);
+    }
+  }
+
+  let webhookCircuitsByState = null;
+  if (hasSubscriptionsRepo) {
+    webhookCircuitsByState = {};
+    for (const circuitState of WEBHOOK_CIRCUIT_STATES) {
+      webhookCircuitsByState[circuitState] = await safeCount(db, 'latticeWebhookSubscriptions', { circuitState }, transaction);
+    }
+  }
 
   return {
     ai_audit_logs_total: aiAuditLogsTotal,
@@ -209,14 +260,29 @@ async function collectDbGauges(db) {
     active_alarms_total: activeAlarmsTotal,
     unread_notifications_total: unreadNotificationsTotal,
     sla_policies_active: slaPoliciesActive,
+    event_bus_by_status: eventBusByStatus,
+    webhook_deliveries_by_status: webhookDeliveriesByStatus,
+    webhook_circuits_by_state: webhookCircuitsByState,
   };
 }
 
-function createMetricsRegistry() {
+async function collectDbGauges(db) {
+  if (canUsePgRlsSession(db)) {
+    return withSystemRlsBypass(db, (transaction) => collectDbGaugesWithTx(db, transaction));
+  }
+  return collectDbGaugesWithTx(db, undefined);
+}
+
+function createMetricsRegistry({ otelExporter = null } = {}) {
   const requestCounts = new Map();
   const bucketCounts = HISTOGRAM_BUCKETS.map(() => 0);
   let durationSum = 0;
   let durationCount = 0;
+  let activeOtelExporter = otelExporter;
+
+  function setOtelExporter(exporter) {
+    activeOtelExporter = exporter || null;
+  }
 
   function recordRequest(method, statusCode, durationSeconds) {
     const normMethod = normalizeMethod(method);
@@ -280,26 +346,81 @@ function createMetricsRegistry() {
     lines.push('# TYPE latticedx_sla_policies_active gauge');
     lines.push(`latticedx_sla_policies_active ${gauges.sla_policies_active}`);
 
+    if (gauges.event_bus_by_status) {
+      lines.push('# HELP latticedx_event_bus_by_status Count of domain events in event bus by delivery status.');
+      lines.push('# TYPE latticedx_event_bus_by_status gauge');
+      for (const status of EVENT_BUS_STATUSES) {
+        lines.push(`latticedx_event_bus_by_status{status="${status}"} ${gauges.event_bus_by_status[status]}`);
+      }
+    }
+
+    if (gauges.webhook_deliveries_by_status) {
+      lines.push('# HELP latticedx_webhook_deliveries_by_status Count of outbound webhook deliveries by status.');
+      lines.push('# TYPE latticedx_webhook_deliveries_by_status gauge');
+      for (const status of WEBHOOK_DELIVERY_STATUSES) {
+        lines.push(`latticedx_webhook_deliveries_by_status{status="${status}"} ${gauges.webhook_deliveries_by_status[status]}`);
+      }
+    }
+
+    if (gauges.webhook_circuits_by_state) {
+      lines.push('# HELP latticedx_webhook_circuits_by_state Count of webhook subscriptions by circuit breaker state.');
+      lines.push('# TYPE latticedx_webhook_circuits_by_state gauge');
+      for (const state of WEBHOOK_CIRCUIT_STATES) {
+        lines.push(`latticedx_webhook_circuits_by_state{state="${state}"} ${gauges.webhook_circuits_by_state[state]}`);
+      }
+    }
+
     lines.push('# HELP latticedx_uptime_seconds Node.js process uptime in seconds.');
     lines.push('# TYPE latticedx_uptime_seconds gauge');
     lines.push(`latticedx_uptime_seconds ${Math.floor(process.uptime())}`);
+
+    if (activeOtelExporter && typeof activeOtelExporter.getOtelStats === 'function') {
+      const otelStats = activeOtelExporter.getOtelStats();
+      lines.push('# HELP latticedx_otel_spans_recorded_total Total OpenTelemetry spans recorded.');
+      lines.push('# TYPE latticedx_otel_spans_recorded_total counter');
+      lines.push(`latticedx_otel_spans_recorded_total ${Number(otelStats.recordedSpans || 0)}`);
+
+      lines.push('# HELP latticedx_otel_spans_exported_total Total OpenTelemetry spans exported.');
+      lines.push('# TYPE latticedx_otel_spans_exported_total counter');
+      lines.push(`latticedx_otel_spans_exported_total ${Number(otelStats.exportedSpans || 0)}`);
+
+      lines.push('# HELP latticedx_otel_spans_dropped_total Total OpenTelemetry spans dropped due to queue overflow.');
+      lines.push('# TYPE latticedx_otel_spans_dropped_total counter');
+      lines.push(`latticedx_otel_spans_dropped_total ${Number(otelStats.droppedSpans || 0)}`);
+
+      lines.push('# HELP latticedx_otel_export_failures_total Total OpenTelemetry OTLP/HTTP export failures.');
+      lines.push('# TYPE latticedx_otel_export_failures_total counter');
+      lines.push(`latticedx_otel_export_failures_total ${Number(otelStats.exportFailures || 0)}`);
+
+      lines.push('# HELP latticedx_otel_queue_size Current OpenTelemetry span queue depth.');
+      lines.push('# TYPE latticedx_otel_queue_size gauge');
+      lines.push(`latticedx_otel_queue_size ${Number(otelStats.queuedSpans || 0)}`);
+    }
 
     return `${lines.join('\n')}\n`;
   }
 
   return {
     recordRequest,
+    setOtelExporter,
     formatPrometheusMetrics,
   };
 }
 
-function createObservabilityMiddleware(registry, { env = process.env } = {}) {
-  const activeRegistry = registry || createMetricsRegistry();
+function createObservabilityMiddleware(registry, { env = process.env, otelExporter = null } = {}) {
+  const activeRegistry = registry || createMetricsRegistry({ otelExporter });
+  const traceMw = otelExporter && typeof otelExporter.traceMiddleware === 'function'
+    ? otelExporter.traceMiddleware()
+    : null;
   return async function dxosObservabilityMiddleware(ctx, next) {
     const startNs = process.hrtime.bigint();
     let caughtError = null;
     try {
-      await next();
+      if (traceMw) {
+        await traceMw(ctx, next);
+      } else {
+        await next();
+      }
     } catch (error) {
       caughtError = error;
       throw error;
@@ -459,8 +580,43 @@ async function checkDbHealth(db) {
   }
 }
 
-function registerObservability(app, { env = process.env, registry = createMetricsRegistry() } = {}) {
-  const middleware = createObservabilityMiddleware(registry, { env });
+function resolveRequestServerUrl(ctx) {
+  const rawProto = getReqHeader(ctx, 'x-forwarded-proto').split(',')[0].trim().toLowerCase();
+  const proto = rawProto === 'https' || rawProto === 'http' ? rawProto : (ctx?.protocol === 'https' ? 'https' : 'http');
+  const rawHost = (getReqHeader(ctx, 'x-forwarded-host') || getReqHeader(ctx, 'host') || String(ctx?.host || '')).split(',')[0].trim();
+  if (rawHost && /^[a-zA-Z0-9.:[\]-]{1,253}$/.test(rawHost)) {
+    return `${proto}://${rawHost}`;
+  }
+  return 'http://localhost:13014';
+}
+
+async function serveSpecDocument(ctx, next, buildSpec, version, db) {
+  if (ctx.method && ctx.method !== 'GET') {
+    failObs(ctx, 405, 'Method not allowed.', 'METHOD_NOT_ALLOWED');
+  }
+  ctx.withoutDataWrapping = true;
+  setHeader(ctx, 'Content-Type', 'application/json; charset=utf-8');
+  setHeader(ctx, 'Cache-Control', 'no-store');
+  ctx.status = 200;
+  ctx.body = buildSpec({ serverUrl: resolveRequestServerUrl(ctx), version, db });
+  if (next) await next();
+}
+
+function registerObservability(app, { env = process.env, registry = createMetricsRegistry(), otelExporter } = {}) {
+  const version = resolvePackageVersion();
+  const activeOtel = otelExporter || createOtelExporter({
+    serviceName: String(env?.OTEL_SERVICE_NAME || 'latticedx-nocobase').trim(),
+    serviceVersion: version,
+    endpoint: env?.OTEL_EXPORTER_OTLP_ENDPOINT ?? '',
+  });
+  if (typeof registry?.setOtelExporter === 'function') {
+    registry.setOtelExporter(activeOtel);
+  }
+  const middleware = createObservabilityMiddleware(registry, { env, otelExporter: activeOtel });
+
+  if (app && typeof app === 'object') {
+    app.latticeOtel = activeOtel;
+  }
 
   if (typeof app?.use === 'function') {
     app.use(middleware, { tag: 'dxosObservability', before: 'cors' });
@@ -468,7 +624,7 @@ function registerObservability(app, { env = process.env, registry = createMetric
     app.resourceManager.use(middleware, { tag: 'dxosObservability' });
   }
 
-  const version = resolvePackageVersion();
+  const mobilePwaActions = registerMobilePwaActions({ version });
 
   app.resourceManager.define({
     name: 'dxos',
@@ -485,6 +641,7 @@ function registerObservability(app, { env = process.env, registry = createMetric
           version,
           uptimeSec: Math.floor(process.uptime()),
           dbHealthy,
+          otel: activeOtel.getOtelStats(),
         };
         if (next) await next();
       },
@@ -504,19 +661,25 @@ function registerObservability(app, { env = process.env, registry = createMetric
         ctx.body = await registry.formatPrometheusMetrics(activeDb);
         if (next) await next();
       },
+      openapi: (ctx, next) => serveSpecDocument(ctx, next, buildOpenApiSpec, version, ctx?.db || app?.db || null),
+      asyncapi: (ctx, next) => serveSpecDocument(ctx, next, buildAsyncApiSpec, version, ctx?.db || app?.db || null),
+      ...mobilePwaActions,
     },
   });
 
   if (typeof app?.acl?.allow === 'function') {
-    app.acl.allow('dxos', ['health', 'metrics'], 'public');
+    app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi', 'manifest', 'sw.js', 'sw'], 'public');
   }
 
-  return { registry, middleware };
+  return { registry, middleware, otelExporter: activeOtel };
 }
 
 module.exports = {
   HISTOGRAM_BUCKETS,
   OUTBOX_STATES,
+  EVENT_BUS_STATUSES,
+  WEBHOOK_DELIVERY_STATUSES,
+  WEBHOOK_CIRCUIT_STATES,
   isTrustedOrigin,
   collectDbGauges,
   createMetricsRegistry,

@@ -6,6 +6,8 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
+const { canUsePgRlsSession, getActiveRlsContext, setTransactionRlsBypass, withSystemRlsBypass } = require('./pg-rls');
+
 const units = [
   {code: 'DEMO-UNIT-01', organizationId: 'demo-organization-01', name: 'Đơn vị mẫu 1', suffix: '01'},
   {code: 'DEMO-UNIT-02', organizationId: 'demo-organization-02', name: 'Đơn vị mẫu 2', suffix: '02'},
@@ -19,7 +21,17 @@ async function ensure(db, collection, values, transaction) {
   }
   return repo.create({values, transaction});
 }
-async function seedFoundation(db, transaction) {
+async function seedFoundation(db, transaction, { env = process.env } = {}) {
+  if (String(env?.LATTICE_SKIP_DEMO_SEED || '').trim() === '1') {
+    return { skipped: true, reason: 'LATTICE_SKIP_DEMO_SEED' };
+  }
+  if (!transaction && canUsePgRlsSession(db)) {
+    return withSystemRlsBypass(db, (bypassTx) => seedFoundation(db, bypassTx, { env }));
+  }
+  const activeRls = getActiveRlsContext();
+  if (transaction && canUsePgRlsSession(db) && !(activeRls?.systemRlsBypass === true && activeRls.transaction === transaction)) {
+    await setTransactionRlsBypass(db, transaction);
+  }
   for (const unit of units) {
     const {suffix, ...values} = unit;
     const department = await ensure(db, 'latticeDepartments', values, transaction);

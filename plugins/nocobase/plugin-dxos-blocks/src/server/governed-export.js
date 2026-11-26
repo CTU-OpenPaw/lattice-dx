@@ -43,6 +43,27 @@ const FORMULA_PREFIX_RE = /^(?:[=+\-@\t\r]|\s+[=+\-@])/;
 const EXPORT_FORMATS = new Set(['csv', 'xlsx', 'pdf']);
 
 const DEFAULT_FALLBACK_COLUMNS = ['id', 'code', 'name', 'status', 'organizationId', 'createdAt'];
+const VIRTUAL_OR_ASSOC_FIELD_TYPES = new Set([
+  'virtual',
+  'hasmany',
+  'belongstomany',
+  'hasone',
+  'belongsto',
+  'password',
+  'encryption',
+]);
+const BLOCKED_EXPORT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const DANGEROUS_FILTER_OPERATORS = new Set(['$where', '$raw', '$sql', '$eval', '$function', '$expr']);
+const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === 'all' || BLOCKED_EXPORT_KEYS.has(lower)) return false;
+  return ORG_ID_RE.test(clean);
+}
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -71,7 +92,7 @@ function assertSafeFilter(node, depth = 0) {
   if (node == null) return null;
   if (depth > 15) throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc vượt quá độ sâu cho phép.');
   let target = node;
-  if (typeof target === 'string') {
+  if (depth === 0 && typeof target === 'string') {
     const trimmed = target.trim();
     if (!trimmed) return null;
     try { target = JSON.parse(trimmed); } catch { throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc không hợp lệ.'); }
@@ -80,22 +101,62 @@ function assertSafeFilter(node, depth = 0) {
     return target.map((item) => assertSafeFilter(item, depth + 1));
   }
   if (typeof target !== 'object') return target;
-  for (const [k, entry] of Object.entries(target)) {
-    if (k === '$where' || k === '$raw' || k === '$sql') {
+  for (const k of Object.getOwnPropertyNames(target)) {
+    if (BLOCKED_EXPORT_KEYS.has(k)) {
+      throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc chứa khóa không hợp lệ.');
+    }
+    const lowerKey = k.toLowerCase();
+    if (DANGEROUS_FILTER_OPERATORS.has(lowerKey)) {
       throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Toán tử lọc không an toàn bị từ chối.');
     }
-    if (!k.startsWith('$') && (k.includes('.') || SENSITIVE_KEY_RE.test(k))) {
+    if (!k.startsWith('$') && (k.includes('.') || SENSITIVE_EXPORT_FIELDS.has(k) || SENSITIVE_KEY_RE.test(k) || /searchvector/i.test(k))) {
       throw failExport('EXPORT_FILTER_FORBIDDEN', 403, 'Bộ lọc chứa trường bị hạn chế.');
     }
-    assertSafeFilter(entry, depth + 1);
+    assertSafeFilter(target[k], depth + 1);
   }
   return target;
 }
 
 function isSensitiveField(name) {
   const clean = String(name || '').trim();
-  if (!clean || clean.includes('.') || clean.startsWith('$')) return true;
+  if (!clean || BLOCKED_EXPORT_KEYS.has(clean) || clean.includes('.') || clean.startsWith('$')) return true;
   return SENSITIVE_EXPORT_FIELDS.has(clean) || SENSITIVE_KEY_RE.test(clean);
+}
+
+function extractExportableCollectionFields(db, collection) {
+  const colObj = typeof db?.getCollection === 'function'
+    ? db.getCollection(collection)
+    : (db?.collections instanceof Map ? db.collections.get(collection) : db?.collections?.[collection]) || null;
+  const rawFields = colObj?.fields;
+  if (!rawFields) return null;
+  const list = rawFields instanceof Map
+    ? [...rawFields.entries()].map(([key, f]) => ({ key, f }))
+    : Array.isArray(rawFields)
+      ? rawFields.map((f) => ({ key: f?.name || f?.options?.name || (typeof f === 'string' ? f : ''), f }))
+      : typeof rawFields === 'object'
+        ? Object.entries(rawFields).map(([key, f]) => ({ key, f }))
+        : [];
+  const out = [];
+  const seen = new Set();
+  for (const { key, f } of list) {
+    const opts = f?.options && typeof f.options === 'object' ? f.options : {};
+    const name = String(f?.name || opts.name || key || '').trim();
+    if (!name || BLOCKED_EXPORT_KEYS.has(name) || name.includes('.') || name.startsWith('$') || seen.has(name)) {
+      continue;
+    }
+    const fieldType = String(f?.type || opts.type || '').trim().toLowerCase();
+    if (
+      VIRTUAL_OR_ASSOC_FIELD_TYPES.has(fieldType)
+      || f?.virtual === true
+      || opts.virtual === true
+      || f?.isAssociation === true
+    ) {
+      continue;
+    }
+    seen.add(name);
+    out.push(name);
+  }
+  return out.some((name) => !isSensitiveField(name)) ? out : null;
 }
 
 async function resolveAllowedExportColumns(
@@ -132,11 +193,16 @@ async function resolveAllowedExportColumns(
 
   const omittedSet = new Set();
   const columns = [];
+  const metaColumns = !requested.length && !roleAllowedSet
+    ? extractExportableCollectionFields(db, collection)
+    : null;
   const candidates = requested.length
     ? requested
     : roleAllowedSet
       ? [...roleAllowedSet]
-      : (Array.isArray(fallbackFields) && fallbackFields.length ? fallbackFields : DEFAULT_FALLBACK_COLUMNS);
+      : metaColumns
+        ? metaColumns
+        : (Array.isArray(fallbackFields) && fallbackFields.length ? fallbackFields : DEFAULT_FALLBACK_COLUMNS);
 
   for (const col of candidates) {
     if (isSensitiveField(col)) {
@@ -847,7 +913,11 @@ async function executeGovernedExport(
     throw failExport('EXPORT_FORMAT_INVALID', 400, 'Định dạng xuất phải là csv, xlsx hoặc pdf.');
   }
 
-  const requestedOrg = params.organizationId ? String(params.organizationId).trim() : '';
+  const hasRequestedOrg = params.organizationId !== undefined && params.organizationId !== null && String(params.organizationId).trim() !== '';
+  const requestedOrg = hasRequestedOrg ? String(params.organizationId).trim() : '';
+  if (hasRequestedOrg && !isValidOrganizationId(requestedOrg)) {
+    throw failExport('EXPORT_ORG_INVALID', 400, 'organizationId không hợp lệ.');
+  }
   if (!isRoot && requestedOrg && requestedOrg !== actor.organizationId) {
     throw failExport('NATIVE_ORGANIZATION_MISMATCH', 403, 'Không thể xuất dữ liệu tổ chức khác.');
   }
@@ -930,6 +1000,7 @@ module.exports = {
   EXPORTABLE_COLLECTIONS,
   SENSITIVE_EXPORT_FIELDS,
   isExportableCollection,
+  assertSafeFilter,
   sanitizeFormulaCell,
   resolveAllowedExportColumns,
   buildCsvBuffer,

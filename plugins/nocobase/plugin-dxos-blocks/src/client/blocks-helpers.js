@@ -9,6 +9,7 @@
 'use strict';
 
 const SAFE_COLLECTION_RE = /^[a-zA-Z0-9_]{1,64}$/;
+const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const SAFE_COLOR_RE = /^#[0-9a-fA-F]{3,8}$/;
 const MAX_KPI_METRICS = 6;
 const MAX_HERO_ACTIONS = 4;
@@ -153,11 +154,11 @@ function inferPortalSlugFromLocation(pathname) {
   return '';
 }
 
-async function fetchPortalCopilot(api, { portalSlug = '' } = {}) {
+async function fetchPortalAgents(api, { portalSlug = '' } = {}) {
   if (!api?.request) return { pluginDisabled: true, employees: [] };
   try {
     const res = await api.request({
-      url: 'dxosAi:portalCopilot',
+      url: 'dxosAi:portalAgents',
       method: 'get',
       params: portalSlug ? { portalSlug } : {},
     });
@@ -171,7 +172,7 @@ async function fetchPortalCopilot(api, { portalSlug = '' } = {}) {
   }
 }
 
-async function triggerDxosCopilot(appOrFlowEngine, { aiEmployee, prompt, blockTitle = '', portalSlug = '' } = {}) {
+async function triggerDxosAgent(appOrFlowEngine, { aiEmployee, prompt, blockTitle = '', portalSlug = '' } = {}) {
   const aiCtx = appOrFlowEngine?.flowEngine?.context?.ai || appOrFlowEngine?.context?.ai;
   if (!aiCtx || typeof aiCtx.triggerTask !== 'function' || !aiEmployee || !prompt) {
     return { triggered: false, reason: 'ai_unavailable' };
@@ -187,7 +188,7 @@ async function triggerDxosCopilot(appOrFlowEngine, { aiEmployee, prompt, blockTi
   return { triggered: true, aiEmployee };
 }
 
-function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) {
+function createAgentStripElement(React, { employees = [], onRunPrompt } = {}) {
   if (!React?.createElement || !Array.isArray(employees) || !employees.length) return null;
   const h = React.createElement;
   const chips = [];
@@ -217,7 +218,7 @@ function createCopilotStripElement(React, { employees = [], onRunPrompt } = {}) 
   }
   if (!chips.length) return null;
   return h('div', {
-    'data-testid': 'dxos-block-copilot-strip',
+    'data-testid': 'dxos-block-agent-strip',
     style: { marginTop: 12, paddingTop: 10, borderTop: '1px dashed #cbd5e1', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' },
   },
     h('span', { style: { fontSize: 11, fontWeight: 700, color: '#0369a1' } }, 'Trợ lý AI ngữ cảnh:'),
@@ -296,8 +297,337 @@ async function requestAndDownloadExport(api, { collection, format = 'csv', field
   return { ok: true, meta, download };
 }
 
+const collectionsMetaListeners = new Set();
+
+function resolveClientAuthToken(api) {
+  if (!api) return '';
+  try {
+    const t = typeof api.auth?.getToken === 'function' ? api.auth.getToken() : '';
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    const t = api.auth?.token;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    if (typeof window !== 'undefined' && window?.localStorage && typeof window.localStorage.getItem === 'function') {
+      const t = window.localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    } else if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+      const t = localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+  } catch {}
+  return '';
+}
+
+function subscribeCollectionsMeta(listener) {
+  if (typeof listener !== 'function') return () => {};
+  collectionsMetaListeners.add(listener);
+  return () => {
+    collectionsMetaListeners.delete(listener);
+  };
+}
+
+async function fetchCollectionsMeta(api) {
+  if (!api?.request) return [];
+  try {
+    const res = await api.request({
+      url: 'dxosBlocks:collectionsMeta',
+      method: 'get',
+      skipNotify: true,
+    });
+    const list = res?.data?.data?.collections ?? res?.data?.collections ?? [];
+    const cols = Array.isArray(list) ? list : [];
+    for (const fn of [...collectionsMetaListeners]) {
+      try { fn(cols); } catch {}
+    }
+    return cols;
+  } catch {
+    return [];
+  }
+}
+
+function inferCollectionFieldsMeta(collectionMeta) {
+  const fields = Array.isArray(collectionMeta?.fields) ? collectionMeta.fields : [];
+  const byLower = new Map();
+  for (const f of fields) {
+    if (!f || !f.name) continue;
+    byLower.set(String(f.name).toLowerCase(), f);
+  }
+
+  let statusFieldObj = null;
+  for (const cand of ['status', 'stage', 'state', 'workflowstatus']) {
+    if (byLower.has(cand)) {
+      statusFieldObj = byLower.get(cand);
+      break;
+    }
+  }
+  if (!statusFieldObj) {
+    statusFieldObj = fields.find((f) => Array.isArray(f?.enumValues) && f.enumValues.length > 0)
+      || fields.find((f) => f?.interface === 'select' || f?.type === 'enum')
+      || null;
+  }
+  const statusField = statusFieldObj?.name || 'status';
+
+  const rawEnums = Array.isArray(statusFieldObj?.enumValues) ? statusFieldObj.enumValues : [];
+  const stages = [];
+  const seenStages = new Set();
+  for (const item of rawEnums) {
+    const value = item && typeof item === 'object' ? String(item.value ?? item.label ?? '').trim() : String(item ?? '').trim();
+    const label = item && typeof item === 'object' ? String(item.label ?? item.value ?? '').trim() : value;
+    if (!value || seenStages.has(value)) continue;
+    seenStages.add(value);
+    stages.push({ value, label: label || value });
+  }
+
+  const preferredBusinessDates = ['dueDate', 'scheduledAt', 'startDate', 'expiryDate', 'submittedAt'];
+  const dateFields = [];
+  const seenDates = new Set();
+  for (const pref of preferredBusinessDates) {
+    const hit = byLower.get(pref.toLowerCase());
+    if (hit && !seenDates.has(hit.name)) {
+      seenDates.add(hit.name);
+      dateFields.push(hit.name);
+    }
+  }
+  for (const f of fields) {
+    if (!f?.name || seenDates.has(f.name) || f.name === 'createdAt' || f.name === 'updatedAt') continue;
+    const t = String(f.type || '').toLowerCase();
+    const iface = String(f.interface || '').toLowerCase();
+    if (['date', 'datetime'].includes(t) || ['datetime', 'date'].includes(iface)) {
+      seenDates.add(f.name);
+      dateFields.push(f.name);
+    }
+  }
+  const createdAtField = byLower.get('createdat');
+  if (createdAtField && !seenDates.has(createdAtField.name)) {
+    seenDates.add(createdAtField.name);
+    dateFields.push(createdAtField.name);
+  }
+  for (const fallbackDate of [...preferredBusinessDates, 'createdAt']) {
+    if (!seenDates.has(fallbackDate)) {
+      seenDates.add(fallbackDate);
+      dateFields.push(fallbackDate);
+    }
+  }
+
+  let titleFieldObj = null;
+  for (const cand of ['title', 'name', 'subject', 'summary', 'productname', 'label']) {
+    if (byLower.has(cand)) {
+      titleFieldObj = byLower.get(cand);
+      break;
+    }
+  }
+  if (!titleFieldObj) {
+    titleFieldObj = fields.find((f) => {
+      if (!f?.name) return false;
+      const lower = String(f.name).toLowerCase();
+      if (f.name === statusField || ['id', 'code', 'lotcode', 'organizationid'].includes(lower)) return false;
+      const t = String(f.type || '').toLowerCase();
+      return t === 'string' || t === 'text';
+    }) || byLower.get('code') || byLower.get('lotcode') || null;
+  }
+  const titleField = titleFieldObj?.name || 'name';
+
+  const latCand = ['lat', 'latitude', 'geolat', 'y'];
+  const lngCand = ['lng', 'lon', 'longitude', 'geolng', 'x'];
+  const latFieldObj = latCand.map((c) => byLower.get(c)).find(Boolean)
+    || fields.find((f) => /(?:^|_)(?:lat|latitude)$|(?:geo|gps|coord|pos)lat$/i.test(String(f?.name || '')))
+    || null;
+  const lngFieldObj = lngCand.map((c) => byLower.get(c)).find(Boolean)
+    || fields.find((f) => /(?:^|_)(?:lng|lon|longitude)$|(?:geo|gps|coord|pos)(?:lng|lon)$/i.test(String(f?.name || '')))
+    || null;
+
+  return {
+    statusField,
+    stages,
+    dateFields,
+    titleField,
+    latField: latFieldObj?.name || null,
+    lngField: lngFieldObj?.name || null,
+  };
+}
+
+const NUMERIC_FIELD_TYPES = new Set(['integer', 'float', 'double', 'decimal', 'number', 'bigint']);
+const NUMERIC_FIELD_INTERFACES = new Set(['number', 'integer', 'percent', 'float']);
+const BI_BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const BI_SENSITIVE_FIELD_RE = /password|secret|token|apikey|api_key|privatekey|hash|salt|embedding|searchvector/i;
+const BI_VIRTUAL_OR_ASSOC_TYPES = new Set(['virtual', 'hasmany', 'belongstomany', 'hasone', 'belongsto', 'password', 'encryption']);
+
+function isNumericCollectionField(field) {
+  if (!field || typeof field !== 'object') return false;
+  const ftype = String(field.type || '').trim().toLowerCase();
+  if (NUMERIC_FIELD_TYPES.has(ftype)) return true;
+  if (ftype === 'formula') {
+    const dataType = String(field.dataType || field.options?.dataType || '').trim().toLowerCase();
+    const iface = String(field.interface || field.options?.interface || '').trim().toLowerCase();
+    return NUMERIC_FIELD_TYPES.has(dataType) || NUMERIC_FIELD_INTERFACES.has(iface);
+  }
+  return false;
+}
+
+function extractBiFieldOptions(collectionMeta, { numericOnly = false } = {}) {
+  const fields = Array.isArray(collectionMeta?.fields) ? collectionMeta.fields : [];
+  const out = [];
+  const seen = new Set();
+  for (const f of fields) {
+    if (!f || typeof f !== 'object') continue;
+    const name = String(f.name || '').trim();
+    if (!name || BI_BLOCKED_KEYS.has(name) || name.startsWith('__') || name.startsWith('$') || name.includes('.') || seen.has(name)) {
+      continue;
+    }
+    if (BI_SENSITIVE_FIELD_RE.test(name)) continue;
+    const ftype = String(f.type || 'string').trim().toLowerCase();
+    if (BI_VIRTUAL_OR_ASSOC_TYPES.has(ftype)) continue;
+    if (numericOnly && !isNumericCollectionField(f)) continue;
+    seen.add(name);
+    const title = String(f.title || '').trim();
+    out.push({
+      value: name,
+      label: title && title !== name ? `${title} (${name})` : name,
+      type: f.type || 'string',
+    });
+  }
+  return out;
+}
+
+const STATUS_META_MAP = {
+  draft: { label: 'Bản nháp', bg: '#f1f5f9', color: '#334155', border: '#cbd5e1' },
+  submitted: { label: 'Đã gửi', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  hold_mkt: { label: 'Tạm giữ MKT', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  proposed: { label: 'Đề xuất AI', bg: '#eef2ff', color: '#4338ca', border: '#c7d2fe' },
+  manager_approval: { label: 'Chờ quản lý duyệt', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  synced: { label: 'Đã đồng bộ', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  open: { label: 'Đang mở', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  pending: { label: 'Chờ xử lý', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  critical: { label: 'Nghiêm trọng', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  high: { label: 'Cao', bg: '#ffedd5', color: '#9a3412', border: '#fdba74' },
+  medium: { label: 'Trung bình', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  low: { label: 'Thấp', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
+  approved: { label: 'Đã duyệt', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  rejected: { label: 'Từ chối', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  completed: { label: 'Hoàn tất', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  issued: { label: 'Đã xuất kho', bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc' },
+  in_progress: { label: 'Đang xử lý', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
+  cancelled: { label: 'Đã hủy', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  available: { label: 'Sẵn sàng', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  reserved: { label: 'Đã giữ chỗ', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  expired: { label: 'Hết hạn', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  reviewed: { label: 'Đã xem xét', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  pending_hitl: { label: 'Chờ duyệt HITL', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  dispatched: { label: 'Đã gửi lệnh', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  acked: { label: 'Đã xác nhận', bg: '#e0e7ff', color: '#3730a3', border: '#a5b4fc' },
+  failed: { label: 'Thất bại', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  active: { label: 'Đang hoạt động', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  inactive: { label: 'Ngừng hoạt động', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  acknowledged: { label: 'Đã tiếp nhận', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  closed: { label: 'Đã đóng', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  resolved: { label: 'Đã xử lý', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  ok: { label: 'Đạt chuẩn', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  online: { label: 'Trực tuyến', bg: '#dcfce7', color: '#166534', border: '#86efac' },
+  offline: { label: 'Ngoại tuyến', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
+  not_synced: { label: 'Chưa đồng bộ', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  unconfigured: { label: 'Chưa cấu hình', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
+  ready: { label: 'Sẵn sàng', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
+};
+
+function getStatusMeta(rawStatus, fallbackLabel = '') {
+  const key = String(rawStatus ?? '').trim().toLowerCase();
+  if (key && Object.hasOwn(STATUS_META_MAP, key)) {
+    return { value: key, ...STATUS_META_MAP[key] };
+  }
+  const cleanRaw = String(rawStatus ?? '').trim();
+  return {
+    value: key,
+    label: fallbackLabel || cleanRaw || 'Chưa xác định',
+    bg: '#f1f5f9',
+    color: '#334155',
+    border: '#cbd5e1',
+  };
+}
+
+function formatStatusLabel(rawStatus, fallbackLabel = '') {
+  return getStatusMeta(rawStatus, fallbackLabel).label;
+}
+
+function stripDevBracketTags(rawTitle) {
+  return String(rawTitle ?? '')
+    .replace(/\s*\[(?:D|P|W|H|I)\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
+function formatCompactIdentifier(rawVal, { prefixLen = 10, suffixLen = 6 } = {}) {
+  const text = String(rawVal ?? '').trim();
+  if (!text) return '—';
+  const urnMatch = /^urn:ngsi-ld:([A-Za-z0-9_-]+):([A-Za-z0-9_-]+):native:(\d+)$/.exec(text);
+  if (urnMatch) {
+    return `${urnMatch[1]}:${urnMatch[2]}:#${urnMatch[3]}`;
+  }
+  if (text.length <= prefixLen + suffixLen + 3) return text;
+  return `${text.slice(0, prefixLen)}…${text.slice(-suffixLen)}`;
+}
+
+function createCompactIdBadge(React, rawVal, { labelPrefix = '', testId = '', prefixLen = 10, suffixLen = 6 } = {}) {
+  if (!React?.createElement || !rawVal) return null;
+  const full = String(rawVal).trim();
+  if (!full) return null;
+  const h = React.createElement;
+  const shortText = formatCompactIdentifier(full, { prefixLen, suffixLen });
+  const canCopy = typeof navigator !== 'undefined' && typeof navigator?.clipboard?.writeText === 'function';
+  return h('span', {
+    ...(testId ? { 'data-testid': testId } : {}),
+    title: full,
+    style: {
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: 4,
+      maxWidth: '100%',
+      padding: '2px 7px',
+      borderRadius: 6,
+      border: '1px solid #cbd5e1',
+      background: '#f8fafc',
+      color: '#334155',
+      fontSize: 11,
+      fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+      verticalAlign: 'middle',
+      overflow: 'hidden',
+    },
+  },
+    labelPrefix ? h('span', { style: { fontWeight: 700, color: '#475569', flexShrink: 0 } }, `${labelPrefix}:`) : null,
+    h('span', { style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, shortText),
+    canCopy ? h('button', {
+      type: 'button',
+      title: `Sao chép ${full}`,
+      'aria-label': `Sao chép ${labelPrefix || 'mã định danh'}`,
+      onClick: (e) => {
+        e?.stopPropagation?.();
+        try { navigator.clipboard.writeText(full); } catch {}
+      },
+      style: {
+        border: 'none',
+        background: 'transparent',
+        color: '#0284c7',
+        fontSize: 10,
+        fontWeight: 700,
+        cursor: 'pointer',
+        padding: '0 2px',
+        flexShrink: 0,
+      },
+    }, 'Sao chép') : null,
+  );
+}
+
 module.exports = {
   SAFE_COLLECTION_RE,
+  CUSTOM_COLLECTION_RE,
+  STATUS_META_MAP,
+  getStatusMeta,
+  formatStatusLabel,
+  stripDevBracketTags,
+  formatCompactIdentifier,
+  createCompactIdBadge,
   isSafeAppPath,
   safeJsonParse,
   filterHeroActions,
@@ -306,9 +636,15 @@ module.exports = {
   fetchParaVault,
   fetchParaSummary,
   inferPortalSlugFromLocation,
-  fetchPortalCopilot,
-  triggerDxosCopilot,
-  createCopilotStripElement,
+  fetchPortalAgents,
+  triggerDxosAgent,
+  createAgentStripElement,
   triggerBase64Download,
   requestAndDownloadExport,
+  resolveClientAuthToken,
+  subscribeCollectionsMeta,
+  fetchCollectionsMeta,
+  inferCollectionFieldsMeta,
+  isNumericCollectionField,
+  extractBiFieldOptions,
 };

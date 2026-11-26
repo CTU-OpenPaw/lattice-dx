@@ -34,14 +34,22 @@ const ADMIN_TOOLS = [
   'dxos_deploy_workflow',
 ];
 
-test('collections & starter blueprints cover 5 customizable AI roles without hardcoded secrets', () => {
+test('collections & starter blueprints cover 7 customizable AI roles without hardcoded secrets', () => {
   assert.equal(aiProfiles.name, 'latticeAiProfiles');
   assert.equal(aiProfiles.uiManageable, true);
   assert.equal(aiAuditLogs.name, 'latticeAiAuditLogs');
   assert.equal(aiAuditLogs.uiManageable, false);
 
   const usernames = STARTER_AI_BLUEPRINTS.map((b) => b.username);
-  assert.deepEqual(usernames, ['dxos-coordinator', 'dxos-architect', 'dxos-ops', 'dxos-logistics', 'dxos-workspace']);
+  assert.deepEqual(usernames, [
+    'dxos-coordinator',
+    'dxos-architect',
+    'dxos-ops',
+    'dxos-logistics',
+    'dxos-workspace',
+    'dxos-operator',
+    'dxos-analyst',
+  ]);
   const architect = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-architect');
   assert.equal(architect.isAdminBuilder, true);
   assert.deepEqual(architect.allowedRoles, ['root', 'admin']);
@@ -192,4 +200,119 @@ test('validateMcpServerUrl blocks IPv6-mapped SSRF & arbitrary internal HTTP hos
   const cleaned = redactAuditText('Failed calling Bearer eyJhbGciOiJIUzI1NiJ9.eyJ1IjoxfQ.abc with sk-secretKey99');
   assert.equal(cleaned.includes('eyJhbGciOiJIUzI1NiJ9'), false);
   assert.equal(cleaned.includes('sk-secretKey99'), false);
+});
+
+test('validateMcpServerUrl blocks 127.0.0.0/8 outside LOOPBACK_HOSTS and IPv6-mapped SSRF while preserving LOOPBACK_HOSTS', () => {
+  const isSsrfBlocked = (err) => err && err.code === 'MCP_URL_SSRF_BLOCKED';
+  assert.throws(() => validateMcpServerUrl('http://127.0.0.2:8080/mcp'), isSsrfBlocked);
+  assert.throws(() => validateMcpServerUrl('https://127.0.0.2:8080/mcp'), isSsrfBlocked);
+  assert.throws(() => validateMcpServerUrl('http://127.0.0.0:8080/mcp'), isSsrfBlocked);
+  assert.throws(() => validateMcpServerUrl('http://[::ffff:169.254.169.254]/mcp'), isSsrfBlocked);
+
+  assert.equal(validateMcpServerUrl('http://127.0.0.1:8080/mcp'), 'http://127.0.0.1:8080/mcp');
+  assert.equal(validateMcpServerUrl('http://localhost:8080/mcp'), 'http://localhost:8080/mcp');
+  assert.equal(validateMcpServerUrl('http://[::1]:8080/mcp'), 'http://[::1]:8080/mcp');
+  assert.equal(validateMcpServerUrl('http://host.docker.internal:8080/mcp'), 'http://host.docker.internal:8080/mcp');
+});
+
+test('Task 3: ALL_LDX_ROLES and DEFAULT_ROLE_OPTIONS include unified ldx_* role set including ldx_operator', () => {
+  const { ALL_LDX_ROLES } = require('../src/server/ai-sync');
+  const { DEFAULT_ROLE_OPTIONS } = require('../src/client/ai-studio-page');
+  const expectedLdxRoles = [
+    'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_operator',
+    'ldx_warehouse', 'ldx_dispatcher', 'ldx_driver', 'ldx_employee',
+  ];
+  for (const r of expectedLdxRoles) {
+    assert.ok(ALL_LDX_ROLES.includes(r), `ALL_LDX_ROLES missing ${r}`);
+    assert.ok(Array.isArray(DEFAULT_ROLE_OPTIONS) && DEFAULT_ROLE_OPTIONS.includes(r), `DEFAULT_ROLE_OPTIONS missing ${r}`);
+  }
+  assert.ok(DEFAULT_ROLE_OPTIONS.includes('root'));
+  assert.ok(DEFAULT_ROLE_OPTIONS.includes('admin'));
+});
+
+test('Task 9: rebindStarterAgentsToService updates dxos-architect & unbound starters while preserving active bindings', async () => {
+  const { rebindStarterAgentsToService } = require('../src/server/ai-sync');
+  assert.equal(typeof rebindStarterAgentsToService, 'function', 'rebindStarterAgentsToService must be exported from ai-sync.js');
+
+  const profileRows = [
+    { username: 'dxos-architect', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash', isAdminBuilder: true },
+    { username: 'dxos-coordinator', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash', isAdminBuilder: false },
+    { username: 'dxos-ops', llmService: 'active-anthropic', modelName: 'claude-3-5-sonnet-latest', isAdminBuilder: false },
+    { username: 'dxos-logistics', llmService: 'disabled-svc', modelName: 'old-model', isAdminBuilder: false },
+    { username: 'custom-dept-ai', llmService: 'local-9router', modelName: 'ag/gemini-3.8-flash', isAdminBuilder: false },
+  ];
+  const empRows = profileRows.map((p) => ({
+    username: p.username,
+    modelSettings: { enabled: true, models: [{ llmService: p.llmService, model: p.modelName }] },
+  }));
+  const llmRows = [
+    { name: 'active-anthropic', provider: 'anthropic', enabled: true },
+    { name: 'disabled-svc', provider: 'openai', enabled: false },
+    { name: 'quick-openai', provider: 'openai', enabled: true },
+  ];
+
+  const wrap = (row) => ({
+    ...row,
+    get: (k) => row[k],
+    set: (k, v) => { row[k] = v; },
+    async update(values = {}) { Object.assign(row, values); return this; },
+  });
+  const match = (row, filter = {}) => Object.entries(filter).every(([k, cond]) => (
+    cond && typeof cond === 'object' && '$in' in cond ? cond.$in.includes(row[k]) : String(row[k]) === String(cond)
+  ));
+
+  const fakeDb = {
+    sequelize: { transaction: async (fn) => fn({}) },
+    getRepository(name) {
+      const map = { latticeAiProfiles: profileRows, aiEmployees: empRows, llmServices: llmRows };
+      const arr = map[name];
+      if (!arr) return null;
+      return {
+        find: async ({ filter = {}, limit } = {}) => {
+          const hit = arr.filter((r) => match(r, filter));
+          return (limit ? hit.slice(0, limit) : hit).map(wrap);
+        },
+        findOne: async ({ filter = {} } = {}) => {
+          const hit = arr.find((r) => match(r, filter));
+          return hit ? wrap(hit) : null;
+        },
+      };
+    },
+  };
+
+  // 1. With preserveActiveArchitect: true (afterSave mode), if dxos-architect points to missing local-9router, it gets rebound;
+  // dxos-ops (active-anthropic) is preserved; custom-dept-ai (non-starter) is untouched.
+  const res1 = await rebindStarterAgentsToService(fakeDb, {
+    llmService: 'quick-openai',
+    modelName: 'gpt-4o',
+    preserveActiveArchitect: true,
+  });
+  assert.deepEqual(res1.reboundAgents.sort(), ['dxos-architect', 'dxos-coordinator', 'dxos-logistics']);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').llmService, 'quick-openai');
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').modelName, 'gpt-4o');
+  assert.deepEqual(empRows.find((r) => r.username === 'dxos-architect').modelSettings.models, [
+    { llmService: 'quick-openai', model: 'gpt-4o' },
+  ]);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-ops').llmService, 'active-anthropic');
+  assert.equal(profileRows.find((r) => r.username === 'custom-dept-ai').llmService, 'local-9router');
+
+  // 2. With preserveActiveArchitect: true when dxos-architect already points to active quick-openai, saving secondary service preserves dxos-architect
+  llmRows.push({ name: 'backup-ollama', provider: 'ollama', enabled: true });
+  const res2 = await rebindStarterAgentsToService(fakeDb, {
+    llmService: 'backup-ollama',
+    modelName: 'llama3.1',
+    preserveActiveArchitect: true,
+  });
+  assert.deepEqual(res2.reboundAgents, []);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').llmService, 'quick-openai');
+
+  // 3. Explicit mode (preserveActiveArchitect: false, default) binds dxos-architect even when its service is active
+  const res3 = await rebindStarterAgentsToService(fakeDb, {
+    llmService: 'backup-ollama',
+    modelName: 'llama3.1',
+  });
+  assert.deepEqual(res3.reboundAgents, ['dxos-architect']);
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').llmService, 'backup-ollama');
+  assert.equal(profileRows.find((r) => r.username === 'dxos-architect').modelName, 'llama3.1');
+  assert.equal(profileRows.find((r) => r.username === 'dxos-ops').llmService, 'active-anthropic');
 });

@@ -1,6 +1,6 @@
 # Enterprise Login
 
-NocoBase 2.2.38 SDK extension: Keycloak authorization code + PKCE, explicit native user mapping and native sessions. No account/role creation at login. No upstream commercial plugin code included.
+NocoBase 2.2.50 SDK extension: Keycloak authorization code + PKCE, explicit native user mapping and native sessions. No account/role creation at login. No upstream commercial plugin code included.
 
 Deployment: DX_NATIVE_AUTH_ISSUER, DX_NATIVE_AUTH_ORIGIN, DX_NATIVE_AUTH_CLIENT_ID; optional DX_NATIVE_AUTH_INTERNAL_ISSUER only for the local Docker Keycloak fixture. Public client, exact redirect URI `<origin>/api/enterpriseAuth:callback` and PKCE S256 required. HTTPS outside loopback.
 

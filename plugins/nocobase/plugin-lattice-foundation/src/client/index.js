@@ -43,11 +43,48 @@
     }, [controller]);
     return {...state, submit, transition: controller.transition};
   }
+  function resolveLegacyTrackRedirect(winLike) {
+    if (!winLike || winLike.__nocobase_app_client_entry_mode__ !== 'legacy-default') return null;
+    const loc = winLike.location;
+    if (!loc) return null;
+    const pathname = String(loc.pathname || '');
+    if (!pathname || pathname === '/mobile' || pathname.startsWith('/mobile/') || pathname.startsWith('/v/')) {
+      return null;
+    }
+    if (pathname === '/track' || pathname.startsWith('/track/')) {
+      return `/v${pathname}${loc.search || ''}${loc.hash || ''}`;
+    }
+    return null;
+  }
+  function resolveLegacyFormRedirect(winLike) {
+    if (!winLike || winLike.__nocobase_app_client_entry_mode__ !== 'legacy-default') return null;
+    const loc = winLike.location;
+    if (!loc) return null;
+    const pathname = String(loc.pathname || '');
+    if (!pathname || pathname === '/mobile' || pathname.startsWith('/mobile/') || pathname.startsWith('/v/')) {
+      return null;
+    }
+    if (pathname === '/form' || pathname.startsWith('/form/')) {
+      return `/v${pathname}${loc.search || ''}${loc.hash || ''}`;
+    }
+    return null;
+  }
+
   class LatticeFoundationClient extends client.Plugin {
     async load() {
       const mobileV2Dest = resolveLegacyMobileRedirect(typeof window !== 'undefined' ? window : null, this.app);
       if (mobileV2Dest && typeof window?.location?.replace === 'function') {
         window.location.replace(mobileV2Dest);
+        return;
+      }
+      const trackV2Dest = resolveLegacyTrackRedirect(typeof window !== 'undefined' ? window : null);
+      if (trackV2Dest && typeof window?.location?.replace === 'function') {
+        window.location.replace(trackV2Dest);
+        return;
+      }
+      const formV2Dest = resolveLegacyFormRedirect(typeof window !== 'undefined' ? window : null);
+      if (formV2Dest && typeof window?.location?.replace === 'function') {
+        window.location.replace(formV2Dest);
         return;
       }
       const BrandLogo=createBrandLogo(client,React);
@@ -56,7 +93,7 @@
       await portalManager?.preloadPortals?.();
       const BuilderAdminLayout=createNativeBuilderNavigation(client,React,antd,this.app,{clientV2,router,flow,BrandLogo,portalManager});
       if (BuilderAdminLayout) this.app.addComponents({AdminLayout:BuilderAdminLayout});
-      const NotificationBellProvider=createNotificationBellProvider(client,React,antd,this.app);
+      const NotificationBellProvider=createNotificationBellProvider(client,React,antd,this.app,{hasTopbar:Boolean(portalManager?.hasTopbarNotificationBell)});
       if (NotificationBellProvider && typeof this.app.use === 'function') {
         this.app.use(NotificationBellProvider);
       }
@@ -167,6 +204,26 @@
         };
         this.app.router.add('lattice-mobile-v2', { path: '/mobile', Component: MobileV2Redirect });
         this.app.router.add('lattice-mobile-v2-sub', { path: '/mobile/*', Component: MobileV2Redirect });
+      }
+      if (typeof window !== 'undefined' && window.__nocobase_app_client_entry_mode__ === 'legacy-default' && typeof this.app.router?.add === 'function') {
+        const TrackV2Redirect = () => {
+          React.useEffect(() => {
+            const dest = resolveLegacyTrackRedirect(window);
+            if (dest && typeof window?.location?.replace === 'function') window.location.replace(dest);
+          }, []);
+          return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Trang Tra cứu Vận đơn...');
+        };
+        this.app.router.add('lattice-track-v2', { path: '/track/:code', Component: TrackV2Redirect, skipAuthCheck: true });
+        this.app.router.add('lattice-track-v2-root', { path: '/track', Component: TrackV2Redirect, skipAuthCheck: true });
+        const FormV2Redirect = () => {
+          React.useEffect(() => {
+            const dest = resolveLegacyFormRedirect(window);
+            if (dest && typeof window?.location?.replace === 'function') window.location.replace(dest);
+          }, []);
+          return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Biểu mẫu Công khai...');
+        };
+        this.app.router.add('lattice-form-v2', { path: '/form/:slug', Component: FormV2Redirect, skipAuthCheck: true });
+        this.app.router.add('lattice-form-v2-root', { path: '/form', Component: FormV2Redirect, skipAuthCheck: true });
       }
       if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {
         const canonical = new URL(window.location.href);canonical.hostname='localhost';

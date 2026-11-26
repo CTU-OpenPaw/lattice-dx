@@ -8,7 +8,54 @@
  */
 'use strict';
 
+const path = require('node:path');
+
 const SENSITIVE_KEY_RE = /token|secret|password|apikey|api_key|authorization|cookie|credential|jwt|bearer|privatekey|private_key|sessionid|session_id|passphrase|access_key|client_secret/i;
+const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+
+function loadFoundationPgRls() {
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
+        '../../../plugin-lattice-foundation/dist/server/pg-rls',
+        '../../../plugin-lattice-foundation/src/server/pg-rls',
+      ]
+    : [
+        '@latticedx/plugin-lattice-foundation/src/server/pg-rls',
+        '../../../plugin-lattice-foundation/src/server/pg-rls',
+        '@latticedx/plugin-lattice-foundation/dist/server/pg-rls',
+        '../../../plugin-lattice-foundation/dist/server/pg-rls',
+      ];
+  for (const modPath of candidates) {
+    try {
+      const mod = require(modPath);
+      if (mod && typeof mod.withTenantRlsContext === 'function') return mod;
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
+    }
+  }
+  return null;
+}
+
+async function runInOptionalTenantRls(db, orgId, fn) {
+  const pgRls = loadFoundationPgRls();
+  if (
+    pgRls
+    && typeof pgRls.canUsePgRlsSession === 'function'
+    && pgRls.canUsePgRlsSession(db)
+    && !pgRls.getActiveRlsContext?.()?.transaction
+    && ORG_ID_RE.test(String(orgId || ''))
+    && typeof pgRls.withTenantRlsContext === 'function'
+  ) {
+    return pgRls.withTenantRlsContext(db, String(orgId), fn);
+  }
+  return fn(null);
+}
+const SECRET_KV_RE = /((?:\\?["'])?(?:[a-zA-Z0-9_]*(?:secret|password|apikey|api_key|jwt|private_?key|client_secret|access_key|passphrase|credential|authorization|cookie)[a-zA-Z0-9_]*|[a-zA-Z0-9_]*(?:token|session_?id))(?:\\?["'])?\s*[:=]\s*)(?!\\?["']?\[REDACTED(?:_[A-Z]+)?\])(\\"(?:[^"\\]|\\[^"])+\\"|"(?:[^"\\]|\\.)+"|'(?:[^'\\]|\\.)+'|[^\s,;}"'&]+)/gi;
 
 const DEFAULT_PRICING_USD_PER_1M = { input: 0.35, output: 1.05 };
 const MODEL_PRICING_USD_PER_1M = {
@@ -48,6 +95,18 @@ function replaceCounted(text, regex, replacement) {
   return { text: next, hits };
 }
 
+function replaceSecretKvPairs(rawText) {
+  let hits = 0;
+  const text = String(rawText ?? '').replace(SECRET_KV_RE, (_full, prefix, valPart) => {
+    hits += 1;
+    if (valPart.startsWith('\\"')) return `${prefix}\\"[REDACTED]\\"`;
+    if (valPart.startsWith('"')) return `${prefix}"[REDACTED]"`;
+    if (valPart.startsWith("'")) return `${prefix}'[REDACTED]'`;
+    return `${prefix}[REDACTED]`;
+  });
+  return { text, hits };
+}
+
 function redactPiiText(rawText) {
   let text = String(rawText ?? '');
   if (!text) return { text, count: 0 };
@@ -56,7 +115,6 @@ function redactPiiText(rawText) {
     [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]'],
     [/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]'],
     [/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]'],
-    [/([a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)\s*[:=]\s*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]'],
     [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]'],
     [/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]'],
     [/(?<![0-9A-Za-z-])0\d{11}(?![0-9A-Za-z-])/g, '[REDACTED_CCCD]'],
@@ -64,7 +122,13 @@ function redactPiiText(rawText) {
     [/(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)[A-Z0-9 -]{8,24}(?=\s*[,;.\n]|$)/gi, '$1[REDACTED_BANK]'],
     [/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]'],
   ];
-  for (const [regex, replacement] of rules) {
+  for (let i = 0; i < rules.length; i += 1) {
+    if (i === 3) {
+      const kv = replaceSecretKvPairs(text);
+      text = kv.text;
+      count += kv.hits;
+    }
+    const [regex, replacement] = rules[i];
     const res = replaceCounted(text, regex, replacement);
     text = res.text;
     count += res.hits;
@@ -111,10 +175,68 @@ function redactPiiDeep(value, depth = 0) {
   return { value: String(value), count: 0 };
 }
 
+function redactPiiForLlm(input) {
+  let redactedCount = 0;
+  function walk(node, depth = 0) {
+    if (depth > 16) return '[TRUNCATED]';
+    if (node == null || typeof node === 'number' || typeof node === 'boolean') return node;
+    if (typeof node === 'string') {
+      const res = redactPiiText(node);
+      redactedCount += Number(res?.count) || 0;
+      return res?.text ?? node;
+    }
+    if (Array.isArray(node)) return node.map((item) => walk(item, depth + 1));
+    if (typeof node === 'object') {
+      const out = {};
+      for (const [k, v] of Object.entries(node)) {
+        if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+        if (SENSITIVE_KEY_RE.test(k)) {
+          out[k] = '[REDACTED]';
+          redactedCount += 1;
+        } else {
+          out[k] = walk(v, depth + 1);
+        }
+      }
+      return out;
+    }
+    return String(node);
+  }
+  return { redacted: walk(input, 0), redactedCount };
+}
+
 function estimateTokens(input) {
   const str = typeof input === 'string' ? input : JSON.stringify(input ?? '');
   if (!str) return 1;
   return Math.max(1, Math.ceil(str.length / 3.2));
+}
+
+function normalizeTokenUsage(metrics = {}, fallbackPrompt = 0, fallbackCompletion = 0) {
+  const rawUsage = metrics?.usage && typeof metrics.usage === 'object' ? metrics.usage : null;
+  const rawPrompt = rawUsage?.promptTokens ?? rawUsage?.prompt_tokens ?? rawUsage?.input_tokens;
+  const rawCompletion = rawUsage?.completionTokens ?? rawUsage?.completion_tokens ?? rawUsage?.output_tokens;
+  const rawTotal = rawUsage?.totalTokens ?? rawUsage?.total_tokens;
+  const hasProviderFields = Boolean(
+    rawUsage
+    && (
+      Number.isFinite(Number(rawPrompt))
+      || Number.isFinite(Number(rawCompletion))
+      || Number.isFinite(Number(rawTotal))
+    ),
+  );
+  const explicitSource = String(metrics?.tokenSource || rawUsage?.tokenSource || '').trim().toLowerCase();
+  const tokenSource = explicitSource === 'provider' || explicitSource === 'estimated'
+    ? explicitSource
+    : (hasProviderFields ? 'provider' : 'estimated');
+
+  const pSrc = hasProviderFields ? (rawPrompt ?? 0) : (metrics?.promptTokens ?? fallbackPrompt);
+  const cSrc = hasProviderFields ? (rawCompletion ?? 0) : (metrics?.completionTokens ?? fallbackCompletion);
+  const promptTokens = nonNegInt(pSrc);
+  const completionTokens = nonNegInt(cSrc);
+  const tSrc = hasProviderFields ? rawTotal : metrics?.totalTokens;
+  const totalTokens = tSrc != null && Number.isFinite(Number(tSrc))
+    ? Math.max(promptTokens + completionTokens, nonNegInt(tSrc))
+    : (promptTokens + completionTokens);
+  return { promptTokens, completionTokens, totalTokens, tokenSource };
 }
 
 function resolveModelPricing(modelName = '', env = process.env) {
@@ -186,6 +308,11 @@ function getOrCreateOrgBucket(organizationId, now = new Date()) {
       promptTokens: 0,
       completionTokens: 0,
       tokens: 0,
+      providerTokens: 0,
+      estimatedTokens: 0,
+      providerCalls: 0,
+      estimatedCalls: 0,
+      lastTokenSource: 'estimated',
       costUsd: 0,
       piiRedacted: 0,
       hydrated: false,
@@ -225,33 +352,56 @@ function checkAndConsumeAiQuota(actor = {}, { estimatedPromptTokens = 0, env = p
   return { organizationId: bucket.organizationId, day: bucket.day, limits };
 }
 
-function recordQuotaUsage(actor = {}, { promptTokens = 0, completionTokens = 0, costUsd = 0, piiRedactedCount = 0 } = {}, now = new Date()) {
+function recordQuotaUsage(actor = {}, metrics = {}, now = new Date()) {
   const bucket = getOrCreateOrgBucket(actor.organizationId, now);
   const userKey = String(actor.userId || actor.username || 'anon');
-  const userEntry = bucket.byUser.get(userKey) || { calls: 0, tokens: 0, promptTokens: 0, completionTokens: 0, costUsd: 0, piiRedacted: 0 };
-  const pTok = nonNegInt(promptTokens);
-  const cTok = nonNegInt(completionTokens);
-  const totalTok = pTok + cTok;
-  const deltaCost = Math.max(0, Number(costUsd) || 0);
-  const deltaPii = nonNegInt(piiRedactedCount);
+  const userEntry = bucket.byUser.get(userKey) || {
+    calls: 0, tokens: 0, promptTokens: 0, completionTokens: 0,
+    providerTokens: 0, estimatedTokens: 0, providerCalls: 0, estimatedCalls: 0,
+    costUsd: 0, piiRedacted: 0,
+  };
+  const { promptTokens: pTok, completionTokens: cTok, totalTokens: totalTok, tokenSource } = normalizeTokenUsage(metrics);
+  const deltaCost = Math.max(0, Number(metrics?.costUsd) || 0);
+  const deltaPii = nonNegInt(metrics?.piiRedactedCount ?? metrics?.piiRedacted);
   bucket.calls += 1;
   bucket.promptTokens = (bucket.promptTokens || 0) + pTok;
   bucket.completionTokens = (bucket.completionTokens || 0) + cTok;
   bucket.tokens += totalTok;
+  if (tokenSource === 'provider') {
+    bucket.providerTokens = (bucket.providerTokens || 0) + totalTok;
+    bucket.providerCalls = (bucket.providerCalls || 0) + 1;
+  } else {
+    bucket.estimatedTokens = (bucket.estimatedTokens || 0) + totalTok;
+    bucket.estimatedCalls = (bucket.estimatedCalls || 0) + 1;
+  }
+  bucket.lastTokenSource = tokenSource;
   bucket.costUsd = Number((bucket.costUsd + deltaCost).toFixed(6));
   bucket.piiRedacted += deltaPii;
   userEntry.calls += 1;
   userEntry.promptTokens = (userEntry.promptTokens || 0) + pTok;
   userEntry.completionTokens = (userEntry.completionTokens || 0) + cTok;
   userEntry.tokens += totalTok;
+  if (tokenSource === 'provider') {
+    userEntry.providerTokens = (userEntry.providerTokens || 0) + totalTok;
+    userEntry.providerCalls = (userEntry.providerCalls || 0) + 1;
+  } else {
+    userEntry.estimatedTokens = (userEntry.estimatedTokens || 0) + totalTok;
+    userEntry.estimatedCalls = (userEntry.estimatedCalls || 0) + 1;
+  }
   userEntry.costUsd = Number(((userEntry.costUsd || 0) + deltaCost).toFixed(6));
   userEntry.piiRedacted = (userEntry.piiRedacted || 0) + deltaPii;
   bucket.byUser.set(userKey, userEntry);
   return {
     calls: bucket.calls,
     tokens: bucket.tokens,
+    totalTokens: bucket.tokens,
     promptTokens: bucket.promptTokens,
     completionTokens: bucket.completionTokens,
+    tokenSource,
+    providerTokens: bucket.providerTokens || 0,
+    estimatedTokens: bucket.estimatedTokens || 0,
+    providerCalls: bucket.providerCalls || 0,
+    estimatedCalls: bucket.estimatedCalls || 0,
     costUsd: bucket.costUsd,
     piiRedacted: bucket.piiRedacted,
   };
@@ -303,17 +453,18 @@ function applyAggregatedRowsToBucket(bucket, rows) {
   return false;
 }
 
-async function loadQuotaBucketRows(db, org, day) {
+async function loadQuotaBucketRows(db, org, day, transaction = null) {
+  const txOpt = transaction ? { transaction } : {};
   const quotaRepo = db?.getRepository?.('latticeAiQuotaUsage');
   if (quotaRepo && typeof quotaRepo.find === 'function') {
-    const rows = await quotaRepo.find({ filter: { organizationId: org, dayKey: day }, limit: 1000 });
+    const rows = await quotaRepo.find({ filter: { organizationId: org, dayKey: day }, limit: 1000, ...txOpt });
     if (Array.isArray(rows) && rows.length) return rows;
   }
   if (typeof db?.sequelize?.query === 'function') {
     try {
       const [sqlRows] = await db.sequelize.query(
         'SELECT "userId", calls, "promptTokens", "completionTokens", "costUsd", "piiRedacted" FROM "latticeAiQuotaUsage" WHERE "organizationId" = :organizationId AND "dayKey" = :dayKey;',
-        { replacements: { organizationId: org, dayKey: day } },
+        { replacements: { organizationId: org, dayKey: day }, ...txOpt },
       );
       if (Array.isArray(sqlRows) && sqlRows.length) return sqlRows;
     } catch {
@@ -323,7 +474,8 @@ async function loadQuotaBucketRows(db, org, day) {
   return [];
 }
 
-async function loadSameDayAuditFallbackRows(db, org, day) {
+async function loadSameDayAuditFallbackRows(db, org, day, transaction = null) {
+  const txOpt = transaction ? { transaction } : {};
   if (typeof db?.sequelize?.query === 'function') {
     try {
       const dayStart = new Date(`${day}T00:00:00.000Z`);
@@ -343,7 +495,7 @@ async function loadSameDayAuditFallbackRows(db, org, day) {
            AND "createdAt" >= :dayStart
            AND "createdAt" < :dayEnd
          GROUP BY 1;`,
-        { replacements: { organizationId: org, dayStart, dayEnd } },
+        { replacements: { organizationId: org, dayStart, dayEnd }, ...txOpt },
       );
       if (Array.isArray(sqlRows) && sqlRows.length) return sqlRows;
     } catch {
@@ -352,7 +504,7 @@ async function loadSameDayAuditFallbackRows(db, org, day) {
   }
   const auditRepo = db?.getRepository?.('latticeAiAuditLogs');
   if (!auditRepo || typeof auditRepo.find !== 'function') return [];
-  const logs = (await auditRepo.find({ filter: { organizationId: org }, sort: ['-id'], limit: 2000 })) || [];
+  const logs = (await auditRepo.find({ filter: { organizationId: org }, sort: ['-id'], limit: 2000, ...txOpt })) || [];
   const perUser = new Map();
   for (const row of logs) {
     const status = String(readVal(row, 'status') || '').toLowerCase();
@@ -405,8 +557,9 @@ function mergeQuotaAndAuditRows(quotaRows = [], auditRows = []) {
   return [...byUser.values()];
 }
 
-async function backfillMissingQuotaRows(db, org, day, quotaRows, auditRows) {
+async function backfillMissingQuotaRows(db, org, day, quotaRows, auditRows, transaction = null) {
   if (typeof db?.sequelize?.query !== 'function' || !auditRows.length) return;
+  const txOpt = transaction ? { transaction } : {};
   const existingUsers = new Set(quotaRows.map((r) => String(readVal(r, 'userId') || 'anon')));
   for (const row of auditRows) {
     const userId = String(readVal(row, 'userId') || 'anon');
@@ -427,6 +580,7 @@ async function backfillMissingQuotaRows(db, org, day, quotaRows, auditRows) {
             costUsd: Math.max(0, Number(readVal(row, 'costUsd')) || 0),
             piiRedacted: nonNegInt(readVal(row, 'piiRedacted')),
           },
+          ...txOpt,
         },
       );
     } catch {
@@ -439,18 +593,20 @@ async function hydrateQuotaBucketFromDb(db, organizationId, now = new Date()) {
   const bucket = getOrCreateOrgBucket(organizationId, now);
   if (!db) return bucket;
   try {
-    const quotaRows = await loadQuotaBucketRows(db, bucket.organizationId, bucket.day);
-    if (!bucket.hydrated) {
-      const auditRows = await loadSameDayAuditFallbackRows(db, bucket.organizationId, bucket.day);
-      const mergedRows = mergeQuotaAndAuditRows(quotaRows, auditRows);
-      if (mergedRows.length) applyAggregatedRowsToBucket(bucket, mergedRows);
-      await backfillMissingQuotaRows(db, bucket.organizationId, bucket.day, quotaRows, auditRows);
-      bucket.hydrated = true;
-      return bucket;
-    }
-    if (quotaRows.length) {
-      applyAggregatedRowsToBucket(bucket, quotaRows);
-    }
+    await runInOptionalTenantRls(db, bucket.organizationId, async (transaction) => {
+      const quotaRows = await loadQuotaBucketRows(db, bucket.organizationId, bucket.day, transaction);
+      if (!bucket.hydrated) {
+        const auditRows = await loadSameDayAuditFallbackRows(db, bucket.organizationId, bucket.day, transaction);
+        const mergedRows = mergeQuotaAndAuditRows(quotaRows, auditRows);
+        if (mergedRows.length) applyAggregatedRowsToBucket(bucket, mergedRows);
+        await backfillMissingQuotaRows(db, bucket.organizationId, bucket.day, quotaRows, auditRows, transaction);
+        bucket.hydrated = true;
+        return;
+      }
+      if (quotaRows.length) {
+        applyAggregatedRowsToBucket(bucket, quotaRows);
+      }
+    });
   } catch {
     // Non-fatal in minimal mock harnesses
   }
@@ -463,72 +619,76 @@ async function recordQuotaUsagePersistent(db, actor = {}, metrics = {}, now = ne
   const org = String(actor.organizationId || 'default').trim() || 'default';
   const day = utcDayKey(now);
   const userKey = String(actor.userId || actor.username || 'anon');
-  const pTok = nonNegInt(metrics.promptTokens);
-  const cTok = nonNegInt(metrics.completionTokens);
+  const { promptTokens: pTok, completionTokens: cTok } = normalizeTokenUsage(metrics);
   const costUsd = Math.max(0, Number(metrics.costUsd) || 0);
   const piiRedacted = nonNegInt(metrics.piiRedactedCount ?? metrics.piiRedacted);
 
-  if (typeof db?.sequelize?.query === 'function') {
-    try {
-      await db.sequelize.query(
-        `INSERT INTO "latticeAiQuotaUsage" ("createdAt", "updatedAt", "organizationId", "dayKey", "userId", calls, "promptTokens", "completionTokens", "costUsd", "piiRedacted")
-         VALUES (NOW(), NOW(), :organizationId, :dayKey, :userId, 1, :promptTokens, :completionTokens, :costUsd, :piiRedacted)
-         ON CONFLICT ("organizationId", "dayKey", "userId")
-         DO UPDATE SET
-           "updatedAt" = NOW(),
-           calls = "latticeAiQuotaUsage".calls + 1,
-           "promptTokens" = "latticeAiQuotaUsage"."promptTokens" + EXCLUDED."promptTokens",
-           "completionTokens" = "latticeAiQuotaUsage"."completionTokens" + EXCLUDED."completionTokens",
-           "costUsd" = "latticeAiQuotaUsage"."costUsd" + EXCLUDED."costUsd",
-           "piiRedacted" = "latticeAiQuotaUsage"."piiRedacted" + EXCLUDED."piiRedacted";`,
-        {
-          replacements: {
-            organizationId: org,
-            dayKey: day,
-            userId: userKey,
-            promptTokens: pTok,
-            completionTokens: cTok,
-            costUsd,
-            piiRedacted,
+  await runInOptionalTenantRls(db, org, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    if (typeof db?.sequelize?.query === 'function') {
+      try {
+        await db.sequelize.query(
+          `INSERT INTO "latticeAiQuotaUsage" ("createdAt", "updatedAt", "organizationId", "dayKey", "userId", calls, "promptTokens", "completionTokens", "costUsd", "piiRedacted")
+           VALUES (NOW(), NOW(), :organizationId, :dayKey, :userId, 1, :promptTokens, :completionTokens, :costUsd, :piiRedacted)
+           ON CONFLICT ("organizationId", "dayKey", "userId")
+           DO UPDATE SET
+             "updatedAt" = NOW(),
+             calls = "latticeAiQuotaUsage".calls + 1,
+             "promptTokens" = "latticeAiQuotaUsage"."promptTokens" + EXCLUDED."promptTokens",
+             "completionTokens" = "latticeAiQuotaUsage"."completionTokens" + EXCLUDED."completionTokens",
+             "costUsd" = "latticeAiQuotaUsage"."costUsd" + EXCLUDED."costUsd",
+             "piiRedacted" = "latticeAiQuotaUsage"."piiRedacted" + EXCLUDED."piiRedacted";`,
+          {
+            replacements: {
+              organizationId: org,
+              dayKey: day,
+              userId: userKey,
+              promptTokens: pTok,
+              completionTokens: cTok,
+              costUsd,
+              piiRedacted,
+            },
+            ...txOpt,
           },
-        },
-      );
-      return mem;
-    } catch {
-      // Fall through to repository fallback
-    }
-  }
-
-  const repo = db?.getRepository?.('latticeAiQuotaUsage');
-  if (repo && typeof repo.findOne === 'function') {
-    try {
-      const existing = await repo.findOne({ filter: { organizationId: org, dayKey: day, userId: userKey } });
-      if (existing && typeof existing.update === 'function') {
-        await existing.update({
-          calls: (Number(readVal(existing, 'calls')) || 0) + 1,
-          promptTokens: (Number(readVal(existing, 'promptTokens')) || 0) + pTok,
-          completionTokens: (Number(readVal(existing, 'completionTokens')) || 0) + cTok,
-          costUsd: Number(((Number(readVal(existing, 'costUsd')) || 0) + costUsd).toFixed(6)),
-          piiRedacted: (Number(readVal(existing, 'piiRedacted')) || 0) + piiRedacted,
-        });
-      } else if (typeof repo.create === 'function') {
-        await repo.create({
-          values: {
-            organizationId: org,
-            dayKey: day,
-            userId: userKey,
-            calls: 1,
-            promptTokens: pTok,
-            completionTokens: cTok,
-            costUsd: Number(costUsd.toFixed(6)),
-            piiRedacted,
-          },
-        });
+        );
+        return;
+      } catch {
+        // Fall through to repository fallback
       }
-    } catch {
-      // Best-effort DB write; in-memory bucket already updated
     }
-  }
+
+    const repo = db?.getRepository?.('latticeAiQuotaUsage');
+    if (repo && typeof repo.findOne === 'function') {
+      try {
+        const existing = await repo.findOne({ filter: { organizationId: org, dayKey: day, userId: userKey }, ...txOpt });
+        if (existing && typeof existing.update === 'function') {
+          await existing.update({
+            calls: (Number(readVal(existing, 'calls')) || 0) + 1,
+            promptTokens: (Number(readVal(existing, 'promptTokens')) || 0) + pTok,
+            completionTokens: (Number(readVal(existing, 'completionTokens')) || 0) + cTok,
+            costUsd: Number(((Number(readVal(existing, 'costUsd')) || 0) + costUsd).toFixed(6)),
+            piiRedacted: (Number(readVal(existing, 'piiRedacted')) || 0) + piiRedacted,
+          }, txOpt);
+        } else if (typeof repo.create === 'function') {
+          await repo.create({
+            values: {
+              organizationId: org,
+              dayKey: day,
+              userId: userKey,
+              calls: 1,
+              promptTokens: pTok,
+              completionTokens: cTok,
+              costUsd: Number(costUsd.toFixed(6)),
+              piiRedacted,
+            },
+            ...txOpt,
+          });
+        }
+      } catch {
+        // Best-effort DB write; in-memory bucket already updated
+      }
+    }
+  });
   return mem;
 }
 
@@ -542,8 +702,14 @@ function getQuotaSummary(organizationId, env = process.env, now = new Date()) {
     usage: {
       calls: bucket.calls,
       tokens: bucket.tokens,
+      totalTokens: bucket.tokens,
       promptTokens: bucket.promptTokens || 0,
       completionTokens: bucket.completionTokens || 0,
+      providerTokens: bucket.providerTokens || 0,
+      estimatedTokens: bucket.estimatedTokens || 0,
+      providerCalls: bucket.providerCalls || 0,
+      estimatedCalls: bucket.estimatedCalls || 0,
+      tokenSource: (bucket.providerCalls || 0) > 0 ? 'provider' : 'estimated',
       costUsd: bucket.costUsd,
       piiRedacted: bucket.piiRedacted,
       activeUsers: bucket.byUser.size,
@@ -563,10 +729,13 @@ function resetQuotaBuckets() {
 module.exports = {
   MODEL_PRICING_USD_PER_1M,
   utcDayKey,
+  replaceSecretKvPairs,
   redactPiiText,
   redactPiiString,
   redactPiiDeep,
+  redactPiiForLlm,
   estimateTokens,
+  normalizeTokenUsage,
   estimateCostUsd,
   getQuotaLimits,
   checkAndConsumeAiQuota,

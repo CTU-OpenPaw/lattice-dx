@@ -20,10 +20,23 @@ function norm(input) {
   return stripDiacritics(input).toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+const GRAPH_IMPACT_RE = /(phan\s+tich\s+anh\s+huong|truy\s+vet\s+(?:pha\s+he|nguon\s+goc|day\s+chuyen|anh\s+huong|tac\s+dong|lo\s+hang|don\s+hang)|tac\s+dong\s+(?:day\s+chuyen|lien\s+hoan|ha\s+nguon|thuong\s+nguon)|(?:nhung|cac)\s+(?:lo|don\s+hang|thiet\s+bi|su\s+co|epod)[^.?]{0,30}bi\s+anh\s+huong|neu\s+(?:kho\s+lanh|buong\s+lanh|thiet\s+bi|lo\s+hang|may\s+nen|xe\s+lanh)[^.?]{0,50}(?:hong|su\s+co|qua\s+nhiet|mat\s+dien)[^.?]{0,50}(?:anh\s+huong|lien\s+quan|lo|don)|anh\s+huong\s+day\s+chuyen|impact\s+analysis|graphrag)/;
+
+function extractNegativeVietnameseNumber(utterance) {
+  const rawLow = String(utterance || '').normalize('NFC').toLowerCase().replace(/\s+/g, ' ').trim();
+  const explicitNeg = rawLow.match(/(?:(?<![\p{L}\p{N}_])(?:âm|trừ)\s+|(?<![a-z0-9])-\s*)(\d+(?:\.\d+)?)\s*(?:độ|°\s*c|°|c)?(?=\s|$|[,.;%)°]|độ)/iu);
+  if (explicitNeg) return -Number(explicitNeg[1]);
+  const masked = rawLow.replace(/(?<![\p{L}\p{N}_])độ\s+ẩm(?![\p{L}\p{N}_])/giu, 'do_am');
+  const nForNeg = norm(masked);
+  const asciiNeg = nForNeg.match(/(?:(?<!(?<!\bnhiet\s)\bdo\s)\bam\s+|\btru\s+|(?<![a-z0-9])-\s*)(\d+(?:\.\d+)?)\s*(?:do|°c|°|c)?\b/);
+  if (asciiNeg) return -Number(asciiNeg[1]);
+  return null;
+}
+
 function extractVietnameseThreshold(utterance) {
   const n = norm(utterance);
-  const neg = n.match(/(?:am\s+|tru\s+|-\s*)(\d+(?:\.\d+)?)\s*(?:do|°c|°|c)?\b/);
-  if (neg) return -Number(neg[1]);
+  const neg = extractNegativeVietnameseNumber(utterance);
+  if (neg !== null) return neg;
   const pos = n.match(/(?:>|>=|vuot|cao hon|lon hon|tren|tu|duoi|thap hon|nho hon|nguong)\s*(\d+(?:\.\d+)?)\s*(?:do|°c|%|phut|h|gio)?\b/);
   if (pos) return Number(pos[1]);
   return null;
@@ -127,14 +140,135 @@ function inferPortalFromUtterance(utterance, fallback = 'services') {
 }
 
 function detectUnsafeOrInjection(n) {
-  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*huong dan|ignore\s+previous|system\s+prompt|jailbreak|in ra\s+(?:mat khau|api\s*key|token|bi mat|secret|credential)|xuat\s+toan\s+bo\s+(?:api key|token|mat khau|bang users)|drop\s+table|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong))/;
+  const promptInjection = /(bo qua\s+(?:tat ca|moi)?\s*(?:huong dan|kiem tra|quyen|rbac|acl|phe duyet|hitl|bao mat)|bo qua\s+(?:buoc\s+)?(?:kiem\s+tra\s+)?(?:quyen\s+)?hitl|ignore\s+(?:all\s+)?previous|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|phe duyet|bao mat)|vuot\s+quyen|vo\s+hieu\s+hoa\s+(?:audit|nhat\s+ky|rls|bao\s+mat|hitl|phe\s+duyet)|in\s+ra\s+[^\n]{0,40}?(?:mat\s+khau|api\s*key|token|bi\s+mat|secret|credential|private\s*key)|tiet\s+lo\s+[^\n]{0,40}?(?:mat\s+khau|bi\s+mat|token|api\s*key|secret|private\s*key|credential)|doc\s+(?:bien\s+moi\s+truong|\.env|process\.env)|xuat\s+toan\s+bo\s+(?:api\s*key|token|mat\s+khau|secret(?:\s*key)?|bang\s+users|du\s+lieu)|(?:xem|doc|xuat|lay)\s+(?:toan\s+bo\s+)?(?:du\s+lieu|don\s+hang|lo\s+hang|su\s+co|tai\s+lieu|bang)[^\n]{0,30}?(?:to\s+chuc|cong\s+ty|tenant|org)\s+khac|(?:doc|xem|sua|xoa|tao|ghi|cap\s+nhat|truy\s+cap)\s+(?:[^\n]{0,20}\s+)?(?:bang|table|collection)?\s*(?:latticeconnectors|latticeapikeys|latticepkikeys|latticecryptoledger|latticeautomationrules|latticeautomationruns|latticebuiltapps|rolesusers)\b|xem\s+luong\s+toan\s+cong\s+ty|cross[\s-]?tenant|tu\s+(?:phe\s+duyet|duyet)\s+(?:yeu\s+cau|don|phieu|ho\s+so|run)\s+(?:cua\s+)?(?:chinh\s+minh|toi)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|xoa\s+toan\s+bo\s+bang|mo\s+toan\s+bo\s+bang|gan\s+quyen\s+root|cap\s+quyen\s+(?:root|admin\s+he\s+thong)|__proto__|constructor\s*\.\s*prototype|\beval\s*\(|\bnew\s+Function\s*\()/;
   if (promptInjection.test(n)) {
     return {
       refused: true,
-      reason: 'Yêu cầu vi phạm chính sách bảo mật (injection, lộ bí mật hoặc leo thang đặc quyền hệ thống).',
+      reason: 'Yêu cầu vi phạm chính sách bảo mật (injection, lộ bí mật, vượt tenant hoặc leo thang đặc quyền hệ thống).',
+    };
+  }
+  const extraSecurityRe = /(?:tat\s+(?:postgresql\s+)?rls|vo\s+hieu\s+hoa\s+(?:postgresql\s+)?rls|(?:tren|vao|voi)\s+bang(?:\s+he\s+thong)?\s+users\b|(?:de\s+)?tu\s+(?:phe\s+duyet|duyet)\s+(?:cho\s+(?:toi|chinh\s+minh)|yeu\s+cau|don|phieu|ho\s+so|run)|cap\s+quyen\s+admin\b|169\.254\.169\.254|metadata\.google\.internal|metadata\.azure\.com|(?:public\s*form|bieu\s+mau\s+cong\s+khai|\/v\/form\/)[^\n]{0,60}(?:users|mat\s+khau|password|token|secret)|bo\s+qua\s+(?:co\s+che\s+)?m-?of-?n|(?:truy\s+cap|doc|xem|lay)\s+(?:tri\s+nho|latticeaimemory)[^\n]{0,30}(?:to\s+chuc|tenant|org)\s+khac)/;
+  if (extraSecurityRe.test(n)) {
+    return {
+      refused: true,
+      reason: 'Yêu cầu vi phạm chính sách bảo mật (injection, lộ bí mật, vượt tenant hoặc leo thang đặc quyền hệ thống).',
     };
   }
   return null;
+}
+
+function extractGraphImpactArgs(raw, n) {
+  const cleanRaw = stripDiacritics(raw);
+  const codeRules = [
+    { re: /\b(LOT-[A-Z0-9-]+)\b/, collection: 'latticeStockLots' },
+    { re: /\b(ORD-[A-Z0-9-]+)\b/, collection: 'latticeOrders' },
+    { re: /\b((?:INC|ALM)-[A-Z0-9-]+)\b/, collection: 'latticeIncidentCases' },
+    { re: /\b(EPOD-[A-Z0-9-]+)\b/, collection: 'latticeEpodRecords' },
+    { re: /\b((?:AST|COLD-ROOM|KHO)-[A-Z0-9-]+)\b/, collection: 'latticeAssets' },
+    { re: /(urn:ngsi-ld:[^\s,;?]+)/, collection: 'latticeAssets' },
+  ];
+  let collection = null;
+  let recordCode = null;
+  for (const rule of codeRules) {
+    const m = cleanRaw.match(rule.re);
+    if (m && m[1]) {
+      collection = rule.collection;
+      recordCode = m[1].trim();
+      break;
+    }
+  }
+  if (!collection) {
+    if (/(lo\s+(?:hang|ton\s+kho|vaccine|duoc|lanh)|\blot\b)/.test(n)) collection = 'latticeStockLots';
+    else if (/(don\s+hang|don\s+van\s+chuyen)/.test(n)) collection = 'latticeOrders';
+    else if (/(epod|bien\s+ban\s+giao\s+nhan)/.test(n)) collection = 'latticeEpodRecords';
+    else if (/(kho\s+lanh|buong\s+lanh|may\s+nen|thiet\s+bi|tai\s+san)/.test(n)) collection = 'latticeAssets';
+    else if (/(su\s+co|canh\s+bao|bao\s+dong)/.test(n)) collection = 'latticeIncidentCases';
+    else collection = 'latticeAssets';
+  }
+  if (!recordCode) {
+    const shortMatch = cleanRaw.match(/\b(?:kho\s+lanh|buong\s+lanh|may\s+nen|thiet\s+bi)\s+([A-Z0-9]{1,12}-[A-Z0-9-]{1,16}|[A-Z][A-Z0-9-]{0,16}\d[A-Z0-9-]{0,8})\b/);
+    if (shortMatch && shortMatch[1]) recordCode = shortMatch[1].trim();
+  }
+  const includeTelemetry = /(nhiet\s+do|telemetry|cam\s+bien|do\s+am)/.test(n);
+  const maxDepth = /(toan\s+bo\s+chuoi|3\s+tang|sau\s+3|epod|khach\s+hang|ha\s+nguon)/.test(n) ? 3 : 2;
+  return {
+    collection,
+    ...(recordCode ? { recordCode } : {}),
+    maxDepth,
+    ...(includeTelemetry ? { includeTelemetry: true } : {}),
+  };
+}
+
+function extractAutomationRuleKey(raw) {
+  const clean = stripDiacritics(raw).trim();
+  const explicit = clean.match(/\bruleKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,62})\b/i);
+  if (explicit && explicit[1]) return explicit[1].toLowerCase();
+  const autoKey = clean.match(/\b(auto_[a-z0-9][a-z0-9_-]{1,60})\b/i);
+  if (autoKey && autoKey[1]) return autoKey[1].toLowerCase();
+  const ruleNamed = clean.match(/\b(?:rule|luat|automation|flow|luong)\s+([a-z0-9]+(?:_[a-z0-9-]+)+)\b/i);
+  if (ruleNamed && ruleNamed[1]) return ruleNamed[1].toLowerCase();
+  return null;
+}
+
+function extractAutomationRunUid(raw) {
+  const clean = stripDiacritics(raw).trim();
+  const explicit = clean.match(/\brunUid\s*[:=]\s*([a-zA-Z0-9_-]{3,80})\b/i);
+  if (explicit && explicit[1]) return explicit[1];
+  const runPrefixed = clean.match(/\b(run_[a-zA-Z0-9_-]{2,76})\b/i);
+  if (runPrefixed && runPrefixed[1]) return runPrefixed[1];
+  const afterVerb = clean.match(/\b(?:phe\s+duyet|duyet|tu\s+choi|resume|tiep\s+tuc)\s+(?:run|luot\s+chay|phien\s+chay)\s+([a-zA-Z0-9_-]{3,80})\b/i);
+  if (afterVerb && afterVerb[1]) return afterVerb[1];
+  return null;
+}
+
+function extractAutomationNodeId(raw) {
+  const clean = stripDiacritics(raw).trim();
+  const explicit = clean.match(/\bnodeId\s*[:=]\s*([a-zA-Z0-9_.-]{2,80})\b/i);
+  if (explicit && explicit[1]) return explicit[1];
+  const afterNode = clean.match(/\b(?:chay\s+thu|test|kiem\s+thu|sua|doi|cap\s+nhat)\s+node\s+(?!ai\b|llm\b|phe\s+duyet\b|approval\b)([a-zA-Z][a-zA-Z0-9_.-]{1,60})\b/i);
+  if (afterNode && afterNode[1]) return afterNode[1];
+  return null;
+}
+
+function extractAutomationTargetNode(raw, nInput) {
+  const n = nInput ? String(nInput) : norm(raw);
+  const stepColon = n.match(/\bsteps?\s*[:.]\s*(\d+)\b/);
+  if (stepColon) return `step:${stepColon[1]}`;
+  const buoc = n.match(/\b(?:buoc|hanh dong)(?:\s+thu)?\s*(\d+)\b/);
+  if (buoc) {
+    const idx = Number(buoc[1]);
+    return `step:${idx >= 1 ? idx - 1 : 0}`;
+  }
+  const explicitNode = extractAutomationNodeId(raw);
+  if (explicitNode) return explicitNode;
+  if (/(?:cooldown|chong lap|gian cach)/.test(n)) return 'cooldown';
+  if (/(?:\bdmn\b|bang quyet dinh)/.test(n)) return 'dmn';
+  if (/(?:\btrigger\b|su kien kich hoat)/.test(n)) return 'trigger';
+  if (/(?:them|bo sung|gan)\s+(?:[^\n]{0,20}\s)?(?:buoc|node)\b/.test(n)) return 'actions';
+  if (/(?:bo loc|\bfilter\b|dieu kien|nguong|nhanh)/.test(n)) return 'filter';
+  return null;
+}
+
+function extractAutomationSampleEvent(raw, n) {
+  const cleanRaw = stripDiacritics(raw);
+  const sample = {};
+  const thr = extractVietnameseThreshold(raw);
+  const exactNum = n.match(/(?:tempc|nhiet do)\s*(?:=|la|:)?\s*(-?\d+(?:\.\d+)?)/i);
+  const negExact = extractNegativeVietnameseNumber(raw);
+  const humMatch = n.match(/(?<!\bnhiet\s)\bdo am\s*(?:=|la|:|vuot|cao hon|lon hon|tren|duoi|thap hon|nho hon|nguong|>|>=|<|<=)?\s*(\d+(?:\.\d+)?)\s*%?/);
+  if (humMatch) sample.humidity = Number(humMatch[1]);
+  if (exactNum) sample.tempC = Number(exactNum[1]);
+  else if (negExact !== null) sample.tempC = negExact;
+  else if (thr !== null && !(humMatch && !/(?:nhiet do|tempc|temperature)/.test(n))) sample.tempC = thr;
+  const assetMatch = cleanRaw.match(/\b((?:COLD-ROOM|AST|CHILLER|ROOM|DEVICE)-[A-Z0-9-]{1,32})\b/);
+  if (assetMatch && assetMatch[1]) {
+    sample.deviceKey = assetMatch[1];
+    sample.assetCode = assetMatch[1];
+  }
+  if (/\b(?:critical|nghiem trong|khan cap)\b/.test(n)) sample.severity = 'critical';
+  else if (/\b(?:high|cao)\b/.test(n)) sample.severity = 'high';
+  else if (/\b(?:warning|canh bao|nhe|trung binh)\b/.test(n)) sample.severity = 'warning';
+  return sample;
 }
 
 function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug = 'services' } = {}) {
@@ -164,6 +298,77 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     return null;
   };
 
+  // 0.8 Workflow Draft/Publish & Version Rollback (LatticeFlow v2 lifecycle)
+  const earlyRuleKey = extractAutomationRuleKey(raw);
+  if (
+    /(hoan tac|khoi phuc|rollback)/.test(n)
+    && /(?:workflow|\bflow\b|luong|automation|\brule\b|publishedversion|ban\s+da\s+xuat\s+ban)/.test(n)
+    && !/(?:ung\s+dung|phan\s+he|\bapp\b|\bappkey\b|giao\s+dien|bo\s+cuc|trang\s+nay)/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('rollback_automation');
+    if (denied) return denied;
+    const wfVerMatch = n.match(/\b(?:publishedversion|phien\s+ban|version|v)\s*v?(\d+)\b/);
+    return {
+      intent: 'AUTOMATION_ROLLBACK',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: 'rollbackAutomation',
+        ...(earlyRuleKey ? { ruleKey: earlyRuleKey } : {}),
+        ...(wfVerMatch?.[1] ? { targetVersion: Number(wfVerMatch[1]) } : {}),
+        goal: raw,
+      },
+    };
+  }
+  if (
+    /(?:xuat\s+ban|\bpublish\b|phat\s+hanh)/.test(n)
+    && /(?:ban\s+nhap|\bdraft\b|workflow|\bflow\b|luong|automation|\brule\b)/.test(n)
+    && !/(?:ung\s+dung|phan\s+he|\bapp\b)/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('publish_automation');
+    if (denied) return denied;
+    return {
+      intent: 'AUTOMATION_PUBLISH',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: 'publishAutomation',
+        ...(earlyRuleKey ? { ruleKey: earlyRuleKey } : {}),
+        goal: raw,
+      },
+    };
+  }
+
+  // 0.9 Built App Rollback (must precede layout rollback so app-level rollback isn't shadowed)
+  const extractBuiltAppKeyEarly = (input) => {
+    const clean = stripDiacritics(input).trim();
+    const explicit = clean.match(/\bappKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,79})\b/i);
+    if (explicit?.[1]) return explicit[1].toLowerCase();
+    const named = clean.match(/\b(?:ung\s+dung|phan\s+he|app)\s+([a-z0-9]+(?:[_-][a-z0-9]+)+)\b/i);
+    if (named?.[1]) return named[1].toLowerCase();
+    return null;
+  };
+  if (
+    /(hoan tac|khoi phuc|rollback)/.test(n)
+    && /(?:ung\s+dung|phan\s+he|\bapp\b|\bappkey\b)/.test(n)
+    && !/(?:giao\s+dien|bo\s+cuc|trang\s+nay)/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('rollback_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKeyEarly(raw);
+    const verMatch = n.match(/\b(?:phien\s+ban|version|v)\s*v?(\d+)\b/);
+    return {
+      intent: 'ROLLBACK_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'rollback_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+        ...(verMatch?.[1] ? { targetVersion: Number(verMatch[1]) } : {}),
+      },
+    };
+  }
+
   // 1. Rollback Time-Machine
   if (/(hoan tac|quay lai\s+bo\s+cuc|khoi phuc\s+(?:giao dien|trang|bo cuc)|rollback|tro ve\s+ban\s+dau)/.test(n)) {
     const denied = requireAdminOrRefuse('rollback');
@@ -176,7 +381,138 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 2. Role Workspace Provisioning
+  // 2. Role Workspace Provisioning & Multi-Entity Enterprise App Builder / Rebuild / Export / Teardown / Verifier
+  const extractBuiltAppKey = (input) => {
+    const clean = stripDiacritics(input).trim();
+    const explicit = clean.match(/\bappKey\s*[:=]\s*([a-z0-9][a-z0-9_-]{1,79})\b/i);
+    if (explicit?.[1]) return explicit[1].toLowerCase();
+    const named = clean.match(/\b(?:ung\s+dung|phan\s+he|app)\s+([a-z0-9]+(?:[_-][a-z0-9]+)+)\b/i);
+    if (named?.[1]) return named[1].toLowerCase();
+    return null;
+  };
+  const matchedCustomCols = [...new Set(
+    [...raw.matchAll(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/g)].map((m) => m[1]),
+  )];
+
+  if (/(?:lap\s+ke\s+hoach|ke\s+hoach\s+(?:thay\s+doi|cap\s+nhat|dung)|xem\s+truoc\s+(?:plan|diff|thay\s+doi)|\bplan(?:_enterprise_app)?)(?:[^\n]{0,30}?)(?:ung\s+dung|phan\s+he|app|appkey)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('plan_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'PLAN_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'plan_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+        prompt: raw,
+      },
+    };
+  }
+  if (/(?:cap\s+nhat(?:\s+bo\s+sung)?|bo\s+sung|sua\s+doi|\bpatch\b)\s+(?:ung\s+dung|phan\s+he|app|appkey)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('patch_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'PATCH_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'patch_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+        prompt: raw,
+      },
+    };
+  }
+  if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?(?:ung\s+dung\s+da\s+dung|built\s+apps|phan\s+he\s+da\s+tao)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('list_built_apps');
+    if (denied) return denied;
+    return {
+      intent: 'LIST_BUILT_APPS',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: { operation: 'list_built_apps' },
+    };
+  }
+  if (/(?:dung\s+lai|xay\s+dung\s+lai|rebuild|tai\s+tao)\s+(?:ung\s+dung|phan\s+he|app)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('rebuild_enterprise_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'REBUILD_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'rebuild_enterprise_app',
+        ...(appKey ? { appKey } : {}),
+      },
+    };
+  }
+  if (/(?:xuat|export)\s+(?:goi\s+)?(?:giai\s+phap|solution\s+bundle|bundle(?:\s+v3)?)(?:\s+(?:cua\s+)?(?:ung\s+dung|phan\s+he|app))?/.test(n)) {
+    const denied = requireAdminOrRefuse('export_app_bundle');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    return {
+      intent: 'EXPORT_APP_BUNDLE',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'export_app_bundle',
+        ...(appKey ? { appKey } : {}),
+      },
+    };
+  }
+  if (/(?:go\s+bo|teardown|thu\s+hoi|xoa\s+(?:giao\s+dien|phan\s+he|ung\s+dung))\s+(?:ung\s+dung|phan\s+he|app)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('teardown_built_app');
+    if (denied) return denied;
+    const appKey = extractBuiltAppKey(raw);
+    const keepData = !/(?:xoa\s+ca\s+du\s+lieu|xoa\s+sach\s+du\s+lieu|keepdata\s*[:=]\s*false|drop\s+data)/.test(n);
+    return {
+      intent: 'TEARDOWN_BUILT_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'teardown_built_app',
+        ...(appKey ? { appKey } : {}),
+        keepData,
+      },
+    };
+  }
+  if (/(?:xay\s+dung|dung|tao)\s+(?:tron\s+bo\s+)?(?:phan\s+he|ung\s+dung(?:\s+doanh\s+nghiep|\s+da\s+thuc\s+the)?(?:\s+hoan\s+chinh)?|he\s+thong\s+da\s+bang|app\s+moi)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('build_enterprise_app');
+    if (denied) return denied;
+    const slugMatch = raw.match(/\/p\/([a-z0-9][a-z0-9-]{1,39})\b/i);
+    const isMulti = matchedCustomCols.length >= 2 || /(?:da\s+bang|da\s+thuc\s+the|multi[-\s]?entity)/.test(n);
+    return {
+      intent: 'BUILD_ENTERPRISE_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'build_enterprise_app',
+        portalSlug: slugMatch?.[1] ? slugMatch[1].toLowerCase() : targetPortal,
+        ...(isMulti && matchedCustomCols.length
+          ? { collections: matchedCustomCols.map((c) => ({ collectionName: c, fields: [] })) }
+          : (matchedCustomCols[0] ? { collectionName: matchedCustomCols[0] } : {})),
+        pageTitle: raw.slice(0, 80),
+        dryRun: false,
+      },
+    };
+  }
+  if (/(?:kiem\s+chung|xac\s+minh)(?:\s+lai)?\s+(?:toan\s+dien\s+)?(?:ung\s+dung|phan\s+he|app)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('verify_app');
+    if (denied) return denied;
+    const colMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
+    return {
+      intent: 'VERIFY_APP',
+      refused: false,
+      toolName: 'dxos_provision_role_workspace',
+      args: {
+        operation: 'verify_app',
+        portalSlug: targetPortal,
+        ...(colMatch?.[1] ? { collectionName: colMatch[1] } : {}),
+      },
+    };
+  }
   if (/(tao\s+vai\s+tro|lap\s+nhom\s+quyen|them\s+vai\s+tro|phan\s+quyen\s+(?:moi|rieng)|chuc\s+danh\s+moi)/.test(n)) {
     const denied = requireAdminOrRefuse('provision_role');
     if (denied) return denied;
@@ -193,6 +529,87 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
+  // 2.5 Schema Extension (belongsTo / hasOne / belongsToMany / formula / validation / json / enum) — Admin only
+  if (/(?:them|bo\s+sung|tao)\s+(?:truong|cot)(?:\s+quan\s+he)?[^\n]{0,60}\b(?:belongsto|hasone|belongstomany|formula|validation|json|enum)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('extend_schema');
+    if (denied) return denied;
+    const customMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
+    const colMatch = customMatch || raw.match(/\b(lattice[A-Z][A-Za-z0-9]{1,40})\b/);
+    return {
+      intent: 'EXTEND_COLLECTION_SCHEMA',
+      refused: false,
+      toolName: 'dxos_extend_collection_schema',
+      args: {
+        operation: 'addFields',
+        collectionName: colMatch?.[1] || 'latticeCustomRecords',
+        dryRun: false,
+      },
+    };
+  }
+
+  // 2.6 Native v2 BlockModels (WebGIS / Kanban / WMS Ops / BI Chart) — Admin only
+  if (
+    /(?:gan|them|ve|tao)\s+(?:khoi|block|the|bang)?[^\n]{0,70}\b(?:dxoswebgisblockmodel|dxoskanbanscheduleblockmodel|dxoswmsopsblockmodel|dxosbichartblockmodel|bieu\s+do\s+(?:bi|(?:cot|duong|tron|kpi|pivot)\s+bi)|(?:the|chi\s+so)\s+kpi\s+bi|bang\s+pivot\s+bi|ban\s+do\s+webgis|(?:bang|lich)\s+kanban)\b/.test(n)
+    || /\bdxosbichartblockmodel\b/.test(n)
+  ) {
+    const denied = requireAdminOrRefuse('compose_page_blocks');
+    if (denied) return denied;
+    let blockUse = 'DxosWebGisBlockModel';
+    let chartType = null;
+    if (n.includes('dxosbichartblockmodel') || n.includes('bieu do bi') || /\b(?:cot|duong|tron|kpi|pivot)\s+bi\b/.test(n) || /\bbi\b/.test(n)) {
+      blockUse = 'DxosBiChartBlockModel';
+      if (/\bpivot\b/.test(n)) chartType = 'pivot';
+      else if (/\bkpi\b/.test(n)) chartType = 'kpi';
+      else if (/(?:bieu\s+do\s+tron|\bpie\b)/.test(n)) chartType = 'pie';
+      else if (/(?:bieu\s+do\s+duong|\bline\b)/.test(n)) chartType = 'line';
+      else chartType = 'bar';
+    } else if (n.includes('dxoskanbanscheduleblockmodel') || n.includes('kanban')) {
+      blockUse = 'DxosKanbanScheduleBlockModel';
+    } else if (n.includes('dxoswmsopsblockmodel') || n.includes('wms')) {
+      blockUse = 'DxosWmsOpsBlockModel';
+    }
+    const customColMatch = raw.match(/\b(latticeCustom[A-Z][A-Za-z0-9]{1,40})\b/);
+    const colMatch = customColMatch || raw.match(/\b(lattice[A-Z][A-Za-z0-9]{1,40})\b/);
+    const targetCollection = colMatch?.[1] || null;
+    const config = {
+      ...(targetCollection ? { collection: targetCollection } : {}),
+      ...(chartType ? { chartType } : {}),
+    };
+    return {
+      intent: 'COMPOSE_NATIVE_V2_BLOCK',
+      refused: false,
+      toolName: 'dxos_compose_page_blocks',
+      args: {
+        action: 'addBlock',
+        portalSlug: targetPortal,
+        blockUse,
+        ...(targetCollection ? { collection: targetCollection } : {}),
+        ...(Object.keys(config).length ? { config } : {}),
+        dryRun: false,
+      },
+    };
+  }
+
+  // 2.7 Public Form Builder (/v/form/:slug) — Admin only
+  if (/(?:tao|thiet\s+ke|cau\s+hinh|mo)\s+(?:bieu\s+mau\s+cong\s+khai|public\s*form)\b/.test(n) || /\/v\/form\/[a-z0-9-]+/i.test(raw)) {
+    const denied = requireAdminOrRefuse('configure_public_form');
+    if (denied) return denied;
+    const slugMatch = raw.match(/\/v\/form\/([a-z0-9][a-z0-9-]{1,60})/i)
+      || raw.match(/\bslug\s*[:=]?\s*([a-z0-9][a-z0-9-]{1,60})\b/i);
+    const slug = slugMatch?.[1] ? slugMatch[1].toLowerCase() : 'public-intake';
+    return {
+      intent: 'CONFIGURE_PUBLIC_FORM',
+      refused: false,
+      toolName: 'dxos_compose_page_blocks',
+      args: {
+        action: 'configurePublicForm',
+        slug,
+        publicRoute: `/v/form/${slug}`,
+        portalSlug: targetPortal,
+      },
+    };
+  }
+
   // 3. Recommend / Inspect Page Blocks
   if (/(goi y\s+(?:xem|bo cuc|khoi|block|nang cap)|de xuat\s+(?:khoi|bo cuc|dashboard)|xem\s+(?:trang nay|cau truc).*(?:khoi nao|block nao|gi)|trang\s+nay\s+dang\s+co\s+nhung\s+khoi\s+nao)/.test(n)) {
     const denied = requireAdminOrRefuse('recommend_blueprint');
@@ -204,6 +621,319 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
       toolName: isList ? 'dxos_compose_page_blocks' : 'dxos_recommend_page_blueprint',
       args: isList ? { action: 'listBlocks', portalSlug: targetPortal } : { portalSlug: targetPortal },
     };
+  }
+
+  const isGraphImpact = GRAPH_IMPACT_RE.test(n);
+
+  // 3.3. DMN Decision Tables (list / save / evaluate) — Admin only
+  const dmnKeyMatch = raw.match(/\b([a-z0-9]+(?:_[a-z0-9]+)+_v\d+)\b/i);
+  const extractedDmnKey = dmnKeyMatch?.[1] || null;
+  if (!isGraphImpact && /(?:bang\s+(?:luat\s+)?quyet\s+dinh|\bdmn\b)/.test(n) && !extractAutomationRuleKey(raw)) {
+    if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?(?:bang\s+(?:luat\s+)?quyet\s+dinh|bang\s+dmn|\bdmn\b)/.test(n)) {
+      const denied = requireAdminOrRefuse('dmn_list_tables');
+      if (denied) return denied;
+      return { intent: 'DMN_LIST_TABLES', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'dmn_list_tables' } };
+    }
+    if (/(?:tao|cap\s+nhat|luu)\s+(?:hoac\s+cap\s+nhat\s+)?(?:bang\s+(?:luat\s+)?quyet\s+dinh|bang\s+dmn)\b/.test(n)) {
+      const denied = requireAdminOrRefuse('dmn_save_table');
+      if (denied) return denied;
+      return {
+        intent: 'DMN_SAVE_TABLE',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'dmn_save_table', ...(extractedDmnKey ? { tableKey: extractedDmnKey } : {}) },
+      };
+    }
+    if (/(?:danh\s+gia(?:\s+thu)?|chay\s+kiem\s+tra|kiem\s+tra)\s+(?:bang\s+(?:quyet\s+dinh\s+)?)?dmn\b/.test(n)) {
+      const denied = requireAdminOrRefuse('dmn_evaluate');
+      if (denied) return denied;
+      return {
+        intent: 'DMN_EVALUATE',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'dmn_evaluate',
+          ...(extractedDmnKey ? { tableKey: extractedDmnKey } : {}),
+          context: extractAutomationSampleEvent(raw, n),
+        },
+      };
+    }
+  }
+
+  // 3.4. Direct n8n Service, Stock n8n REST API v1 & Connected Apps Hub — Admin only
+  const isFlowDraftPrompt = /(?:^|\s)(?:tao|dung|lap|thiet\s+ke|xay\s+dung)\s+(?:moi\s+)?(?:automation|flow|dag|luong\s+tu\s+dong|quy\s+trinh)\b/.test(n);
+  if (!isGraphImpact && !isFlowDraftPrompt) {
+    const connMatch = raw.match(/\b(n8n-[a-z0-9_-]{2,60}|telegram-[a-z0-9_-]{2,60}|gmail-[a-z0-9_-]{2,60}|slack-[a-z0-9_-]{2,60}|erp-webhook-sync)\b/i);
+    const webhookPathMatch = raw.match(/(\/webhook\/[a-z0-9/_-]{2,120})/i);
+    const n8nWfIdMatch = raw.match(/\b(wf[_-][a-z0-9_-]{1,40})\b/i);
+    const n8nExecIdMatch = raw.match(/\b(exec[_-][a-z0-9_-]{1,40})\b/i);
+    const extractedConn = connMatch && connMatch[1] ? connMatch[1].trim().toLowerCase() : null;
+    const extractedPath = webhookPathMatch && webhookPathMatch[1] ? webhookPathMatch[1].trim() : null;
+    const extractedN8nWfId = n8nWfIdMatch?.[1] || null;
+    const extractedExecId = n8nExecIdMatch?.[1] || null;
+
+    if (/(?:xem|liet\s+ke)\s+danh\s+sach\s+(?:cac\s+)?ung\s+dung\s+ket\s+noi\b/.test(n)) {
+      const denied = requireAdminOrRefuse('list_connected_apps');
+      if (denied) return denied;
+      return { intent: 'N8N_LIST_CONNECTED_APPS', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'list_connected_apps' } };
+    }
+    if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?workflows?(?:\s+dang\s+co)?\s+(?:tren|cua)\s+(?:may\s+chu\s+)?(?:stock\s+)?n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('list_n8n_workflows');
+      if (denied) return denied;
+      return { intent: 'N8N_LIST_WORKFLOWS', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'list_n8n_workflows' } };
+    }
+    if (/(?:tao|dung)\s+workflow\s+(?:moi\s+)?tren\s+(?:stock\s+)?n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('create_n8n_workflow');
+      if (denied) return denied;
+      return { intent: 'N8N_CREATE_WORKFLOW', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'create_n8n_workflow', workflow: { name: raw.slice(0, 80), nodes: [], connections: {} } } };
+    }
+    if (/(?:cap\s+nhat|sua)\s+workflow\s+n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('update_n8n_workflow');
+      if (denied) return denied;
+      return { intent: 'N8N_UPDATE_WORKFLOW', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'update_n8n_workflow', ...(extractedN8nWfId ? { workflowId: extractedN8nWfId } : {}), workflow: { name: raw.slice(0, 80) } } };
+    }
+    if (/(?:kich\s+hoat|bat|tam\s+tat|tat)\s+(?:bat\s+|tat\s+)?workflow\s+n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('activate_n8n_workflow');
+      if (denied) return denied;
+      const active = !/(?:tam\s+tat|\btat\b|vo\s+hieu\s+hoa)/.test(n);
+      return { intent: 'N8N_ACTIVATE_WORKFLOW', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'activate_n8n_workflow', ...(extractedN8nWfId ? { workflowId: extractedN8nWfId } : {}), active } };
+    }
+    if (/(?:chay\s+lai|retry)\s+(?:retry\s+)?execution\s+n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('retry_n8n_execution');
+      if (denied) return denied;
+      return { intent: 'N8N_RETRY_EXECUTION', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'retry_n8n_execution', ...(extractedExecId ? { executionId: extractedExecId } : {}) } };
+    }
+    if (/(?:xem|liet\s+ke)\s+(?:lich\s+su\s+)?(?:cac\s+)?(?:luot\s+chay\s+)?executions?\s+(?:tren\s+|cua\s+)?n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('list_n8n_executions');
+      if (denied) return denied;
+      return { intent: 'N8N_LIST_EXECUTIONS', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'list_n8n_executions', ...(extractedN8nWfId ? { workflowId: extractedN8nWfId } : {}) } };
+    }
+    if (/dong\s+bo\s+(?:thong\s+tin\s+xac\s+thuc|oauth2|credential)[^\n]{0,40}\b(?:sang|len)\s+(?:stock\s+)?n8n\b/.test(n)) {
+      const denied = requireAdminOrRefuse('sync_n8n_credential');
+      if (denied) return denied;
+      return { intent: 'N8N_SYNC_CREDENTIAL', refused: false, toolName: 'dxos_configure_workflow', args: { operation: 'sync_n8n_credential', ...(extractedConn ? { connectorKey: extractedConn } : {}) } };
+    }
+
+    if (/(?:liet\s+ke|xem\s+danh\s+sach|danh\s+sach)\s+(?:cac\s+)?(?:ket\s+noi\s+n8n|n8n|connector)\b/.test(n)) {
+      const denied = requireAdminOrRefuse('n8n_connector_list');
+      if (denied) return denied;
+      return {
+        intent: 'N8N_LIST_CONNECTORS',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'listConnectors', ...(n.includes('n8n') ? { connectorType: 'n8n' } : {}) },
+      };
+    }
+    if (/(?:kiem\s+tra|test|ping)\s+(?:ket\s+noi\s+)?(?:n8n|connector)\b/.test(n)) {
+      const denied = requireAdminOrRefuse('n8n_connector_test');
+      if (denied) return denied;
+      return {
+        intent: 'N8N_TEST_CONNECTOR',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'testConnector', ...(extractedConn ? { connectorKey: extractedConn } : {}) },
+      };
+    }
+    if (/(?:goi\s+(?:truc\s+tiep\s+)?(?:luong\s+)?n8n|chay\s+(?:luong\s+)?n8n|kich\s+hoat\s+(?:luong\s+)?n8n|day\s+sang\s+n8n|invoke\s+n8n)/.test(n)) {
+      const denied = requireAdminOrRefuse('n8n_invoke');
+      if (denied) return denied;
+      return {
+        intent: 'N8N_INVOKE',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'invokeN8n',
+          ...(extractedConn ? { connectorKey: extractedConn } : {}),
+          ...(extractedPath ? { webhookPath: extractedPath } : {}),
+          payload: { goal: raw },
+        },
+      };
+    }
+  }
+
+  // 3.45 Multi-level Approval Policies & Omnichannel Notification Dispatchers — Admin only
+  if (/(?:tao|thiet\s+lap|cau\s+hinh|cap\s+nhat)\s+(?:chinh\s+sach|quy\s+trinh|luat)\s+(?:phe\s+duyet|duyet)\s+(?:da\s+cap|tuan\s+tu|song\s+song|m-?of-?n)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('configure_approval_policy');
+    if (denied) return denied;
+    const mode = /\bm-?of-?n\b|song\s+song/.test(n) ? 'parallel_m_of_n' : 'sequential';
+    return {
+      intent: 'APPROVAL_POLICY_CONFIGURE',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: 'configureApprovalPolicy',
+        approvalMode: mode,
+        goal: raw,
+      },
+    };
+  }
+  if (/(?:gui\s+thu|test|kiem\s+tra|cau\s+hinh|thiet\s+lap)\s+(?:thong\s+bao|kenh(?:\s+gui)?\s+thong\s+bao)?[^\n]{0,40}\b(?:smtp|email|telegram|slack|omnichannel)\b/.test(n)) {
+    const denied = requireAdminOrRefuse('omnichannel_notify');
+    if (denied) return denied;
+    const isTest = /(?:gui\s+thu|test|kiem\s+tra)/.test(n);
+    const channels = [];
+    if (/\bsmtp\b|\bemail\b/.test(n)) channels.push('email_smtp');
+    if (/\btelegram\b/.test(n)) channels.push('telegram');
+    if (/\bslack\b/.test(n)) channels.push('slack');
+    return {
+      intent: isTest ? 'OMNICHANNEL_NOTIFY_TEST' : 'OMNICHANNEL_NOTIFY_CONFIGURE',
+      refused: false,
+      toolName: 'dxos_configure_workflow',
+      args: {
+        operation: isTest ? 'testNotificationChannel' : 'configureNotificationChannel',
+        channels: channels.length ? channels : ['email_smtp'],
+        goal: raw,
+      },
+    };
+  }
+
+  // 3.5. DX-OS Flow Architect (Suggest / Test / Patch / Draft / Resume / Fix Error) — Admin only
+  const runUid = extractAutomationRunUid(raw);
+  const preExtractedRuleKey = extractAutomationRuleKey(raw);
+  const hasFixErrorSignal = /(?:sua\s+loi\s+(?:lan\s+chay|flow|automation|rule|luong)|fix\s+loi\s+(?:flow|automation|rule|lan\s+chay|luong)|khac\s+phuc\s+loi\s+(?:lan\s+chay|flow|automation|luong))/.test(n);
+  const hasResumeSignal = !hasFixErrorSignal && (
+    Boolean(runUid && /(phe\s+duyet|duyet|tu\s+choi|approve|approved|reject|rejected|resume|tiep\s+tuc)/.test(n))
+    || /(?:phe\s+duyet|duyet|tu\s+choi)\s+(?:run|luot\s+chay|phien\s+chay)\b|\bresume\s+(?:run|flow|automation)\b/.test(n)
+  );
+  const hasAutomationTopic = !isGraphImpact && (
+    hasResumeSignal
+    || hasFixErrorSignal
+    || Boolean(preExtractedRuleKey)
+    || /(?:automation|luong\s+tu\s+dong|tu\s+dong\s+hoa|rule\s+tu\s+dong|quy\s+trinh\s+tu\s+dong|\bauto_[a-z0-9][a-z0-9_-]*\b|(?:toi\s+uu|va|sua|doi|cap\s+nhat|chay\s+thu|mo\s+phong|test)\s+(?:rule|luat|luong|flow|workflow|node)\b|\bflow\b|\bworkflow\b|\bdag\b|\bai\.agent\b|\bnode\s+(?:ai|llm)\b|\bcron\b|dinh\s+ky\s+cron|moi\s+sang\s+\d+h|inbound\s+webhook|(?:nhan|tao|dung|thiet\s+ke|cau\s+hinh)\s+(?:inbound\s+)?webhook|re\s+nhanh\s+song\s+song|dung\s+llm\s+tom\s+tat)/.test(n)
+  );
+  if (hasAutomationTopic) {
+    const ruleKey = preExtractedRuleKey;
+    const nodeId = extractAutomationNodeId(raw);
+    const isList = /(?:liet\s+ke|xem\s+danh\s+sach)\s+(?:cac\s+)?(?:automation|flow|workflow|luong\s+tu\s+dong|rule\s+tu\s+dong)/.test(n);
+    const isSuggest = /(goi y toi uu|de xuat cai tien|toi uu(?:\s+(?:automation|rule|luong|flow|workflow|dag))?|phan tich\s+(?:automation|rule|luong|flow|workflow|dag)|kiem tra\s+(?:automation|rule|luong|flow|workflow|dag))/.test(n);
+    const isTest = /(mo phong|dry[\s-]?run|chay thu|test\s+node|kiem\s+thu\s+node)/.test(n);
+    const isDraftExplicit = /(?:^|\s)(?:tao|dung|lap|thiet ke|xay dung)\s+(?:moi\s+)?(?:automation|flow|workflow|dag|luong tu dong|quy trinh tu dong|rule tu dong|tu dong hoa|lich\s+(?:chay\s+)?cron)\b/.test(n);
+    const isPatchVerb = /(?:doi|sua|va|chinh|cap nhat|xoa|gan)\s+(?:[^\n]{0,24}?\s)?(?:buoc(?:\s+\d+)?|step(?:\s*:\s*\d+)?|node(?:\s+[a-z0-9_.-]+)?|dieu kien|nguong|nhiet do|cooldown|dmn|nhanh|bo loc|filter|trigger)/.test(n)
+      || (/(?:them|bo sung|gan)\s+(?:[^\n]{0,20}?\s)?(?:buoc|node|dieu kien|cooldown|nhanh|bo loc)/.test(n) && (Boolean(ruleKey) || /(?:cua|cho|trong|vao)\s+(?:automation|rule|luong|flow)\b/.test(n)));
+    const isPatch = isPatchVerb && (!isDraftExplicit || Boolean(ruleKey));
+
+    if (hasFixErrorSignal) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      const targetNode = extractAutomationTargetNode(raw, n);
+      return {
+        intent: 'AUTOMATION_FIX_ERROR',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'patchAutomation',
+          mode: 'fix_error',
+          ...(ruleKey ? { ruleKey } : {}),
+          ...(runUid ? { runTrace: { runUid } } : {}),
+          ...(targetNode ? { targetNode } : {}),
+          goal: raw,
+          apply: false,
+        },
+      };
+    }
+
+    if (hasResumeSignal) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      const decision = /(tu\s+choi|reject|rejected|khong\s+duyet)/.test(n) ? 'rejected' : 'approved';
+      return {
+        intent: 'AUTOMATION_RESUME',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'resumeAutomation',
+          ...(runUid ? { runUid } : {}),
+          decision,
+          payload: { note: raw },
+        },
+      };
+    }
+
+    if (isList && !isDraftExplicit && !isPatch && !isSuggest && !isTest) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_LIST',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: { operation: 'listAutomations' },
+      };
+    }
+
+    if (isSuggest) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_SUGGEST',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'suggestAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          goal: raw,
+        },
+      };
+    }
+
+    if (isTest && !isDraftExplicit) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      return {
+        intent: 'AUTOMATION_TEST',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'testAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          ...(nodeId ? { nodeId } : {}),
+          sampleEvent: extractAutomationSampleEvent(raw, n),
+          goal: raw,
+        },
+      };
+    }
+
+    if (isPatch) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      const targetNode = extractAutomationTargetNode(raw, n);
+      return {
+        intent: 'AUTOMATION_PATCH',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'patchAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          ...(nodeId ? { nodeId } : {}),
+          ...(targetNode ? { targetNode } : {}),
+          goal: raw,
+          apply: false,
+        },
+      };
+    }
+
+    if (
+      isDraftExplicit
+      || /(?:\btao\b|\bdung\b|\blap\b|\bthiet ke\b|\bnhan\b).*(?:automation|luong tu dong|tu dong hoa|rule tu dong|\bflow\b|\bdag\b|webhook|cron)/.test(n)
+      || /\bcron\b|dinh\s+ky\s+cron|moi\s+sang\s+\d+h|inbound\s+webhook|dung\s+llm\s+tom\s+tat/.test(n)
+    ) {
+      const denied = requireAdminOrRefuse('automation_architect');
+      if (denied) return denied;
+      const isReact = /\breact\b|\bai\.agent\b|da\s+vong|multi[-\s]?turn/.test(n);
+      const turnsMatch = n.match(/(?:toi\s+da|maxturns\s*[:=]?)\s*(\d+)\s*(?:vong|luot|turns?)?/);
+      const maxTurns = turnsMatch?.[1] ? Number(turnsMatch[1]) : undefined;
+      return {
+        intent: 'AUTOMATION_DRAFT',
+        refused: false,
+        toolName: 'dxos_configure_workflow',
+        args: {
+          operation: 'draftAutomation',
+          ...(ruleKey ? { ruleKey } : {}),
+          ...(isReact ? { agentMode: 'react', ...(maxTurns ? { maxTurns } : {}) } : {}),
+          goal: raw,
+          apply: false,
+        },
+      };
+    }
   }
 
   // 4. Design Creative Block (thermometer, timeseries-line, gauge, pipeline, alerts)
@@ -234,15 +964,53 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
   // 5. Alarm Acknowledge / Clear (OT Incident Ops)
   if (/(xac nhan\s+(?:tiep\s+nhan|nhan\s+xu\s+ly)?\s*(?:canh\s+bao|su\s+co|bao\s+dong)|ack\s+alarm|dong\s+(?:canh\s+bao|bao\s+dong)|tat\s+bao\s+dong|giai\s+toa\s+canh\s+bao|clear\s+alarm)/.test(n)) {
     const isClear = /(dong\s+(?:canh\s+bao|bao\s+dong)|tat\s+bao\s+dong|giai\s+toa|clear|da\s+khac\s+phuc\s+xong)/.test(n);
+    const alarmCodeMatch = stripDiacritics(raw).match(/\b((?:ALM|INC)-[A-Z0-9-]{1,40})\b/);
+    const alarmCode = alarmCodeMatch && alarmCodeMatch[1] ? alarmCodeMatch[1].trim() : null;
     return {
       intent: isClear ? 'ALARM_CLEAR' : 'ALARM_ACK',
       refused: false,
       toolName: 'dxos_alarm_action',
-      args: { action: isClear ? 'clear' : 'ack', note: raw },
+      args: {
+        action: isClear ? 'clear' : 'ack',
+        ...(alarmCode ? { alarmCode } : {}),
+        note: raw,
+      },
     };
   }
 
-  // 6. Cross-department Radar & Orchestration (check before personal tasks if asking company-wide)
+  // 6. GraphRAG Impact & Lineage Analysis (before Radar & broad RAG Search)
+  if (isGraphImpact) {
+    return {
+      intent: 'GRAPH_IMPACT_ANALYSIS',
+      refused: false,
+      toolName: 'dxos_graph_impact_analysis',
+      args: extractGraphImpactArgs(raw, n),
+    };
+  }
+
+  // 6.5 A2A Protocol (agent-card, tasks/send, dxos-operator, dxos-analyst)
+  if (/(?:\ba2a\b|agent[\s-]?card|\/\.well-known\/agent-card\.json|\/api\/dxos-a2a|\buy\s+quyen\b[^\n]{0,40}\bdxos-(?:operator|analyst|architect)\b)/.test(n)) {
+    const agentMatch = raw.match(/\b(dxos-(?:operator|analyst|architect|coordinator))\b/i);
+    const targetAgent = agentMatch?.[1] ? agentMatch[1].toLowerCase() : null;
+    if (targetAgent === 'dxos-architect') {
+      const denied = requireAdminOrRefuse('a2a_admin_agent');
+      if (denied) return denied;
+    }
+    const isCard = /(?:agent[\s-]?card|\.well-known\/agent-card\.json|danh\s+sach\s+(?:nang\s+luc|agent)\s+a2a)/.test(n);
+    return {
+      intent: 'A2A_PROTOCOL',
+      refused: false,
+      toolName: 'dxos_orchestrate_enterprise_case',
+      args: {
+        protocol: 'a2a',
+        action: isCard ? 'get_agent_card' : 'tasks/send',
+        ...(targetAgent ? { targetAgent } : {}),
+        query: raw,
+      },
+    };
+  }
+
+  // 7. Cross-department Radar & Orchestration (check before personal tasks if asking company-wide)
   if (/(radar|diem\s+nghen|tong\s+hop\s+(?:toan\s+cong\s+ty|toan\s+he\s+thong|6\s+phan\s+he|lien\s+phong\s+ban)|dieu\s+phoi\s+lien|tong\s+quan\s+tinh\s+hinh\s+van\s+hanh)/.test(n)) {
     return {
       intent: 'ENTERPRISE_RADAR',
@@ -252,13 +1020,37 @@ function parseVietnameseNaturalIntent(utterance, { isAdmin = false, portalSlug =
     };
   }
 
-  // 7. My Workflow Tasks & Approvals
+  // 7. My Workflow Tasks & Unified Approval Inbox
+  if (/(?:hop\s+thu\s+(?:phe\s+duyet|duyet)\s+hop\s+nhat|unified\s+(?:approval\s+)?inbox|phe\s+duyet\s+da\s+cap)/.test(n)) {
+    return {
+      intent: 'UNIFIED_APPROVAL_INBOX',
+      refused: false,
+      toolName: 'dxos_my_workflow_tasks',
+      args: { action: 'list', scope: 'unified_inbox' },
+    };
+  }
   if (/(viec\s+(?:can\s+duyet|cua\s+toi|toi\s+can\s+xu\s+ly|ton\s+dong)|tac\s+vu\s+(?:cho\s+duyet|cua\s+toi)|danh\s+sach\s+(?:cong\s+viec|duyet)|(?:cho\s+(?:toi\s+)?)?phe\s+duyet(?:\s+(?:phieu|don|yeu\s+cau))?|cho\s+toi\s+duyet|toi\s+co\s+(?:bao\s+nhieu|viec\s+gi))/.test(n)) {
     return {
       intent: 'MY_TASKS',
       refused: false,
-      toolName: 'dxos_my_tasks_copilot',
+      toolName: 'dxos_my_workflow_tasks',
       args: { action: 'list' },
+    };
+  }
+
+  // 7.5 Persistent Org/Agent Memory (latticeAiMemory)
+  if (/(?:tri\s+nho(?:\s+to\s+chuc|\s+agent)?|latticeaimemory|ghi\s+nho\s+vao\s+memory)/.test(n)) {
+    const isRemember = /(?:ghi\s+nho|luu\s+(?:vao\s+)?tri\s+nho|\bnho\s+(?:quy\s+uoc|quy\s+tac))/.test(n);
+    return {
+      intent: 'AI_MEMORY',
+      refused: false,
+      toolName: 'dxos_search_enterprise_context',
+      args: {
+        query: raw,
+        scope: 'ai_memory',
+        memoryAction: isRemember ? 'remember' : 'recall',
+        limit: 8,
+      },
     };
   }
 
@@ -289,5 +1081,9 @@ module.exports = {
   extractPlaceBesideTitle,
   extractVietnameseRoleTitle,
   extractVietnameseLockedFields,
+  extractAutomationRuleKey,
+  extractAutomationRunUid,
+  extractAutomationNodeId,
+  extractAutomationTargetNode,
   parseVietnameseNaturalIntent,
 };

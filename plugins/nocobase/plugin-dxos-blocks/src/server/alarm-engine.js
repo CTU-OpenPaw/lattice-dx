@@ -9,14 +9,24 @@
 'use strict';
 
 const { createHash, randomBytes } = require('node:crypto');
+const { emitDomainEventSafely } = require('./domain-events');
 
 const ACTIVE_ALARM_STATUSES = new Set(['open', 'acknowledged']);
 const SEVERITY_RANK = { low: 1, medium: 2, high: 3, critical: 4 };
 const ALARM_NOTIF_SEVERITIES = new Set(['high', 'critical']);
 const ALARM_NOTIF_DEDUP_WINDOW_MS = 30 * 60 * 1000;
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
+const BLOCKED_ORG_IDS = new Set(['__proto__', 'constructor', 'prototype', 'all']);
 const METRIC_NAME_RE = /^[a-zA-Z0-9_.-]{1,128}$/;
 const TELEMETRY_URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
+const BAD_TELEMETRY_QUALITIES = new Set(['bad', 'fault', 'corrupt', 'quarantined']);
+
+function isValidOrganizationId(raw) {
+  if (typeof raw !== 'string') return false;
+  const clean = raw.trim();
+  if (!clean || BLOCKED_ORG_IDS.has(clean.toLowerCase())) return false;
+  return ORG_ID_RE.test(clean);
+}
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
@@ -183,6 +193,10 @@ async function ingestOrDeduplicateAlarm(db, {
   severity = 'medium',
   summary = '',
   handlerId = 'unassigned',
+  metricName = null,
+  numericValue = null,
+  app = null,
+  publishDomainEvent = null,
 } = {}) {
   if (!organizationId || !assetEntityId) {
     throw failAlarm('ALARM_IDENTITY_REQUIRED', 400, 'Cần organizationId và assetEntityId để ghi nhận cảnh báo.');
@@ -202,11 +216,14 @@ async function ingestOrDeduplicateAlarm(db, {
     limit: 1,
   })) || [];
   const active = Array.isArray(candidates) ? candidates.find((c) => ACTIVE_ALARM_STATUSES.has(val(c, 'status'))) : null;
+  const resolvedMetric = String(metricName || attribute || 'temperature').trim();
+  const parsedEventNumeric = parseFiniteNumber(numericValue);
 
   if (active) {
     const prevCount = Math.max(1, Number(val(active, 'occurrenceCount')) || 1);
     const prevSev = String(val(active, 'severity') || 'medium');
     const nextSev = (SEVERITY_RANK[severity] || 2) > (SEVERITY_RANK[prevSev] || 2) ? severity : prevSev;
+    const escalated = (SEVERITY_RANK[nextSev] || 0) > (SEVERITY_RANK[prevSev] || 0);
     const patch = {
       occurrenceCount: prevCount + 1,
       lastSeenAt: now,
@@ -214,8 +231,34 @@ async function ingestOrDeduplicateAlarm(db, {
       ...(summary ? { proposal: String(summary).slice(0, 500) } : {}),
     };
     await updateIncidentRow(repo, active, patch);
-    if ((SEVERITY_RANK[nextSev] || 0) > (SEVERITY_RANK[prevSev] || 0) && ALARM_NOTIF_SEVERITIES.has(nextSev)) {
+    if (escalated && ALARM_NOTIF_SEVERITIES.has(nextSev)) {
       await notifyOrgOperatorsOnAlarm(db, active);
+    }
+    if (escalated) {
+      await emitDomainEventSafely(
+        db,
+        {
+          organizationId,
+          eventType: 'alarm.triggered',
+          source: '/dxos/alarm-engine',
+          subject: assetEntityId,
+          data: {
+            organizationId,
+            alarmId: val(active, 'id') ?? null,
+            alarmCode: val(active, 'code') || null,
+            ruleCode,
+            severity: nextSev,
+            assetId: val(active, 'assetId') ?? assetId ?? null,
+            assetEntityId,
+            metricName: resolvedMetric,
+            numericValue: parsedEventNumeric,
+            escalated: true,
+            deduplicated: true,
+            summary: summary || val(active, 'name') || '',
+          },
+        },
+        { app, publishDomainEvent },
+      );
     }
     return serializeAlarm(active, { deduplicated: true });
   }
@@ -246,6 +289,30 @@ async function ingestOrDeduplicateAlarm(db, {
   if (ALARM_NOTIF_SEVERITIES.has(normalizedSeverity)) {
     await notifyOrgOperatorsOnAlarm(db, created);
   }
+  await emitDomainEventSafely(
+    db,
+    {
+      organizationId,
+      eventType: 'alarm.triggered',
+      source: '/dxos/alarm-engine',
+      subject: assetEntityId,
+      data: {
+        organizationId,
+        alarmId: val(created, 'id') ?? null,
+        alarmCode: val(created, 'code') || code,
+        ruleCode,
+        severity: normalizedSeverity,
+        assetId: val(created, 'assetId') ?? assetId ?? null,
+        assetEntityId,
+        metricName: resolvedMetric,
+        numericValue: parsedEventNumeric,
+        escalated: false,
+        deduplicated: false,
+        summary: summary || val(created, 'name') || '',
+      },
+    },
+    { app, publishDomainEvent },
+  );
   return serializeAlarm(created, { deduplicated: false });
 }
 
@@ -356,13 +423,16 @@ async function ingestTelemetryPoint(db, {
   assetEntityId = '',
   metricName = 'temperature',
   numericValue,
-  unit = 'CEL',
+  unit,
   quality = 'good',
   sourceProtocol = 'http',
   observedAt = null,
+  bypassQuarantine = false,
+  app = null,
+  publishDomainEvent = null,
 } = {}) {
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
-  if (!ORG_ID_RE.test(orgId)) {
+  if (!isValidOrganizationId(orgId)) {
     throw failAlarm('TELEMETRY_ORG_REQUIRED', 400, 'Cần organizationId hợp lệ để ghi nhận telemetry.');
   }
 
@@ -424,6 +494,57 @@ async function ingestTelemetryPoint(db, {
     });
     if (!assetRow || (val(assetRow, 'organizationId') && val(assetRow, 'organizationId') !== orgId)) {
       throw failAlarm('TELEMETRY_ASSET_NOT_FOUND', 404, 'Không tìm thấy tài sản trong phạm vi tổ chức.');
+    }
+  }
+
+  const hasExplicitUnit = unit !== null && unit !== undefined && String(unit).trim() !== '';
+  const isTemperatureMetric = metric.toLowerCase() === 'temperature' || (hasExplicitUnit && cleanUnit.toUpperCase() === 'CEL');
+  const isOutOfPhysicalRange = isTemperatureMetric && (parsedValue < -100 || parsedValue > 150);
+  const isBadQuality = BAD_TELEMETRY_QUALITIES.has(cleanQuality.toLowerCase());
+  const quarantineReason = bypassQuarantine !== true
+    ? (isOutOfPhysicalRange
+      ? 'SENSOR_OUT_OF_PHYSICAL_RANGE'
+      : (isBadQuality ? 'BAD_TELEMETRY_QUALITY' : null))
+    : null;
+
+  if (quarantineReason) {
+    const quarantineRepo = db?.getRepository?.('latticeDataQuarantine');
+    if (quarantineRepo && typeof quarantineRepo.create === 'function') {
+      const quarantineUid = `QRN-${Date.now().toString(36).toUpperCase()}-${randomBytes(4).toString('hex').toUpperCase()}`;
+      const createdQuarantine = await quarantineRepo.create({
+        values: {
+          organizationId: orgId,
+          quarantineUid,
+          sourceSystem: 'iiot',
+          assetEntityId: entityId,
+          metricName: metric,
+          numericValue: parsedValue,
+          unit: cleanUnit,
+          reasonCode: quarantineReason,
+          severity: quarantineReason === 'SENSOR_OUT_OF_PHYSICAL_RANGE' ? 'high' : 'medium',
+          rawPayload: {
+            organizationId: orgId,
+            ...(resolvedAssetId != null ? { assetId: resolvedAssetId } : {}),
+            assetEntityId: entityId,
+            metricName: metric,
+            numericValue: parsedValue,
+            unit: cleanUnit,
+            quality: cleanQuality,
+            sourceProtocol: cleanProtocol,
+            observedAt: observedDate.toISOString(),
+          },
+          status: 'quarantined',
+          active: true,
+        },
+      });
+      return {
+        quarantined: true,
+        quarantineUid: val(createdQuarantine, 'quarantineUid') || quarantineUid,
+        quarantineId: val(createdQuarantine, 'id') ?? null,
+        reasonCode: quarantineReason,
+        point: null,
+        triggeredAlarms: [],
+      };
     }
   }
 
@@ -501,6 +622,10 @@ async function ingestTelemetryPoint(db, {
           severity: ruleSev,
           summary,
           handlerId,
+          metricName: metric,
+          numericValue: parsedValue,
+          app,
+          publishDomainEvent,
         });
         triggeredAlarms.push(alarm);
       }

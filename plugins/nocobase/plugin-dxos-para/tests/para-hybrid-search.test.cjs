@@ -409,3 +409,206 @@ test('paraChunks collection and migration 20261123000300 safely support both pgv
     Module._load = origLoad;
   }
 });
+
+test('migration 20261127000200 unlocks flexible pgvector column with up(), down(), RLS, and SPDX header', async () => {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  class MockMigration {
+    constructor(context) { this.context = context; }
+  }
+  Module._load = function (req, parent, isMain) {
+    if (req === '@nocobase/server') return { Migration: MockMigration };
+    return origLoad.call(this, req, parent, isMain);
+  };
+
+  try {
+    const migPath = path.join(PLUGIN_ROOT, 'src/server/migrations/20261127000200-para-flexible-vector-dimension.js');
+    const src = readFileSync(migPath, 'utf8');
+    assert.match(src, /@copyright \(C\) 2026 CTU-OpenPaw/);
+    assert.match(src, /SPDX-License-Identifier: Apache-2\.0/);
+    assert.match(src, /attachRlsPolicyToTable|attachTableRls/);
+    assert.match(src, /TYPE\s+vector\b/i);
+
+    const MigrationClass = require(migPath);
+    const queries = [];
+    const rlsCalls = [];
+    const mig = new MigrationClass({
+      db: {
+        attachLatticeRlsPolicy: async (tableName) => { rlsCalls.push(tableName); },
+        sequelize: {
+          getDialect: () => 'postgres',
+          transaction: async (fn) => fn({}),
+          query: async (sql) => {
+            queries.push(sql);
+            return [[]];
+          },
+        },
+      },
+    });
+    await mig.up();
+    assert.ok(queries.some((q) => /DROP INDEX IF EXISTS idx_lattice_para_chunks_emb_hnsw/i.test(q)));
+    assert.ok(queries.some((q) => /ALTER TABLE\s+"latticeParaChunks"\s+ALTER COLUMN\s+embedding\s+TYPE\s+vector\b/i.test(q)));
+    assert.ok(rlsCalls.includes('latticeParaChunks'));
+
+    queries.length = 0;
+    await mig.down();
+    assert.ok(queries.some((q) => /vector\(1536\)/i.test(q)));
+  } finally {
+    Module._load = origLoad;
+  }
+});
+
+test('flexible DX_EMBEDDING_DIM (768, 1024) and batched embeddings (<= 16 inputs/request) work end-to-end across syncDocumentChunks and executeHybridSearch', async () => {
+  const {
+    MAX_EMBEDDING_BATCH_SIZE,
+    resolveEmbeddingDim,
+    computeNeuralEmbeddingsBatch,
+    executeHybridSearch,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/para-hybrid-search.js'));
+  const { syncDocumentChunks } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  assert.equal(MAX_EMBEDDING_BATCH_SIZE, 16);
+  assert.equal(resolveEmbeddingDim({}), 1536);
+  assert.equal(resolveEmbeddingDim({ DX_EMBEDDING_DIM: '768' }), 768);
+  assert.equal(resolveEmbeddingDim({ DX_EMBEDDING_DIM: '1024' }), 1024);
+
+  const batchRequests = [];
+  const batchFetch = async (_url, opts) => {
+    const body = JSON.parse(opts.body);
+    batchRequests.push(body);
+    const inputs = Array.isArray(body.input) ? body.input : [body.input];
+    const dim = Number(body.dimensions) || 768;
+    return {
+      ok: true,
+      json: async () => ({
+        model: body.model,
+        data: inputs.map((_, idx) => ({
+          index: idx,
+          embedding: new Array(dim).fill(0.03 * (idx + 1)),
+        })),
+      }),
+    };
+  };
+
+  const texts35 = Array.from({ length: 35 }, (_, i) => `Đoạn tài liệu kho lạnh số ${i + 1}`);
+  const batchRes = await computeNeuralEmbeddingsBatch(texts35, {
+    env: { DXOS_EMBEDDING_URL: 'https://embed.internal.example/v1/embeddings', DX_EMBEDDING_DIM: '768' },
+    fetchImpl: batchFetch,
+  });
+  assert.equal(batchRes.length, 35);
+  assert.equal(batchRequests.length, 3, '35 chunks must be batched into 3 requests (16, 16, 3)');
+  assert.ok(batchRequests.every((r) => Array.isArray(r.input) && r.input.length <= 16));
+  assert.equal(batchRequests[0].dimensions, 768);
+  assert.ok(batchRes.every((r) => r.engine === 'neural' && r.dim === 768 && r.vector.length === 768));
+
+  // syncDocumentChunks batches multi-chunk document and writes pgvector column for non-1536 dims (768 & 1024)
+  for (const targetDim of [768, 1024]) {
+    const pgUpdates = [];
+    const createdChunks = [];
+    const reqBatches = [];
+    let chunkIdSeq = 1;
+    const longMarkdown = Array.from({ length: 20 }, (_, i) => `## Mục ${i + 1}\nQuy trình vận hành kho lạnh Cần Thơ bước ${i + 1} kiểm tra nhiệt độ -18C.`).join('\n\n');
+    const mockDb = {
+      sequelize: {
+        transaction: async (fn) => fn({}),
+        query: async (sql, opts) => {
+          pgUpdates.push({ sql, replacements: opts?.replacements });
+          return [[]];
+        },
+      },
+      getRepository(name) {
+        if (name === 'latticeParaChunks') {
+          return {
+            destroy: async () => {},
+            find: async () => [],
+            create: async ({ values }) => {
+              const row = { id: chunkIdSeq++, ...values };
+              createdChunks.push(row);
+              return row;
+            },
+          };
+        }
+        return null;
+      },
+    };
+
+    const syncRes = await syncDocumentChunks(mockDb, {
+      id: 42,
+      organizationId: 'org-a',
+      code: 'SOP-768',
+      title: 'Kho lạnh Cần Thơ',
+      contentMarkdown: longMarkdown,
+      active: true,
+    }, {
+      chunkSize: 120,
+      overlap: 10,
+      env: { DXOS_EMBEDDING_URL: 'https://embed.internal.example/v1/embeddings', DX_EMBEDDING_DIM: String(targetDim) },
+      fetchImpl: async (_url, opts) => {
+        const body = JSON.parse(opts.body);
+        const inputs = Array.isArray(body.input) ? body.input : [body.input];
+        reqBatches.push(inputs.length);
+        return {
+          ok: true,
+          json: async () => ({
+            model: 'bge-m3',
+            data: inputs.map((_, idx) => ({ index: idx, embedding: new Array(targetDim).fill(0.02) })),
+          }),
+        };
+      },
+    });
+
+    assert.ok(syncRes.chunksCreated > 16, `Expected >16 chunks, got ${syncRes.chunksCreated}`);
+    assert.ok(reqBatches.every((n) => n <= 16), `All batches must be <= 16, got ${reqBatches}`);
+    assert.ok(reqBatches.length < syncRes.chunksCreated, 'Must use fewer HTTP calls than chunk count');
+    assert.equal(pgUpdates.length, syncRes.chunksCreated, `Must write pgvector for dim=${targetDim}`);
+    assert.ok(createdChunks.every((c) => c.embeddingDim === targetDim));
+  }
+
+  // executeHybridSearch uses pgvector <=> for 768-dim neural queries and passes dim filter
+  const searchSqlCalls = [];
+  const searchDb = {
+    sequelize: {
+      query: async (sql, opts) => {
+        searchSqlCalls.push({ sql, replacements: opts?.replacements });
+        if (sql.includes('<=>')) {
+          return [[{
+            id: 701,
+            documentId: 42,
+            organizationId: 'org-a',
+            code: 'SOP-768',
+            title: 'Kho lạnh Cần Thơ',
+            paraSpace: 'resources',
+            chunkIndex: 0,
+            sectionTitle: 'Mục 1',
+            pageNumber: 1,
+            content: 'Quy trình vận hành kho lạnh Cần Thơ',
+            embeddingModel: 'nomic-embed-text',
+            embeddingEngine: 'neural',
+            embeddingDim: 768,
+            pgVectorSim: 0.91,
+          }]];
+        }
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeParaChunks') return { find: async () => [] };
+      if (name === 'latticeParaDocuments') return { find: async () => [] };
+      return null;
+    },
+  };
+  const hits = await executeHybridSearch(searchDb, {
+    organizationId: 'org-a',
+    query: 'kho lạnh Cần Thơ',
+    env: { DXOS_EMBEDDING_URL: 'https://embed.internal.example/v1/embeddings', DX_EMBEDDING_DIM: '768' },
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({ model: 'nomic-embed-text', data: [{ embedding: new Array(768).fill(0.02) }] }),
+    }),
+  });
+  const vecCall = searchSqlCalls.find((c) => c.sql.includes('<=>'));
+  assert.ok(vecCall, 'pgvector <=> SQL must execute for 768-dim query');
+  assert.equal(vecCall.replacements?.dim, 768);
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].embeddingEngine, 'neural');
+});

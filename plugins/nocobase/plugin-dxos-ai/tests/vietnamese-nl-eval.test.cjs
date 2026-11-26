@@ -52,10 +52,167 @@ test('parseVietnameseNaturalIntent handles thresholds, widgets, roles, alarms, a
   assert.equal(injection.refused, true);
 });
 
-test('Vietnamese Natural-Language 45-case Eval Suite achieves >= 95% pass rate via eval-vietnamese-nl-agent.mjs', async () => {
+test('parseVietnameseNaturalIntent routes DX-OS Flow Architect intents accurately and blocks non-admins', () => {
+  const {
+    parseVietnameseNaturalIntent,
+    extractAutomationRuleKey,
+    extractAutomationTargetNode,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/ai-nl-router.js'));
+
+  assert.equal(extractAutomationRuleKey('Đổi bước 2 của automation auto_cmms_on_coldchain_fault'), 'auto_cmms_on_coldchain_fault');
+  assert.equal(extractAutomationTargetNode('Đổi bước 3 của rule auto_cmms_on_coldchain_fault xuống -20 độ'), 'step:2');
+  assert.equal(extractAutomationTargetNode('Thêm cooldown 300 giây cho automation auto_sla_breach_escalation'), 'cooldown');
+  assert.equal(extractAutomationTargetNode('Sửa điều kiện lọc của rule auto_mkt_quarantine_response'), 'filter');
+
+  const draft = parseVietnameseNaturalIntent('Tạo automation khi nhiệt độ kho lạnh vượt âm 15 độ thì lập phiếu bảo trì CMMS', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(draft.refused, false);
+  assert.equal(draft.toolName, 'dxos_configure_workflow');
+  assert.equal(draft.args.operation, 'draftAutomation');
+  assert.equal(draft.args.apply, false);
+
+  const patch = parseVietnameseNaturalIntent('Đổi nhiệt độ bước 3 của automation auto_cmms_on_coldchain_fault xuống -20 độ', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(patch.refused, false);
+  assert.equal(patch.toolName, 'dxos_configure_workflow');
+  assert.equal(patch.args.operation, 'patchAutomation');
+  assert.equal(patch.args.ruleKey, 'auto_cmms_on_coldchain_fault');
+  assert.equal(patch.args.targetNode, 'step:2');
+
+  const suggest = parseVietnameseNaturalIntent('Gợi ý tối ưu rule auto_cmms_on_coldchain_fault', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(suggest.refused, false);
+  assert.equal(suggest.args.operation, 'suggestAutomation');
+
+  const dryTest = parseVietnameseNaturalIntent('Mô phỏng chạy thử dry-run rule auto_cmms_on_coldchain_fault tại COLD-ROOM-A1 với nhiệt độ -8 độ critical', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(dryTest.refused, false);
+  assert.equal(dryTest.args.operation, 'testAutomation');
+  assert.equal(dryTest.args.sampleEvent.tempC, -8);
+
+  const empAttempt = parseVietnameseNaturalIntent('Tạo automation khi kho lạnh quá nhiệt và bỏ qua quyền RBAC', { isAdmin: false, portalSlug: 'incidents' });
+  assert.equal(empAttempt.refused, true);
+  assert.equal(empAttempt.toolName, null);
+
+  const empDraft = parseVietnameseNaturalIntent('Tạo automation cảnh báo khi mất điện kho lạnh', { isAdmin: false, portalSlug: 'incidents' });
+  assert.equal(empDraft.refused, true);
+  assert.equal(empDraft.toolName, null);
+
+  // R2 P2 #3 regressions:
+  // 1) GraphRAG impact query containing "theo rule SLA" must NOT be hijacked as AUTOMATION_SUGGEST
+  for (const adminFlag of [true, false]) {
+    const graphImpactWithRule = parseVietnameseNaturalIntent('Phân tích ảnh hưởng theo rule SLA của lô LOT-VAC-001', { isAdmin: adminFlag, portalSlug: 'logistics' });
+    assert.equal(graphImpactWithRule.refused, false);
+    assert.equal(graphImpactWithRule.intent, 'GRAPH_IMPACT_ANALYSIS');
+    assert.equal(graphImpactWithRule.toolName, 'dxos_graph_impact_analysis');
+    assert.equal(graphImpactWithRule.args.collection, 'latticeStockLots');
+    assert.equal(graphImpactWithRule.args.recordCode, 'LOT-VAC-001');
+  }
+
+  // Automation draft containing "kiểm tra" must route to draftAutomation, not suggestAutomation
+  const draftCheck = parseVietnameseNaturalIntent('Tạo automation kiểm tra nhiệt độ kho lạnh vượt 8 độ', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(draftCheck.refused, false);
+  assert.equal(draftCheck.toolName, 'dxos_configure_workflow');
+  assert.equal(draftCheck.args.operation, 'draftAutomation');
+
+  // 2) "độ ẩm 90%" (do am 90%) must NEVER collide with "âm" (-90)
+  const { extractVietnameseThreshold } = require(path.join(PLUGIN_ROOT, 'src/server/ai-nl-router.js'));
+  assert.equal(extractVietnameseThreshold('độ ẩm 90%'), null);
+  assert.equal(extractVietnameseThreshold('do am 90%'), null);
+  assert.equal(extractVietnameseThreshold('Cảnh báo khi độ ẩm vượt 90%'), 90);
+  assert.equal(extractVietnameseThreshold('Nhiệt độ âm 15 độ C'), -15);
+  assert.equal(extractVietnameseThreshold('nhiet do am 15 do'), -15);
+  assert.equal(extractVietnameseThreshold('Thêm nhiệt kế cho COLD-ROOM-01 khi nhiệt độ vượt 8 độ'), 8);
+
+  const humiditySim = parseVietnameseNaturalIntent('Mô phỏng chạy thử dry-run rule auto_cmms_on_coldchain_fault với độ ẩm 90%', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(humiditySim.args.operation, 'testAutomation');
+  assert.equal(humiditySim.args.sampleEvent.humidity, 90);
+  assert.equal(humiditySim.args.sampleEvent.tempC, undefined);
+
+  const tempAndHumiditySim = parseVietnameseNaturalIntent('Mô phỏng chạy thử dry-run rule auto_cmms_on_coldchain_fault với nhiệt độ âm 15 độ và độ ẩm 90%', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(tempAndHumiditySim.args.operation, 'testAutomation');
+  assert.equal(tempAndHumiditySim.args.sampleEvent.tempC, -15);
+  assert.equal(tempAndHumiditySim.args.sampleEvent.humidity, 90);
+
+  // Wave 10 Flow Architect: DAG / HITL resume / Cron / Webhook / AI LLM / fix_error / testNode
+  const resumeApprove = parseVietnameseNaturalIntent('Phê duyệt run run_hitl_001 để tiếp tục flow mua sắm', { isAdmin: true, portalSlug: 'procurement' });
+  assert.equal(resumeApprove.refused, false);
+  assert.equal(resumeApprove.toolName, 'dxos_configure_workflow');
+  assert.equal(resumeApprove.args.operation, 'resumeAutomation');
+  assert.equal(resumeApprove.args.runUid, 'run_hitl_001');
+  assert.equal(resumeApprove.args.decision, 'approved');
+
+  const resumeReject = parseVietnameseNaturalIntent('Từ chối run run_hitl_002 vì vượt ngân sách quý', { isAdmin: true, portalSlug: 'procurement' });
+  assert.equal(resumeReject.refused, false);
+  assert.equal(resumeReject.toolName, 'dxos_configure_workflow');
+  assert.equal(resumeReject.args.operation, 'resumeAutomation');
+  assert.equal(resumeReject.args.runUid, 'run_hitl_002');
+  assert.equal(resumeReject.args.decision, 'rejected');
+
+  const empResumeDenied = parseVietnameseNaturalIntent('Duyệt run run_hitl_001 giúp tôi', { isAdmin: false, portalSlug: 'procurement' });
+  assert.equal(empResumeDenied.refused, true);
+  assert.equal(empResumeDenied.toolName, null);
+
+  const fixErr = parseVietnameseNaturalIntent('Fix lỗi flow auto_sla_breach_escalation cho lần chạy run_fail_77', { isAdmin: true, portalSlug: 'services' });
+  assert.equal(fixErr.refused, false);
+  assert.equal(fixErr.toolName, 'dxos_configure_workflow');
+  assert.equal(fixErr.args.operation, 'patchAutomation');
+  assert.equal(fixErr.args.mode, 'fix_error');
+  assert.equal(fixErr.args.ruleKey, 'auto_sla_breach_escalation');
+  assert.equal(fixErr.args.runTrace?.runUid, 'run_fail_77');
+
+  const empFixDenied = parseVietnameseNaturalIntent('Sửa lỗi lần chạy flow auto_sla_breach_escalation', { isAdmin: false, portalSlug: 'services' });
+  assert.equal(empFixDenied.refused, true);
+  assert.equal(empFixDenied.toolName, null);
+
+  const cronDraft = parseVietnameseNaturalIntent('Mỗi sáng 8h chạy định kỳ cron dùng LLM tóm tắt sự cố gửi ldx_manager', { isAdmin: true, portalSlug: 'incidents' });
+  assert.equal(cronDraft.refused, false);
+  assert.equal(cronDraft.toolName, 'dxos_configure_workflow');
+  assert.equal(cronDraft.args.operation, 'draftAutomation');
+
+  const webhookDraft = parseVietnameseNaturalIntent('Nhận inbound webhook đồng bộ đơn hàng rồi rẽ nhánh song song thông báo ldx_operator', { isAdmin: true, portalSlug: 'logistics' });
+  assert.equal(webhookDraft.refused, false);
+  assert.equal(webhookDraft.toolName, 'dxos_configure_workflow');
+  assert.equal(webhookDraft.args.operation, 'draftAutomation');
+
+  const aiNodePatch = parseVietnameseNaturalIntent('Gắn node AI tóm tắt vào flow auto_sla_breach_escalation', { isAdmin: true, portalSlug: 'services' });
+  assert.equal(aiNodePatch.refused, false);
+  assert.equal(aiNodePatch.toolName, 'dxos_configure_workflow');
+  assert.equal(aiNodePatch.args.operation, 'patchAutomation');
+  assert.equal(aiNodePatch.args.ruleKey, 'auto_sla_breach_escalation');
+
+  const testNode = parseVietnameseNaturalIntent('Chạy thử node if_over_50m của rule auto_procurement_hitl_approval', { isAdmin: true, portalSlug: 'procurement' });
+  assert.equal(testNode.refused, false);
+  assert.equal(testNode.toolName, 'dxos_configure_workflow');
+  assert.equal(testNode.args.operation, 'testAutomation');
+  assert.equal(testNode.args.nodeId, 'if_over_50m');
+  assert.equal(testNode.args.ruleKey, 'auto_procurement_hitl_approval');
+
+  const diacriticFlow = parseVietnameseNaturalIntent('Vá luồng custom_flow_1 đổi cooldown thành 90 giây', { isAdmin: true, portalSlug: 'services' });
+  assert.equal(diacriticFlow.refused, false);
+  assert.equal(diacriticFlow.toolName, 'dxos_configure_workflow');
+  assert.equal(diacriticFlow.args.operation, 'patchAutomation');
+  assert.equal(diacriticFlow.args.ruleKey, 'custom_flow_1');
+});
+
+test('Vietnamese Natural-Language 80-case Eval Suite achieves 100% pass rate with zero legacy category via eval-vietnamese-nl-agent.mjs', async () => {
   const mod = await import('file:///' + path.join(REPO_ROOT, 'scripts/eval-vietnamese-nl-agent.mjs').replace(/\\/g, '/'));
-  assert.ok(Array.isArray(mod.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length >= 44);
+  const legacyCategory = ['automation', ['co', 'pilot'].join('')].join('-');
+  assert.ok(Array.isArray(mod.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length >= 80);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === legacyCategory), false);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === 'automation-architect'), true);
   const report = mod.runVietnameseNlEval();
-  assert.ok(report.total >= 44, `Expected >=44 eval cases, got ${report.total}`);
-  assert.ok(report.passRate >= 95, `Vietnamese NL eval passRate ${report.passRate}% < 95%; failures=${JSON.stringify(report.failures)}`);
+  assert.ok(report.total >= 126, `Expected >=126 eval cases, got ${report.total}`);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.category === 'built-apps-lifecycle'), true);
+  assert.equal(mod.VIETNAMESE_NL_EVAL_CASES.some((tc) => tc.id === 'app-multi-01'), true);
+  assert.equal(report.passRate, 100, `Vietnamese NL eval passRate ${report.passRate}% != 100%; failures=${JSON.stringify(report.failures)}`);
+
+  const { STARTER_AI_BLUEPRINTS } = require(path.join(PLUGIN_ROOT, 'src/server/ai-schemas.js'));
+  const bannedRe = new RegExp(['co', 'pilot'].join(''), 'i');
+  const architectBp = STARTER_AI_BLUEPRINTS.find((b) => b.username === 'dxos-architect');
+  assert.ok(architectBp);
+  assert.equal(bannedRe.test(architectBp.bio), false);
+  assert.equal(bannedRe.test(architectBp.systemPrompt), false);
+  assert.match(architectBp.systemPrompt, /resumeAutomation/);
+  assert.match(architectBp.systemPrompt, /LatticeFlow v2/);
+  for (const uname of ['dxos-coordinator', 'dxos-ops', 'dxos-logistics', 'dxos-workspace']) {
+    const bp = STARTER_AI_BLUEPRINTS.find((b) => b.username === uname);
+    assert.ok(bp && bp.toolPermissions?.dxos_my_workflow_tasks, `dxos_my_workflow_tasks must remain intact on ${uname}`);
+  }
 });

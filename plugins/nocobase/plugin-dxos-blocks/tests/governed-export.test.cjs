@@ -395,3 +395,146 @@ test('executeGovernedExport paginates in 1000-row batches up to 10000 rows', asy
     { limit: 500, offset: 2000 },
   ]);
 });
+
+test('Task 7: resolveAllowedExportColumns and executeGovernedExport inspect db.getCollection(collection)?.fields for latticeCustom* while stripping sensitive/virtual fields and honoring RBAC', async () => {
+  const { resolveAllowedExportColumns, executeGovernedExport } = require('../src/server/governed-export');
+
+  const customRows = [
+    {
+      id: 1,
+      organizationId: 'org-a',
+      code: 'MNT-01',
+      equipmentName: 'Máy nén A1',
+      priority: 'high',
+      status: 'reported',
+      apiKeyHash: 'secret-hash-val',
+      virtualSummary: 'ignored-virtual',
+    },
+    {
+      id: 2,
+      organizationId: 'org-b',
+      code: 'MNT-B2',
+      equipmentName: 'Foreign Org B',
+      priority: 'low',
+      status: 'reported',
+    },
+  ];
+
+  const customCollection = {
+    name: 'latticeCustomMaintenanceOrders',
+    fields: new Map([
+      ['id', { name: 'id', type: 'bigInt' }],
+      ['code', { name: 'code', type: 'string' }],
+      ['equipmentName', { name: 'equipmentName', type: 'string' }],
+      ['priority', { name: 'priority', type: 'string' }],
+      ['status', { name: 'status', type: 'string' }],
+      ['virtualSummary', { name: 'virtualSummary', type: 'virtual' }],
+      ['assignee', { name: 'assignee', type: 'belongsTo', target: 'latticeEmployees', foreignKey: 'assigneeId' }],
+      ['lines', { name: 'lines', type: 'hasMany', target: 'latticeCustomLines', foreignKey: 'orderId' }],
+      ['apiKeyHash', { name: 'apiKeyHash', type: 'string' }],
+      ['organizationId', { name: 'organizationId', type: 'string' }],
+    ]),
+  };
+
+  let restrictedRoleFields = null;
+  const db = {
+    getCollection: (name) => (name === 'latticeCustomMaintenanceOrders' ? customCollection : null),
+    getRepository(name) {
+      if (name === 'roles') {
+        return { findOne: async ({ filter }) => ({ name: filter.name, allowAll: false }) };
+      }
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async ({ filter }) => (restrictedRoleFields
+            ? {
+                roleName: filter.roleName,
+                name: filter.name,
+                usingActionsConfig: true,
+                actions: [{ name: 'view', fields: restrictedRoleFields }],
+              }
+            : { roleName: filter.roleName, name: filter.name, usingActionsConfig: false }),
+        };
+      }
+      if (name === 'latticeCustomMaintenanceOrders') {
+        return {
+          find: async ({ filter }) => customRows.filter((r) => !filter?.organizationId || r.organizationId === filter.organizationId),
+        };
+      }
+      return null;
+    },
+  };
+
+  const ctx = { state: { currentUser: { id: 101, username: 'alice' }, currentRole: 'ldx_operator' } };
+  const actor = { userId: '101', employeeId: 10, organizationId: 'org-a' };
+
+  // 1. No explicit fields and no role field restriction -> inspects db.getCollection(collection).fields
+  const colsRes = await resolveAllowedExportColumns(db, ctx, {
+    collection: 'latticeCustomMaintenanceOrders',
+    requestedFields: null,
+    isRoot: false,
+  });
+  assert.ok(colsRes.columns.includes('equipmentName'), 'Custom field equipmentName must be exported');
+  assert.ok(colsRes.columns.includes('priority'), 'Custom field priority must be exported');
+  assert.equal(colsRes.columns.includes('virtualSummary'), false, 'Virtual field must be excluded');
+  assert.equal(colsRes.columns.includes('assignee'), false, 'Association belongsTo field must be excluded');
+  assert.equal(colsRes.columns.includes('lines'), false, 'Association hasMany field must be excluded');
+  assert.equal(colsRes.columns.includes('apiKeyHash'), false, 'Sensitive field must be excluded');
+
+  // 2. executeGovernedExport outputs custom columns and stays strictly org-scoped
+  const exportRes = await executeGovernedExport(
+    db,
+    ctx,
+    { collection: 'latticeCustomMaintenanceOrders', format: 'csv' },
+    { isRoot: false, actor },
+  );
+  assert.ok(exportRes.columns.includes('equipmentName'));
+  assert.equal(exportRes.rowCount, 1);
+  const csvText = exportRes.buffer.toString('utf8');
+  assert.ok(csvText.includes('Máy nén A1'));
+  assert.equal(csvText.includes('Foreign Org B'), false);
+  assert.equal(csvText.includes('secret-hash-val'), false);
+
+  // 3. Explicit role field restriction still takes precedence
+  restrictedRoleFields = ['code', 'status'];
+  const restrictedRes = await resolveAllowedExportColumns(db, ctx, {
+    collection: 'latticeCustomMaintenanceOrders',
+    requestedFields: null,
+    isRoot: false,
+  });
+  assert.deepEqual(restrictedRes.columns, ['code', 'status']);
+
+  // 4. Prototype keys (__proto__, constructor, prototype) are blocked in explicit requestedFields
+  await assert.rejects(
+    () => resolveAllowedExportColumns(db, ctx, {
+      collection: 'latticeCustomMaintenanceOrders',
+      requestedFields: ['__proto__', 'constructor', 'prototype'],
+      isRoot: true,
+    }),
+    (err) => err.status === 403 && err.code === 'EXPORT_FIELDS_FORBIDDEN',
+  );
+  const mixedProtoRes = await resolveAllowedExportColumns(db, ctx, {
+    collection: 'latticeCustomMaintenanceOrders',
+    requestedFields: ['code', '__proto__', 'constructor'],
+    isRoot: true,
+  });
+  assert.deepEqual(mixedProtoRes.columns, ['code']);
+  assert.deepEqual(mixedProtoRes.omittedColumns, ['__proto__', 'constructor']);
+});
+
+test('executeGovernedExport rejects prototype-pollution strings and "all" in organizationId', async () => {
+  const { executeGovernedExport } = require('../src/server/governed-export');
+  const { db } = makeExportHarness();
+  const ctx = { state: { currentUser: { id: 1, username: 'root' }, currentRole: 'root' } };
+  for (const badOrg of ['__proto__', 'constructor', 'prototype', '__PROTO__', 'all', 'ALL']) {
+    await assert.rejects(
+      () => executeGovernedExport(
+        db,
+        ctx,
+        { collection: 'latticeRequests', format: 'csv', organizationId: badOrg },
+        { isRoot: true, actor: null },
+      ),
+      (err) => err.status === 400 && err.code === 'EXPORT_ORG_INVALID',
+      `executeGovernedExport must reject organizationId="${badOrg}"`,
+    );
+  }
+});

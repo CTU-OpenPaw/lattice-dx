@@ -1,5 +1,5 @@
 {
-  "name": "lattice-dx", "version": "0.3.0", "private": true, "license": "Apache-2.0",
+  "name": "lattice-dx", "version": "0.4.0", "private": true, "license": "Apache-2.0",
   "type": "module",
   "packageManager": "pnpm@10.23.0", "engines": { "node": ">=24 <25" },
   "scripts": {
@@ -67,6 +67,9 @@
     "acceptance:logistics-rbac": "node scripts/acceptance-logistics-and-rbac.mjs",
     "setup:dxos-ai": "node scripts/setup-dxos-ai-workforce.mjs",
     "acceptance:dxos-ai-mcp": "node scripts/acceptance-dxos-ai-and-mcp.mjs",
+    "acceptance:headless-paas": "node scripts/acceptance-headless-paas.mjs",
+    "acceptance:broker-automation-builder": "node scripts/acceptance-broker-automation-builder.mjs",
+    "seed:v100-showcase": "node scripts/seed-v100-championship-showcase.mjs",
     "backup:rehearse": "node scripts/backup-core.mjs rehearse",
     "backup:full": "node scripts/full-backup-core.mjs backup",
     "backup:rehearse-full": "node scripts/full-backup-core.mjs rehearse",
@@ -91,6 +94,7 @@
     "test:ngsi-ld-postgres": "node scripts/acceptance-ngsi-ld-postgres.mjs",
     "test:infra": "node scripts/smoke-core.mjs",
     "pof:check": "node scripts/verify-pof-readiness.mjs",
+    "release:sbom": "node scripts/generate-sbom.mjs --out=docs/sbom-cyclonedx.json",
     "release:tarball": "node scripts/build-oss-release-tarball.mjs"
   },
   "devDependencies": { "typescript": "7.0.2", "tsx": "4.23.15", "vitest": "5.0.3", "@types/node": "26.6.4" },

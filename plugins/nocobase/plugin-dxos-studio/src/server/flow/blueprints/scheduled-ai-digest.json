@@ -1,0 +1,153 @@
+{
+  "blueprintKey": "auto_scheduled_ai_digest",
+  "ruleKey": "auto_scheduled_ai_digest",
+  "name": "Báo cáo Tổng hợp Sự cố AI Định kỳ (08:00 Thứ 2–Thứ 6)",
+  "description": "Chạy theo lịch Cron 08:00 ngày làm việc (Asia/Ho_Chi_Minh), truy vấn tối đa 20 sự cố mở trên latticeIncidentCases, chuẩn hóa danh sách bằng logic.transform, nhờ ai.llm tổng hợp JSON { headline, actions } và gửi báo cáo cho ldx_manager.",
+  "category": "ai-ops",
+  "triggerEventType": "schedule.cron",
+  "dmnTableKey": null,
+  "cooldownSec": 300,
+  "maxDepth": 8,
+  "active": true,
+  "sampleEvent": {
+    "type": "schedule.cron",
+    "source": "dxos-studio:scheduler",
+    "subject": "daily-incident-digest",
+    "data": {
+      "cron": "0 8 * * 1-5",
+      "timezone": "Asia/Ho_Chi_Minh",
+      "scheduledAt": "2026-11-24T01:00:00.000Z"
+    }
+  },
+  "graphJson": {
+    "version": 2,
+    "nodes": [
+      {
+        "id": "trig_daily_cron",
+        "type": "trigger.schedule",
+        "label": "Lịch chạy 08:00 (Thứ 2–6)",
+        "position": { "x": 80, "y": 240 },
+        "config": {
+          "cron": "0 8 * * 1-5",
+          "timezone": "Asia/Ho_Chi_Minh"
+        }
+      },
+      {
+        "id": "query_open_incidents",
+        "type": "data.query",
+        "label": "Truy vấn sự cố đang mở",
+        "position": { "x": 360, "y": 240 },
+        "config": {
+          "collection": "latticeIncidentCases",
+          "filter": {
+            "status": "open"
+          },
+          "limit": 20,
+          "sort": ["-createdAt", "-id"]
+        }
+      },
+      {
+        "id": "transform_digest",
+        "type": "logic.transform",
+        "label": "Chuẩn hóa danh sách tóm tắt",
+        "position": { "x": 640, "y": 240 },
+        "config": {
+          "operations": [
+            {
+              "op": "set",
+              "target": "collection",
+              "value": "latticeIncidentCases"
+            },
+            {
+              "op": "coerceNumber",
+              "target": "openCount",
+              "source": "steps.query_open_incidents.count"
+            },
+            {
+              "op": "set",
+              "target": "items",
+              "source": "steps.query_open_incidents.items"
+            },
+            {
+              "op": "template",
+              "target": "digestSummaryText",
+              "expr": "Tổng số sự cố đang mở: {{steps.query_open_incidents.count}}"
+            }
+          ]
+        }
+      },
+      {
+        "id": "llm_digest",
+        "type": "ai.llm",
+        "label": "AI tổng hợp báo cáo JSON",
+        "position": { "x": 920, "y": 240 },
+        "config": {
+          "systemPrompt": "Bạn là chuyên gia điều hành vận hành doanh nghiệp. Hãy tóm tắt danh sách sự cố đang mở thành JSON thuần gồm đúng 2 khóa: headline (chuỗi tóm tắt ngắn gọn) và actions (mảng các hành động ưu tiên).",
+          "userPrompt": "Báo cáo tổng hợp lúc 08:00: {{steps.transform_digest.digestSummaryText}}. Danh sách sự cố: {{steps.transform_digest.items}}",
+          "responseFormat": "json",
+          "temperature": 0.2,
+          "maxTokens": 800,
+          "fallbackOutput": {
+            "headline": "Tổng hợp {{steps.query_open_incidents.count}} sự cố đang mở cần xử lý",
+            "actions": [
+              "Rà soát các sự cố mức critical đang mở",
+              "Xác nhận phân công kỹ thuật viên và thời hạn SLA"
+            ]
+          }
+        }
+      },
+      {
+        "id": "notify_manager_digest",
+        "type": "notify.send",
+        "label": "Gửi báo cáo định kỳ cho Quản lý",
+        "position": { "x": 1200, "y": 240 },
+        "config": {
+          "roleNames": ["ldx_manager"],
+          "category": "ai-ops",
+          "severity": "info",
+          "title": "Báo cáo AI 08:00: {{steps.llm_digest.parsedJson.headline}}",
+          "body": "Số sự cố mở: {{steps.query_open_incidents.count}}. Đề xuất hành động: {{steps.llm_digest.parsedJson.actions}}",
+          "targetCollection": "latticeIncidentCases",
+          "targetPath": "/p/incidents"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "e_cron_query",
+        "source": "trig_daily_cron",
+        "sourceHandle": "main",
+        "target": "query_open_incidents",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_query_transform",
+        "source": "query_open_incidents",
+        "sourceHandle": "main",
+        "target": "transform_digest",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_transform_llm",
+        "source": "transform_digest",
+        "sourceHandle": "main",
+        "target": "llm_digest",
+        "targetHandle": "in"
+      },
+      {
+        "id": "e_llm_notify",
+        "source": "llm_digest",
+        "sourceHandle": "main",
+        "target": "notify_manager_digest",
+        "targetHandle": "in"
+      }
+    ],
+    "viewport": { "x": 0, "y": 0, "zoom": 1 },
+    "settings": {
+      "errorPolicy": "stop",
+      "cooldownSec": 300,
+      "maxDepth": 8,
+      "timeoutMs": 30000
+    }
+  }
+}

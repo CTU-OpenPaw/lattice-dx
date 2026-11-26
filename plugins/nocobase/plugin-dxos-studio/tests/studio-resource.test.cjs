@@ -366,7 +366,10 @@ test('composePortals attaches blocks, orders grid rows above seed row, and creat
   assert.equal(ctx.body.dxosBlocksAttached, true);
   assert.equal(ctx.body.createdPages, 6);
   assert.equal(ctx.body.mobilePagesCreated, 4);
-  assert.equal(ctx.body.attachedBlocks, 15);
+  assert.equal(ctx.body.attachedBlocks, 20);
+  const logisticsBiModel = flowModels.find((m) => m.uid === 'dxos-ov-logistics-bi-chart');
+  assert.ok(logisticsBiModel, 'Expected flowModel dxos-ov-logistics-bi-chart');
+  assert.equal(logisticsBiModel.use, 'DxosBiChartBlockModel');
   assert.equal(updatedGrids.length, 4);
   for (const slug of ['procurement', 'logistics', 'services']) {
     const wbModel = flowModels.find((m) => m.uid === `dxos-ov-${slug}-workbench`);
@@ -600,6 +603,9 @@ test('OVERVIEW_SPECS wires DxosRecordWorkbenchBlockModel into procurement, logis
       showExport: true,
       showVoucherActions: true,
       showChatter: true,
+      showPkiBadge: true,
+      showLineage: true,
+      showPrintVoucher: true,
     },
     services: {
       title: 'Chứng từ, Chatter & Xuất báo cáo Dịch vụ [W]',
@@ -607,6 +613,9 @@ test('OVERVIEW_SPECS wires DxosRecordWorkbenchBlockModel into procurement, logis
       showExport: true,
       showVoucherActions: true,
       showChatter: true,
+      showPkiBadge: true,
+      showLineage: true,
+      showPrintVoucher: true,
     },
   };
   for (const [slug, cfg] of Object.entries(expected)) {
@@ -744,7 +753,7 @@ test('readiness resolves host NocoBase version dynamically from NOCOBASE_VERSION
   const baseDb = (appVersion) => ({
     ...(appVersion ? { app: { version: appVersion } } : {}),
     hasCollection: () => false,
-    getRepository: () => ({ find: async () => [] }),
+    getRepository: (name) => (name === 'rolesUsers' || name === 'roles' ? null : { find: async () => [] }),
   });
   const origEnv = process.env.NOCOBASE_VERSION;
   try {
@@ -807,5 +816,550 @@ test('portal-composer COLLECTION_FIELD_GROUPS covers every interface field in do
       .map((f) => f.name)
       .filter((name) => !covered.has(name));
     assert.deepEqual(missing, [], `COLLECTION_FIELD_GROUPS[${colName}] missing interface fields: ${missing.join(', ')}`);
+  }
+});
+
+test('service-scope rewrites self requester.userId and assignee.userId filters, rejects foreign/unsafe filters, and wraps PG RLS context', async () => {
+  const Module = require('node:module');
+  const { createServiceScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+
+  const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+  const ticket = { id: 19, organizationId: 'org-a', requesterId: 8, status: 'draft', version: 1 };
+  const fakeTx = { id: 'tx-svc-rls' };
+  const sqlCalls = [];
+  const repoTxCalls = [];
+  const db = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => cb(fakeTx),
+      query: async (sql, opts) => {
+        sqlCalls.push({ sql, opts });
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+      }
+      if (name === 'latticeServiceTickets') {
+        return {
+          findOne: async (opts) => {
+            repoTxCalls.push({ repo: name, transaction: opts?.transaction || null });
+            return ticket;
+          },
+        };
+      }
+      if (name === 'latticeDepartments') {
+        return {
+          findOne: async (opts) => {
+            repoTxCalls.push({ repo: name, transaction: opts?.transaction || null });
+            return { id: 2, organizationId: 'org-a', active: true };
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  const mw = createServiceScopeMiddleware(db);
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  try {
+    process.env.DX_PG_RLS_SESSION = 'false';
+
+    // 1. NocoBase preset $or scope on latticeServiceTickets & charts:queryData
+    const presetFilter = { $or: [{ 'requester.userId': { $eq: 80 } }, { 'assignee.userId': { $eq: 80 } }] };
+    const snapshot = structuredClone(presetFilter);
+    const listCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: presetFilter } },
+    };
+    await mw(listCtx, async () => {});
+    assert.deepEqual(presetFilter, snapshot);
+    assert.deepEqual(listCtx.action.params.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { $or: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+    assert.equal(listCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 0);
+
+    // Conflict-safe $and when requesterId/assigneeId also specified
+    const conflictCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'latticeServiceTickets',
+        actionName: 'list',
+        params: { filter: { 'requester.userId': 80, requesterId: 99, 'assignee.userId': { $eq: '80' }, assigneeId: 77 } },
+      },
+    };
+    await mw(conflictCtx, async () => {});
+    assert.deepEqual(conflictCtx.action.params.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { requesterId: 99, assigneeId: 77, $and: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+
+    const chartSelfCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: { 'assignee.userId': { $eq: 80 } } } },
+      },
+    };
+    await mw(chartSelfCtx, async () => {});
+    assert.deepEqual(chartSelfCtx.action.params.values.filter, {
+      $and: [{ organizationId: 'org-a' }, { assigneeId: { $eq: 8 } }],
+    });
+
+    // Foreign & unsafe filters still rejected 403
+    for (const badFilter of [
+      { 'requester.userId': { $eq: 99 } },
+      { 'assignee.userId': 99 },
+      { 'assignee.userId': { $ne: 80 } },
+      { 'requester.userId': { $gt: 1 } },
+      { 'assignee.identitySubject': 'sub-x' },
+      '{"__proto__":{"polluted":true}}',
+      '{"constructor":{"prototype":{"polluted":true}}}',
+    ]) {
+      await assert.rejects(
+        () => mw({
+          state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+          action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: badFilter } },
+        }, async () => {}),
+        (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+      );
+    }
+
+    // 2. DX_PG_RLS_SESSION=true wraps latticeServiceTickets & charts:queryData in withTenantRlsContext
+    process.env.DX_PG_RLS_SESSION = 'true';
+    sqlCalls.length = 0;
+    repoTxCalls.length = 0;
+    let seenTx = null;
+    const rlsListCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'latticeServiceTickets', actionName: 'update', params: { filterByTk: 19, values: { name: 'RLS update', departmentId: 2 } } },
+    };
+    await mw(rlsListCtx, async () => { seenTx = rlsListCtx.state.latticeRlsTransaction; });
+    assert.equal(seenTx, fakeTx);
+    assert.equal(rlsListCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(sqlCalls[0].opts.replacements, { orgId: 'org-a' });
+    assert.ok(repoTxCalls.length >= 2 && repoTxCalls.every((c) => c.transaction === fakeTx));
+
+    sqlCalls.length = 0;
+    let chartSeenTx = null;
+    const rlsChartCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: { resourceName: 'charts', actionName: 'queryData', params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: {} } } },
+    };
+    await mw(rlsChartCtx, async () => { chartSeenTx = rlsChartCtx.state.latticeRlsTransaction; });
+    assert.equal(chartSeenTx, fakeTx);
+    assert.equal(sqlCalls.length, 1);
+
+    // 3. Standalone fallback when pg-rls module is absent
+    const serviceScopePath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/service-scope.js'));
+    const origLoad = Module._load;
+    delete require.cache[serviceScopePath];
+    Module._load = function mockedMissingRls(request, parent, isMain) {
+      if (typeof request === 'string' && request.endsWith('pg-rls')) {
+        throw Object.assign(new Error(`Cannot find module '${request}'`), { code: 'MODULE_NOT_FOUND' });
+      }
+      return origLoad.call(this, request, parent, isMain);
+    };
+    try {
+      const standaloneMod = require(serviceScopePath);
+      const standaloneMw = standaloneMod.createServiceScopeMiddleware(db);
+      const fallbackCtx = {
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: { resourceName: 'latticeServiceTickets', actionName: 'list', params: { filter: { 'assignee.userId': 80 } } },
+      };
+      let ran = false;
+      await standaloneMw(fallbackCtx, async () => { ran = true; });
+      assert.equal(ran, true);
+      assert.deepEqual(fallbackCtx.action.params.filter, {
+        $and: [{ organizationId: 'org-a' }, { assigneeId: { $eq: 8 } }],
+      });
+    } finally {
+      Module._load = origLoad;
+      delete require.cache[serviceScopePath];
+    }
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
+});
+
+test('solutionBundleExport restricts organizationId=all to root and scopes non-root isStudioAdmin via latticeEmployees', async () => {
+  const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+
+  const employees = [
+    { id: 10, userId: 20, organizationId: 'org-a', departmentId: 1, active: true },
+    { id: 11, userId: 21, organizationId: 'org-b', departmentId: 2, active: false },
+  ];
+  const workflows = [
+    { id: 1, key: 'wf-a', title: 'WF Org A', current: true, enabled: true, options: { dxosOrganizationId: 'org-a' }, config: {} },
+    { id: 2, key: 'wf-b', title: 'WF Org B', current: true, enabled: true, options: { dxosOrganizationId: 'org-b' }, config: {} },
+  ];
+  const aiProfiles = [
+    { id: 1, username: 'ai-a', organizationId: 'org-a', enabled: true },
+    { id: 2, username: 'ai-b', organizationId: 'org-b', enabled: true },
+  ];
+
+  const rolesUsers = [
+    { userId: 1, roleName: 'root' },
+    { userId: 20, roleName: 'ldx_sysadmin' },
+    { userId: 21, roleName: 'ldx_sysadmin' },
+    { userId: 999, roleName: 'ldx_sysadmin' },
+  ];
+
+  const db = {
+    hasCollection: () => true,
+    getRepository(name) {
+      if (name === 'rolesUsers') {
+        return {
+          find: async ({ filter } = {}) => rolesUsers.filter((ru) => filter?.userId == null || Number(ru.userId) === Number(filter.userId)),
+        };
+      }
+      if (name === 'roles') {
+        return {
+          find: async ({ filter }) => (filter?.name?.$in || []).map((n) => ({
+            name: n,
+            allowConfigure: n === 'ldx_sysadmin',
+            snippets: n === 'ldx_sysadmin' ? ['pm'] : [],
+          })),
+        };
+      }
+      if (name === 'latticeEmployees') {
+        return {
+          find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)),
+        };
+      }
+      if (name === 'workflows') {
+        return { find: async () => workflows };
+      }
+      if (name === 'latticeAiProfiles') {
+        return {
+          find: async ({ filter } = {}) => aiProfiles.filter((p) => !filter?.organizationId || p.organizationId === filter.organizationId),
+        };
+      }
+      return { find: async () => [] };
+    },
+  };
+
+  const actions = createDxosStudioActions(db, {});
+
+  // 1. Root can export all
+  const rootAllCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 1 }, currentRole: 'root', currentRoles: ['root'] },
+    action: { params: { organizationId: 'all' } },
+  };
+  await actions.solutionBundleExport(rootAllCtx, async () => {});
+  assert.equal(rootAllCtx.body.metadata.organizationId, 'all');
+  assert.deepEqual(rootAllCtx.body.workflows.map((w) => w.key), ['wf-a', 'wf-b']);
+
+  // 2. Non-root isStudioAdmin omitting organizationId exports ONLY their own org-a (never 'all')
+  const sysDefaultCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
+    action: { params: {} },
+  };
+  await actions.solutionBundleExport(sysDefaultCtx, async () => {});
+  assert.equal(sysDefaultCtx.body.metadata.organizationId, 'org-a');
+  assert.deepEqual(sysDefaultCtx.body.workflows.map((w) => w.key), ['wf-a']);
+  assert.deepEqual(sysDefaultCtx.body.aiProfiles.map((p) => p.username), ['ai-a']);
+
+  // 3. Non-root isStudioAdmin requesting organizationId='all' or foreign org-b is rejected 403
+  for (const badOrg of ['all', 'org-b']) {
+    await assert.rejects(
+      () => actions.solutionBundleExport({
+        method: 'GET',
+        state: { currentUser: { id: 20 }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
+        action: { params: { organizationId: badOrg } },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'DXOS_ORG_MISMATCH',
+    );
+  }
+
+  // 4. Non-root isStudioAdmin without active employee membership is rejected 403
+  for (const unmappedUserId of [21, 999]) {
+    await assert.rejects(
+      () => actions.solutionBundleExport({
+        method: 'GET',
+        state: { currentUser: { id: unmappedUserId }, currentRole: 'ldx_sysadmin', currentRoles: ['ldx_sysadmin'] },
+        action: { params: {} },
+      }, async () => {}),
+      (err) => err.status === 403 && err.code === 'NATIVE_MEMBERSHIP_REQUIRED',
+    );
+  }
+});
+
+test('DxosStudioPlugin registers dxosServiceScope before latticeNativeScope and composed charts:queryData pipeline preserves preset $or scopes and PG RLS', async () => {
+  const Module = require('node:module');
+  const { buildServiceGrant } = require(path.join(PLUGIN_ROOT, 'src/server/service-roles.js'));
+
+  const studioIndexPath = require.resolve(path.join(PLUGIN_ROOT, 'src/server/index.js'));
+  const foundationIndexPath = require.resolve(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/index.js'));
+  const origLoad = Module._load;
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  class MockMigration {
+    constructor(context = {}) { this.context = context; }
+  }
+  delete require.cache[studioIndexPath];
+  delete require.cache[foundationIndexPath];
+  Module._load = function mockedNocobase(request, parent, isMain) {
+    if (request === '@nocobase/server') return { Plugin: MockPlugin, Migration: MockMigration };
+    if (request === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, request, parent, isMain);
+  };
+
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  try {
+    const LatticeFoundationPlugin = require(foundationIndexPath);
+    const DxosStudioPlugin = require(studioIndexPath);
+
+    const employees = [{ id: 8, userId: 80, organizationId: 'org-a', departmentId: 2, active: true }];
+    const fakeTx = { id: 'tx-composed-svc' };
+    const sqlCalls = [];
+    const db = {
+      on() {},
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (cb) => cb(fakeTx),
+        query: async (sql, opts) => {
+          sqlCalls.push({ sql, opts });
+          return [[]];
+        },
+      },
+      getRepository(name) {
+        if (name === 'latticeEmployees') {
+          return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+        }
+        return null;
+      },
+    };
+    const registered = [];
+    const app = {
+      db,
+      use() {},
+      resourceManager: {
+        use(fn, opts) { registered.push({ fn, opts }); },
+        define() {},
+      },
+      acl: { allow() {}, registerSnippet() {} },
+      cronJobManager: { addJob() {} },
+      logger: { info() {}, warn() {}, error() {} },
+    };
+
+    // Load plugin-lattice-foundation FIRST (matching install-workspace.mjs), then plugin-dxos-studio
+    await new LatticeFoundationPlugin(app).load();
+    await new DxosStudioPlugin(app).load();
+
+    const svcEntry = registered.find((m) => m.opts?.tag === 'dxosServiceScope');
+    const nativeEntry = registered.find((m) => m.opts?.tag === 'latticeNativeScope');
+    assert.ok(svcEntry, 'DxosStudioPlugin must register dxosServiceScope');
+    assert.ok(nativeEntry, 'LatticeFoundationPlugin must register latticeNativeScope');
+    assert.deepEqual(svcEntry.opts, {
+      tag: 'dxosServiceScope',
+      after: 'acl',
+      before: 'latticeNativeScope',
+    });
+
+    // Resolve topological middleware ordering (matching NocoBase Toposort / @hapi/topo)
+    const resolveOrder = (entries) => {
+      const remaining = [...entries];
+      const ordered = [];
+      const placed = new Set(['acl']);
+      while (remaining.length) {
+        const idx = remaining.findIndex((item) => {
+          const afterTags = item.opts?.after ? (Array.isArray(item.opts.after) ? item.opts.after : [item.opts.after]) : [];
+          const afterOk = afterTags.every((t) => placed.has(t) || !entries.some((e) => e.opts?.tag === t));
+          const blockedByBefore = remaining.some((other) => {
+            if (other === item) return false;
+            const beforeTags = other.opts?.before ? (Array.isArray(other.opts.before) ? other.opts.before : [other.opts.before]) : [];
+            return beforeTags.includes(item.opts?.tag);
+          });
+          return afterOk && !blockedByBefore;
+        });
+        assert.ok(idx >= 0, 'Cycle detected in middleware topological constraints');
+        const [chosen] = remaining.splice(idx, 1);
+        ordered.push(chosen);
+        if (chosen.opts?.tag) placed.add(chosen.opts.tag);
+      }
+      return ordered;
+    };
+
+    const sortedTags = resolveOrder(registered).map((m) => m.opts?.tag);
+    assert.ok(
+      sortedTags.indexOf('dxosServiceScope') < sortedTags.indexOf('latticeNativeScope'),
+      `Expected dxosServiceScope before latticeNativeScope, got ${sortedTags.join(' -> ')}`,
+    );
+
+    const compose = (middlewares, handler) => async (ctx) => {
+      let idx = -1;
+      const dispatch = async (i) => {
+        if (i <= idx) throw new Error('next() called multiple times');
+        idx = i;
+        const fn = i < middlewares.length ? middlewares[i] : handler;
+        if (!fn) return undefined;
+        return fn(ctx, () => dispatch(i + 1));
+      };
+      return dispatch(0);
+    };
+
+    // Substitute CURRENT_USER in service-roles.js preset view scope (as NocoBase ACL does)
+    const viewAction = buildServiceGrant('ldx_employee').actions.find((a) => a.name === 'view');
+    const presetScope = JSON.parse(
+      JSON.stringify(viewAction.scope.scope).replaceAll('{{ ctx.state.currentUser.id }}', '80'),
+    );
+
+    // Pre-fix order [nativeMw, serviceMw] fails 403 on charts:queryData for latticeServiceTickets
+    process.env.DX_PG_RLS_SESSION = 'false';
+    await assert.rejects(
+      () => compose([nativeEntry.fn, svcEntry.fn], async () => {})({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: {
+          resourceName: 'charts',
+          actionName: 'queryData',
+          params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: structuredClone(presetScope) } },
+        },
+      }),
+      (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+    );
+
+    // Post-fix order [serviceMw, nativeMw] succeeds on charts:queryData with preset $or scope and PG RLS
+    process.env.DX_PG_RLS_SESSION = 'true';
+    sqlCalls.length = 0;
+    let handlerRan = false;
+    let seenTx = null;
+    const okCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: { values: { mode: 'builder', collection: 'latticeServiceTickets', filter: structuredClone(presetScope) } },
+      },
+    };
+    await compose([svcEntry.fn, nativeEntry.fn], async (ctx) => {
+      handlerRan = true;
+      seenTx = ctx.state.latticeRlsTransaction;
+    })(okCtx);
+    assert.equal(handlerRan, true);
+    assert.equal(seenTx, fakeTx);
+    assert.equal(okCtx.state.latticeRlsOrg, 'org-a');
+    assert.equal(sqlCalls.length, 1);
+    assert.equal(sqlCalls[0].sql, "SELECT set_config('app.current_org', :orgId, true)");
+    assert.deepEqual(okCtx.action.params.values.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { $or: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+
+    // Conflict-safe rewriting preserves direct fields and passes downstream latticeNativeScope
+    const conflictCtx = {
+      state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+      action: {
+        resourceName: 'charts',
+        actionName: 'queryData',
+        params: {
+          values: {
+            mode: 'builder',
+            collection: 'latticeServiceTickets',
+            filter: { 'requester.userId': 80, requesterId: 99, 'assignee.userId': { $eq: '80' }, assigneeId: 77 },
+          },
+        },
+      },
+    };
+    await compose([svcEntry.fn, nativeEntry.fn], async () => {})(conflictCtx);
+    assert.deepEqual(conflictCtx.action.params.values.filter, {
+      $and: [
+        { organizationId: 'org-a' },
+        { requesterId: 99, assigneeId: 77, $and: [{ requesterId: { $eq: 8 } }, { assigneeId: { $eq: 8 } }] },
+      ],
+    });
+
+    // Foreign userId still fails closed 403 in the composed pipeline
+    await assert.rejects(
+      () => compose([svcEntry.fn, nativeEntry.fn], async () => {})({
+        state: { currentRole: 'ldx_employee', currentUser: { id: 80 } },
+        action: {
+          resourceName: 'charts',
+          actionName: 'queryData',
+          params: {
+            values: {
+              mode: 'builder',
+              collection: 'latticeServiceTickets',
+              filter: { $or: [{ 'requester.userId': '99' }, { 'assignee.userId': '80' }] },
+            },
+          },
+        },
+      }),
+      (err) => err.status === 403 && err.code === 'NATIVE_RELATION_EXPANSION_UNSUPPORTED',
+    );
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+    Module._load = origLoad;
+    delete require.cache[studioIndexPath];
+    delete require.cache[foundationIndexPath];
+  }
+});
+
+test('Task 16: portal-composer and flow/architect allow custom non-ldx_ business roles (ops_manager) and exclude reserved roles', async () => {
+  const { composeMobilePortal } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  const { buildFlowStudioCatalog } = require(path.join(PLUGIN_ROOT, 'src/server/flow/architect.js'));
+
+  const grants = [];
+  const db = {
+    hasCollection: () => false,
+    getRepository(name) {
+      if (name === 'desktopRoutes') return { find: async () => [{ id: 1, parentId: null, type: 'group', title: 'Mobile', uiLayoutUid: 'mobile-layout-model' }] };
+      if (name === 'desktopRoutesUiLayouts') return { find: async () => [{ desktopRouteId: 1, uiLayoutUid: 'mobile-layout-model' }] };
+      if (name === 'rolesDesktopRoutes') {
+        return {
+          find: async () => [],
+          create: async ({ values }) => { grants.push(values); return values; },
+        };
+      }
+      if (name === 'roles') {
+        return {
+          find: async () => [
+            { name: 'root', allowConfigure: true, snippets: ['pm'] },
+            { name: 'admin', allowConfigure: true, snippets: ['pm'] },
+            { name: 'anonymous', allowConfigure: false, snippets: [] },
+            { name: 'member', allowConfigure: false, snippets: [] },
+            { name: 'ldx_sysadmin', allowConfigure: true, snippets: ['pm'] },
+            { name: 'ldx_connector', allowConfigure: false, snippets: [] },
+            { name: 'r_temp_01', allowConfigure: false, snippets: [] },
+            { name: 'ops_manager', allowConfigure: false, snippets: [] },
+          ],
+        };
+      }
+      return null;
+    },
+  };
+
+  await composeMobilePortal(db, { applyBlueprint: async () => ({}) });
+  const grantedRoles = grants.map((g) => g.roleName);
+  assert.ok(grantedRoles.includes('ops_manager'), 'Expected ops_manager to receive mobile operational grant');
+  for (const blocked of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_temp_01']) {
+    assert.equal(grantedRoles.includes(blocked), false, `Did not expect ${blocked} to receive grant`);
+  }
+
+  const catalog = await buildFlowStudioCatalog(db, 'acme-pharma');
+  assert.ok(catalog.roles.includes('ops_manager'));
+  for (const blocked of ['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector', 'r_temp_01']) {
+    assert.equal(catalog.roles.includes(blocked), false);
   }
 });

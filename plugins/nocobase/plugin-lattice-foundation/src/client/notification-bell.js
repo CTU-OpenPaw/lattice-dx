@@ -8,7 +8,12 @@
  */
 'use strict';
 
+const { subscribeSurfaceEvents } = require('./sse-hub');
+
 const POLL_INTERVAL_MS = 60_000;
+const SSE_RECONNECT_BASE_MS = 3_000;
+const PORTAL_SLUG_RE = /^[a-z0-9_-]{1,64}$/i;
+let bellInstanceSeq = 0;
 
 const CATEGORY_TABS = [
   { key: 'all', label: 'Tất cả' },
@@ -32,12 +37,77 @@ function readCurrentPathname() {
   return String(window.location.pathname || '');
 }
 
+function isMobileBellPath(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
+  return clean === '/v/mobile'
+    || clean.startsWith('/v/mobile/')
+    || clean === '/mobile'
+    || clean.startsWith('/mobile/');
+}
+
 function isVisibleBellPath(pathname) {
   const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
   if (!clean || clean === '/signin' || clean.startsWith('/signin/') || clean === '/signup' || clean.startsWith('/signup/')) {
     return false;
   }
-  return clean === '/p' || clean.startsWith('/p/') || clean === '/admin' || clean.startsWith('/admin/');
+  return clean === '/p'
+    || clean.startsWith('/p/')
+    || clean === '/admin'
+    || clean.startsWith('/admin/')
+    || isMobileBellPath(clean);
+}
+
+function resolveBellPortalSlug(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
+  const pMatch = /^\/p\/([a-z0-9_-]{1,64})(?:\/|$)/i.exec(clean);
+  if (pMatch && PORTAL_SLUG_RE.test(pMatch[1])) return pMatch[1].toLowerCase();
+  if (isMobileBellPath(clean)) return 'mobile';
+  if (clean === '/admin' || clean.startsWith('/admin/')) return 'admin';
+  return 'workspace';
+}
+
+function resolveClientAuthToken(api, storage) {
+  if (!api) return '';
+  try {
+    const t = typeof api.auth?.getToken === 'function' ? api.auth.getToken() : '';
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    const t = api.auth?.token;
+    if (typeof t === 'string' && t.trim()) return t.trim();
+  } catch {}
+  try {
+    if (storage && typeof storage.getItem === 'function') {
+      const t = storage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function') {
+      const t = localStorage.getItem('NOCOBASE_TOKEN');
+      if (typeof t === 'string' && t.trim()) return t.trim();
+    }
+  } catch {}
+  return '';
+}
+
+function parseSseChunk(chunk) {
+  const normalized = String(chunk || '').replace(/\r\n/g, '\n');
+  const blocks = normalized.split('\n\n');
+  const rest = blocks.pop() ?? '';
+  const frames = [];
+  for (const block of blocks) {
+    if (!block.trim() || block.startsWith(':')) continue;
+    let eventName = 'message';
+    const dataLines = [];
+    for (const line of block.split('\n')) {
+      if (line.startsWith('event:')) eventName = line.slice(6).trim() || 'message';
+      else if (line.startsWith('data:')) dataLines.push(line.slice(5).trimStart());
+    }
+    if (!dataLines.length) continue;
+    let data = {};
+    try { data = JSON.parse(dataLines.join('\n')); } catch { data = { raw: dataLines.join('\n') }; }
+    frames.push({ event: eventName, data });
+  }
+  return { frames, rest };
 }
 
 function isMobileViewport() {
@@ -52,16 +122,21 @@ function isMobileViewport() {
 
 function isAuthenticatedClient(api) {
   if (!api || typeof api.request !== 'function') return false;
+  return Boolean(resolveClientAuthToken(api));
+}
+
+function hasExistingBellInDom(ownInstanceId) {
+  if (typeof document === 'undefined' || typeof document.querySelectorAll !== 'function') return false;
   try {
-    if (typeof api.auth?.getToken === 'function' && api.auth.getToken()) return true;
-  } catch {}
-  if (api.auth?.role && api.auth.role !== 'anonymous') return true;
-  try {
-    if (typeof localStorage !== 'undefined' && typeof localStorage.getItem === 'function' && localStorage.getItem('NOCOBASE_TOKEN')) {
-      return true;
-    }
-  } catch {}
-  return false;
+    const nodes = document.querySelectorAll('[data-latticedx-notification-bell]');
+    const list = Array.from(nodes || []);
+    return list.some((node) => {
+      const inst = node?.getAttribute?.('data-ldx-bell-instance');
+      return !ownInstanceId || inst !== ownInstanceId;
+    });
+  } catch {
+    return false;
+  }
 }
 
 function isSafeInternalTargetPath(rawPath) {
@@ -86,14 +161,17 @@ function createBellIcon(h) {
   );
 }
 
-function createNotificationBellProvider(client, React, _antd, app) {
+function createNotificationBellCore(client, React, _antd, app, { defaultVariant = 'floating', hasTopbar = false } = {}) {
   if (!React || typeof React.createElement !== 'function') return null;
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
+  const useCb = typeof React.useCallback === 'function' ? React.useCallback : (fn) => fn;
+  const useRefSafe = typeof React.useRef === 'function' ? React.useRef : (init) => ({ current: init });
 
-  return function LatticeNotificationBellProvider({ children } = {}) {
+  return function LatticeNotificationBell({ children, variant = defaultVariant, pathname: pathnameProp } = {}) {
     const api = useApi();
-    const [pathname, setPathname] = React.useState(() => readCurrentPathname());
+    const isTopbar = variant === 'topbar';
+    const [pathname, setPathname] = React.useState(() => pathnameProp || readCurrentPathname());
     const [mobile, setMobile] = React.useState(() => isMobileViewport());
     const [open, setOpen] = React.useState(false);
     const [unreadCount, setUnreadCount] = React.useState(0);
@@ -101,11 +179,24 @@ function createNotificationBellProvider(client, React, _antd, app) {
     const [category, setCategory] = React.useState('all');
     const [loading, setLoading] = React.useState(false);
     const [authRejected, setAuthRejected] = React.useState(false);
+    const bellInstanceIdRef = useRefSafe(null);
+    if (!bellInstanceIdRef.current) {
+      bellInstanceIdRef.current = `ldx-bell-${++bellInstanceSeq}`;
+    }
+    const [duplicateBell, setDuplicateBell] = React.useState(() => hasExistingBellInDom(bellInstanceIdRef.current));
+    const openRef = useRefSafe(open);
+    openRef.current = open;
+
+    React.useEffect(() => {
+      if (pathnameProp && pathnameProp !== pathname) {
+        setPathname(pathnameProp);
+      }
+    }, [pathnameProp]);
 
     React.useEffect(() => {
       if (typeof window === 'undefined') return undefined;
       const syncPath = () => {
-        const next = readCurrentPathname();
+        const next = pathnameProp || readCurrentPathname();
         setPathname((prev) => (prev === next ? prev : next));
       };
       const media = typeof window.matchMedia === 'function' ? window.matchMedia('(max-width: 767px)') : null;
@@ -118,11 +209,16 @@ function createNotificationBellProvider(client, React, _antd, app) {
         window.removeEventListener?.('popstate', syncPath);
         media?.removeEventListener?.('change', syncMobile);
       };
-    }, []);
+    }, [pathnameProp]);
 
-    const visible = Boolean(!authRejected && isVisibleBellPath(pathname) && isAuthenticatedClient(api));
+    const effectivePath = pathnameProp || pathname;
+    const suppressedByTopbar = !isTopbar && Boolean(hasTopbar) && !isMobileBellPath(effectivePath);
+    const pathAllowed = isTopbar
+      ? (!effectivePath || isVisibleBellPath(effectivePath))
+      : isVisibleBellPath(effectivePath);
+    const visible = Boolean(!suppressedByTopbar && !duplicateBell && !authRejected && pathAllowed && isAuthenticatedClient(api));
 
-    const fetchUnreadCount = React.useCallback(async () => {
+    const fetchUnreadCount = useCb(async () => {
       if (!visible || typeof api?.request !== 'function') return;
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
@@ -140,7 +236,7 @@ function createNotificationBellProvider(client, React, _antd, app) {
       }
     }, [api, visible]);
 
-    const fetchInbox = React.useCallback(async (selectedCategory = category) => {
+    const fetchInbox = useCb(async (selectedCategory = category) => {
       if (!visible || typeof api?.request !== 'function') return;
       setLoading(true);
       try {
@@ -165,40 +261,96 @@ function createNotificationBellProvider(client, React, _antd, app) {
       }
     }, [api, visible, category]);
 
+    const fetchInboxRef = useRefSafe(fetchInbox);
+    fetchInboxRef.current = fetchInbox;
+    const fetchUnreadCountRef = useRefSafe(fetchUnreadCount);
+    fetchUnreadCountRef.current = fetchUnreadCount;
+
     React.useEffect(() => {
       setAuthRejected(false);
-    }, [api?.auth?.role, pathname]);
+      setDuplicateBell(hasExistingBellInDom(bellInstanceIdRef.current));
+    }, [api?.auth?.role, effectivePath, isTopbar]);
+
+    const portalSlug = resolveBellPortalSlug(effectivePath);
 
     React.useEffect(() => {
       if (!visible) {
         setOpen(false);
         return undefined;
       }
-      fetchUnreadCount();
+      fetchUnreadCountRef.current?.();
       if (typeof window === 'undefined') return undefined;
+
+      let disposed = false;
+
       const timer = setInterval(() => {
         if (typeof document === 'undefined' || document.visibilityState !== 'hidden') {
-          fetchUnreadCount();
+          fetchUnreadCountRef.current?.();
         }
       }, POLL_INTERVAL_MS);
       if (typeof timer?.unref === 'function') timer.unref();
+
+      const handleSsePayload = (eventName, parsed) => {
+        if (disposed || !parsed || typeof parsed !== 'object') return;
+        if (Number.isFinite(Number(parsed.unreadCount)) && Number(parsed.unreadCount) >= 0) {
+          setUnreadCount(Number(parsed.unreadCount));
+          if (openRef.current) fetchInboxRef.current?.();
+          return;
+        }
+        const kind = String(parsed.kind || parsed.type || '').trim().toLowerCase();
+        if (kind === 'notification' || kind === 'unread_count' || eventName === 'notification' || eventName === 'unread_count') {
+          fetchUnreadCountRef.current?.();
+          if (openRef.current) fetchInboxRef.current?.();
+        }
+      };
+
+      const token = resolveClientAuthToken(api);
+      const fetchFn = typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function'
+        ? globalThis.fetch
+        : (typeof fetch === 'function' ? fetch : null);
+      const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
+      const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
+      const sseUrl = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
+
+      const unsubscribeSse = (token && typeof fetchFn === 'function')
+        ? subscribeSurfaceEvents({
+          portalSlug,
+          sseUrl,
+          token,
+          fetchFn,
+          minBackoffMs: SSE_RECONNECT_BASE_MS,
+          maxBackoffMs: POLL_INTERVAL_MS,
+          win: typeof window !== 'undefined' ? window : null,
+          onEvent: (eventName, data) => {
+            if (['notification', 'unread_count', 'update', 'message'].includes(eventName)) {
+              handleSsePayload(eventName, data);
+            }
+          },
+          onAuthError: () => {
+            if (!disposed) setAuthRejected(true);
+          },
+        })
+        : () => {};
+
       const onVisibility = () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
-          fetchUnreadCount();
+          fetchUnreadCountRef.current?.();
         }
       };
       if (typeof document !== 'undefined') {
         document.addEventListener?.('visibilitychange', onVisibility);
       }
       return () => {
+        disposed = true;
         clearInterval(timer);
+        unsubscribeSse();
         if (typeof document !== 'undefined') {
           document.removeEventListener?.('visibilitychange', onVisibility);
         }
       };
-    }, [visible, fetchUnreadCount]);
+    }, [visible, portalSlug, api]);
 
-    const setPopoverOpen = React.useCallback((next) => {
+    const setPopoverOpen = useCb((next) => {
       setOpen(next);
       if (next) fetchInbox(category);
     }, [category, fetchInbox]);
@@ -281,12 +433,47 @@ function createNotificationBellProvider(client, React, _antd, app) {
     };
 
     if (!visible) {
-      return h(React.Fragment, null, children);
+      return isTopbar ? null : h(React.Fragment, null, children);
     }
 
-    const wrapStyle = mobile
-      ? { position: 'fixed', top: 6, right: 54, zIndex: 1050, pointerEvents: 'auto' }
-      : { position: 'fixed', top: 8, right: 210, zIndex: 1050, pointerEvents: 'auto' };
+    const wrapStyle = isTopbar
+      ? { position: 'relative', display: 'inline-flex', alignItems: 'center', height: 46, verticalAlign: 'middle', lineHeight: 1.2, marginRight: 6 }
+      : (mobile
+        ? { position: 'fixed', top: 6, right: 54, zIndex: 1050, pointerEvents: 'auto' }
+        : { position: 'fixed', top: 8, right: 210, zIndex: 1050, pointerEvents: 'auto' });
+
+    const buttonStyle = isTopbar
+      ? {
+          position: 'relative',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          height: 30,
+          padding: '0 10px',
+          borderRadius: 6,
+          border: '1px solid rgba(255, 255, 255, 0.24)',
+          background: open ? '#1d4ed8' : 'rgba(255, 255, 255, 0.12)',
+          color: '#ffffff',
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: 'pointer',
+        }
+      : {
+          position: 'relative',
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          height: 30,
+          padding: '0 10px',
+          borderRadius: 999,
+          border: '1px solid rgba(148, 163, 184, 0.45)',
+          background: open ? '#1d4ed8' : 'rgba(255, 255, 255, 0.94)',
+          color: open ? '#ffffff' : '#1e293b',
+          fontSize: 12,
+          fontWeight: 600,
+          cursor: 'pointer',
+          boxShadow: '0 2px 8px rgba(15, 23, 42, 0.12)',
+        };
 
     const popoverStyle = {
       position: 'fixed',
@@ -306,33 +493,22 @@ function createNotificationBellProvider(client, React, _antd, app) {
       color: '#0f172a',
     };
 
-    return h(React.Fragment, null,
-      children,
-      h('div', { 'data-testid': 'ldx-notification-bell-wrap', style: wrapStyle },
-        h('button', {
-          type: 'button',
-          'data-testid': 'ldx-notification-bell-btn',
-          'aria-label': 'Thông báo',
-          'aria-expanded': open,
-          title: 'Thông báo (Alt+N)',
-          onClick: togglePopover,
-          style: {
-            position: 'relative',
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            height: 30,
-            padding: '0 10px',
-            borderRadius: 999,
-            border: '1px solid rgba(148, 163, 184, 0.45)',
-            background: open ? '#1d4ed8' : 'rgba(255, 255, 255, 0.94)',
-            color: open ? '#ffffff' : '#1e293b',
-            fontSize: 12,
-            fontWeight: 600,
-            cursor: 'pointer',
-            boxShadow: '0 2px 8px rgba(15, 23, 42, 0.12)',
-          },
-        },
+    const bellWrap = h('div', {
+      'data-testid': 'ldx-notification-bell-wrap',
+      'data-variant': isTopbar ? 'topbar' : 'floating',
+      'data-latticedx-notification-bell': isTopbar ? 'topbar' : 'floating',
+      'data-ldx-bell-instance': bellInstanceIdRef.current,
+      style: wrapStyle,
+    },
+      h('button', {
+        type: 'button',
+        'data-testid': 'ldx-notification-bell-btn',
+        'aria-label': 'Thông báo',
+        'aria-expanded': open,
+        title: 'Thông báo (Alt+N)',
+        onClick: togglePopover,
+        style: buttonStyle,
+      },
           createBellIcon(h),
           !mobile ? h('span', null, 'Thông báo') : null,
           unreadCount > 0 ? h('span', {
@@ -458,18 +634,37 @@ function createNotificationBellProvider(client, React, _antd, app) {
                 }),
           ),
         ) : null,
-      ),
-    );
+      );
+
+    return isTopbar ? bellWrap : h(React.Fragment, null, children, bellWrap);
   };
+}
+
+function createNotificationBellProvider(client, React, antd, app, options = {}) {
+  return createNotificationBellCore(client, React, antd, app, {
+    defaultVariant: options.variant || 'floating',
+    hasTopbar: Boolean(options.hasTopbar),
+  });
+}
+
+function createTopbarNotificationBell(client, React, antd, app) {
+  return createNotificationBellCore(client, React, antd, app, {
+    defaultVariant: 'topbar',
+    hasTopbar: false,
+  });
 }
 
 module.exports = {
   POLL_INTERVAL_MS,
   CATEGORY_TABS,
   readCurrentPathname,
+  isMobileBellPath,
   isVisibleBellPath,
+  resolveBellPortalSlug,
   isMobileViewport,
+  resolveClientAuthToken,
   isAuthenticatedClient,
   isSafeInternalTargetPath,
   createNotificationBellProvider,
+  createTopbarNotificationBell,
 };
