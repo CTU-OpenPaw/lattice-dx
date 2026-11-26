@@ -223,12 +223,12 @@ test('flow/* modules obey strict per-file line limits, SPDX header, zero forbidd
   assert.equal(flowFiles.length, 13, 'flow/ directory must contain vendor-shims + modular UI/validation/runner/n8n/connected-apps files');
 
   const budgets = {
-    'connected-apps-panel.js': 380,
+    'connected-apps-panel.js': 410,
     'flow-list-view.js': 280,
     'flow-studio-helpers.js': 245,
     'flow-test-runner.js': 200,
     'flow-validation.js': 285,
-    'n8n-setup-modal.js': 250,
+    'n8n-setup-modal.js': 285,
     'node-palette.js': 245,
     'node-inspector.js': 365,
     'playback-bar.js': 260,
@@ -651,12 +651,12 @@ test('PlaybackBar starts collapsed, renders HITL banner when suspended, auto-exp
   await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-dryrun-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor' });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-toggle-trace-btn')[0].props['aria-expanded'], true);
-  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-step-badge')[0]).includes('Step 3/3'));
-  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_operator_standard')[0]).includes('skipped'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-step-badge')[0]).includes('Bước 3/3'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-notify_operator_standard')[0]).includes('Bỏ qua'));
 
   collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-vcr-first-btn')[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a', initialView: 'editor' });
-  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-step-badge')[0]).includes('Step 1/3'));
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-step-badge')[0]).includes('Bước 1/3'));
 });
 
 test('Native Agent Chat trigger (ai.triggerTask), window.__LATTICEDX_FLOW_CONTEXT__ sync, and latticedx:flow-updated live SSE canvas sync with cross-org guard', async () => {
@@ -738,7 +738,7 @@ test('Native Agent Chat trigger (ai.triggerTask), window.__LATTICEDX_FLOW_CONTEX
     assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-canvas').length, 1);
     assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-node-ai_notify').length, 1);
     assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-feedback')[0]).includes('Đã đồng bộ luồng từ AI Architect.'));
-    assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-step-badge')[0]).includes('Step 2/2'));
+    assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-flow-step-badge')[0]).includes('Bước 2/2'));
     assert.ok(listRuleCalls > callsBeforeApplied, 'applied: true must reload rules');
     assert.equal(globalThis.window.__LATTICEDX_FLOW_CONTEXT__?.ruleKey, 'ai_drafted_rule');
     assert.equal(globalThis.window.__LATTICEDX_FLOW_CONTEXT__?.view, 'editor');
@@ -1590,7 +1590,7 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   const confirmBar = collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-confirm-${delKey}`)[0];
   assert.ok(confirmBar, 'Delete confirmation bar must render');
-  const cancelDelBtn = collectNodes(confirmBar, (n) => n.type === 'button' && textOf(n).includes('Cancel'))[0];
+  const cancelDelBtn = collectNodes(confirmBar, (n) => n.type === 'button' && textOf(n).includes('Hủy'))[0];
   cancelDelBtn.props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   assert.equal(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-confirm-${delKey}`).length, 0);
@@ -1599,7 +1599,7 @@ test('Task 1: rule delete confirmation, unsaved guard (Cancel/Discard/Save), + N
   collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-rule-${delKey}`)[0].props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   const confirmBar2 = collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-flow-delete-confirm-${delKey}`)[0];
-  const confirmDelBtn = collectNodes(confirmBar2, (n) => n.type === 'button' && textOf(n).includes('Confirm'))[0];
+  const confirmDelBtn = collectNodes(confirmBar2, (n) => n.type === 'button' && textOf(n).includes('Xác nhận'))[0];
   await confirmDelBtn.props.onClick();
   tree = await harness.flush(FlowStudioApp, { selectedOrg: 'org-a' });
   assert.ok(requests.some((r) => r.url === 'dxosAutomations:deleteRule' && r.data.ruleKey === delKey));

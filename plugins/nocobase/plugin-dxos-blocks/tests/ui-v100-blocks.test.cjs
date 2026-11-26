@@ -3175,7 +3175,7 @@ test('M1.1 Iteration 3: parseBiFilterJson precedence, whitespace empty-brace han
       }),
     );
     const pivotTxt = textOf(findByTestId(resolved, 'dxos-bi-chart-pivot'));
-    assert.ok(pivotTxt.includes('23.33'));
+    assert.ok(pivotTxt.includes('23,33'));
     assert.ok(pivotTxt.includes('32'));
     assert.equal(pivotTxt.includes('70'), false);
   }
@@ -3456,9 +3456,10 @@ test('Settings modal scroll CSS & DxosBiChartBlockModel limit/maxGroups input pr
       {},
     );
     const biStep = models.DxosBiChartBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config;
-    assert.equal(biStep.modalProps?.top, 24);
-    assert.equal(biStep.modalProps?.styles?.body?.maxHeight, '78vh');
-    assert.equal(biStep.modalProps?.styles?.body?.overflowY, 'auto');
+    assert.equal(biStep.uiMode?.type, 'dialog');
+    assert.equal(biStep.uiMode?.props?.style?.top, 24);
+    assert.equal(biStep.uiMode?.props?.styles?.body?.maxHeight, '78vh');
+    assert.equal(biStep.uiMode?.props?.styles?.body?.overflowY, 'auto');
     assert.equal(biStep.uiSchema.limit.title, 'Số nhóm tối đa (1-500)');
     assert.deepEqual(biStep.uiSchema.limit['x-component-props'], { min: 1, max: 500, step: 1, precision: 0, style: { width: '100%' } });
   } finally {

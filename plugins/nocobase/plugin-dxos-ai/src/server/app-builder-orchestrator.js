@@ -99,7 +99,7 @@ const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'applicationTokens', 'sessions',
   'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
-  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiQuotaPolicies', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
   'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',
@@ -1925,6 +1925,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
       pageTitle: primaryPortal.pageTitle,
       note: `Pre-build snapshot for ${sortedCollections.map((c) => c.collectionName).join(', ')}`,
       createdByUsername: actor.username,
+      organizationId,
     }, val);
     preBuildSnapshotUid = preSnap?.snapshotUid || `snap-pre-${primaryPortal.portalSlug}-${Date.now().toString(36)}`;
     if (!preSnap) {
@@ -2794,6 +2795,7 @@ async function capturePortalsSnapshots(db, actor, portals = [], note = 'Pre-muta
       pageTitle: p.pageTitle,
       note,
       createdByUsername: actor.username,
+      organizationId,
     }, val);
     let uid = snap?.snapshotUid || null;
     if (!uid) {
@@ -3316,6 +3318,8 @@ async function rollbackEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
         portalSlug: pSpec.portalSlug,
         pageTitle: pSpec.pageTitle,
         snapshotUid: snapUid,
+        organizationId,
+        allowCrossOrg: Boolean(actor?.isRoot),
       }, val);
     }
   }

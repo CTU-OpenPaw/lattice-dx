@@ -178,10 +178,30 @@ test('public-track-html matches /v/track & /v/track/:code, serves zero-401/404 n
     fetch: async (u) => { fetchCalls.push(u); return { ok: true, json: async () => ({}) }; },
   });
   assert.equal(fetchCalls.length, 0, 'Opening /v/track/ORD-V100-001 without ?token= must make ZERO API calls');
+  const lookupForm = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-lookup-form');
   const codeField = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-code-input');
   const tokenField = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-token-input');
+  assert.ok(lookupForm && Object.hasOwn(lookupForm.attrs, 'novalidate'), 'Lookup form must include novalidate');
   assert.equal(codeField?.value, 'ORD-V100-001');
   assert.ok(tokenField, 'Token input box must always render');
+
+  // Empty token submit shows inline Vietnamese error and clears on input with 0 fetch calls
+  for (const fn of (Array.isArray(lookupForm.listeners.submit) ? lookupForm.listeners.submit : [lookupForm.listeners.submit]).filter(Boolean)) {
+    fn({ preventDefault() {} });
+  }
+  assert.equal(fetchCalls.length, 0, 'Empty token submit must make ZERO fetch calls');
+  const trackErr = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-error');
+  const tokenErr = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-token-error');
+  const codeErr = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-code-error');
+  assert.ok(trackErr && trackErr.textContent.includes('Vui lòng'), 'Expected Vietnamese summary track error');
+  assert.ok(tokenErr && tokenErr.textContent.includes('Vui lòng'), 'Expected Vietnamese inline token error');
+  assert.ok(codeErr && codeErr.textContent === '', 'Code field is populated so code error stays empty');
+
+  tokenField.value = 'ldx_trk_abc';
+  for (const fn of (Array.isArray(tokenField.listeners.input) ? tokenField.listeners.input : [tokenField.listeners.input]).filter(Boolean)) {
+    fn();
+  }
+  assert.equal(tokenErr.textContent, '');
 });
 
 test('LatticeFoundationPlugin registers and unregisters /v/track gateway handler across load/unload/remove/destroy', async () => {

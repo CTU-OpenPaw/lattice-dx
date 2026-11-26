@@ -384,12 +384,13 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(apisixProd, /\/api\/dxos:manifest/);
   assert.match(apisixProd, /\/api\/dxos:sw\.js/);
   assert.match(apisixProd, /\/api\/dxosWms:publicTrack/);
+  assert.match(apisixProd, /\/api\/dxosWms:verifyTrackSignature/);
   assert.match(apisixProd, /\/\.well-known\/agent-card\.json/);
   assert.match(apisixProd, /\/api\/dxos-a2a\/agent-card\.json/);
   assert.match(apisixProd, /\/api\/dxosForms:meta/);
   assert.match(apisixProd, /\/api\/dxosForms:submit/);
   assert.match(apisixProd, /\/api\/dxosForms:status/);
-  assert.match(apisixProd, /id:\s*dxos-public-paas[\s\S]*?\/\.well-known\/agent-card\.json[\s\S]*?\/api\/dxos-a2a\/agent-card\.json[\s\S]*?\/api\/dxosForms:meta[\s\S]*?\/api\/dxosForms:submit[\s\S]*?\/api\/dxosForms:status[\s\S]*?"nocobase:80"/);
+  assert.match(apisixProd, /id:\s*dxos-public-paas[\s\S]*?\/\.well-known\/agent-card\.json[\s\S]*?\/api\/dxos-a2a\/agent-card\.json[\s\S]*?\/api\/dxosWms:publicTrack[\s\S]*?\/api\/dxosWms:verifyTrackSignature[\s\S]*?\/api\/dxosForms:meta[\s\S]*?\/api\/dxosForms:submit[\s\S]*?\/api\/dxosForms:status[\s\S]*?"nocobase:80"/);
   assert.match(apisixProd, /uri:\s*\/api\/\*/);
   assert.match(apisixProd, /"nocobase:80"/);
   assert.match(apisixProd, /ssl_verify:\s*true/);
@@ -439,6 +440,26 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(nocobaseSec, /DB_USER:\s*\$\{NOCOBASE_APP_DB_USER:-nocobase_app\}/);
   assert.match(nocobaseSec, /DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:\?Set NOCOBASE_APP_DB_PASSWORD\}/);
   assert.doesNotMatch(nocobaseSec, /DB_PASSWORD:\s*\$\{NOCOBASE_APP_DB_PASSWORD:-\$\{NOCOBASE_DB_PASSWORD/);
+  assert.match(nocobaseSec, /\.\.\/config\/nginx\/10-lattice-public-routes\.sh:\/app\/nocobase\/storage\/scripts\/10-lattice-public-routes\.sh:ro/);
+
+  const nocobaseDevText = read('infra/compose/nocobase.yml');
+  const nocobaseDevSec = serviceSection(nocobaseDevText, 'nocobase');
+  assert.match(nocobaseDevSec, /\.\.\/config\/nginx\/10-lattice-public-routes\.sh:\/app\/nocobase\/storage\/scripts\/10-lattice-public-routes\.sh:ro/);
+
+  const nginxRoutesSh = read('infra/config/nginx/10-lattice-public-routes.sh');
+  assert.ok(nginxRoutesSh.startsWith('#!/bin/sh\n'), '10-lattice-public-routes.sh must start with POSIX #!/bin/sh and LF');
+  assert.equal(nginxRoutesSh.includes('\r'), false, '10-lattice-public-routes.sh must use LF line endings');
+  assert.match(nginxRoutesSh, /@file\s+LatticeDX/);
+  assert.match(nginxRoutesSh, /SPDX-License-Identifier:\s*Apache-2\.0/);
+  assert.match(nginxRoutesSh, /# BEGIN LATTICEDX PUBLIC ROUTES/);
+  assert.match(nginxRoutesSh, /# END LATTICEDX PUBLIC ROUTES/);
+  assert.match(nginxRoutesSh, /location = \/\.well-known\/agent-card\.json/);
+  assert.match(nginxRoutesSh, /location \^~ \/v\/form/);
+  assert.match(nginxRoutesSh, /location \^~ \/v\/track/);
+  assert.match(nginxRoutesSh, /location \^~ \/track/);
+  assert.match(nginxRoutesSh, /location \^~ \/form[\s\S]*absolute_redirect off;[\s\S]*return 302 \/v\$request_uri;/);
+  assert.match(nginxRoutesSh, /nginx -t/);
+  assert.match(nginxRoutesSh, /nginx -s reload \|\| true/);
   const prodEnvEx = read('infra/compose/prod.env.example');
   assert.match(prodEnvEx, /NOCOBASE_APP_DB_USER=nocobase_app/);
   assert.match(prodEnvEx, /NOCOBASE_APP_DB_PASSWORD=CHANGE_ME_/);

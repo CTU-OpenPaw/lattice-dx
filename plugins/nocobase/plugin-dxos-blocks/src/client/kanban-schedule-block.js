@@ -11,6 +11,7 @@
 const {
   SAFE_COLLECTION_RE,
   CUSTOM_COLLECTION_RE,
+  isSafeAppPath,
   fetchCollectionsMeta,
   inferCollectionFieldsMeta,
   getStatusMeta,
@@ -214,24 +215,45 @@ function parseRecordScheduleDate(record, dateFields = null, preferredField = '')
   return null;
 }
 
-function toUtcDateKey(date) {
-  const y = date.getUTCFullYear();
-  const m = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(date.getUTCDate()).padStart(2, '0');
+const VN_DATE_KEY_FMT = typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
+  ? new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    })
+  : null;
+
+function toVnDateKey(date) {
+  if (!(date instanceof Date) || !Number.isFinite(date.getTime())) return '';
+  if (VN_DATE_KEY_FMT) {
+    const parts = VN_DATE_KEY_FMT.formatToParts(date);
+    const y = parts.find((p) => p.type === 'year')?.value;
+    const m = parts.find((p) => p.type === 'month')?.value;
+    const d = parts.find((p) => p.type === 'day')?.value;
+    if (y && m && d) return `${y}-${m}-${d}`;
+  }
+  const vnDate = new Date(date.getTime() + 7 * 3600 * 1000);
+  const y = vnDate.getUTCFullYear();
+  const m = String(vnDate.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(vnDate.getUTCDate()).padStart(2, '0');
   return `${y}-${m}-${d}`;
 }
 
-function getUtcMonday(referenceDate) {
-  let base;
-  if (referenceDate instanceof Date && Number.isFinite(referenceDate.getTime())) {
-    base = new Date(Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()));
-  } else if (typeof referenceDate === 'string' && /^\d{4}-\d{2}-\d{2}/.test(referenceDate.trim())) {
-    const [y, m, d] = referenceDate.trim().slice(0, 10).split('-').map(Number);
-    base = new Date(Date.UTC(y, m - 1, d));
+function getVnMonday(referenceDate) {
+  let y;
+  let m;
+  let d;
+  if (typeof referenceDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(referenceDate.trim())) {
+    [y, m, d] = referenceDate.trim().split('-').map(Number);
+  } else if (referenceDate instanceof Date && Number.isFinite(referenceDate.getTime())) {
+    [y, m, d] = toVnDateKey(referenceDate).split('-').map(Number);
+  } else if (typeof referenceDate === 'string' && Number.isFinite(Date.parse(referenceDate.trim()))) {
+    [y, m, d] = toVnDateKey(new Date(Date.parse(referenceDate.trim()))).split('-').map(Number);
   } else {
-    const now = new Date();
-    base = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+    [y, m, d] = toVnDateKey(new Date()).split('-').map(Number);
   }
+  const base = new Date(Date.UTC(y, m - 1, d));
   const day = base.getUTCDay();
   const diffToMon = day === 0 ? -6 : 1 - day;
   base.setUTCDate(base.getUTCDate() + diffToMon);
@@ -239,23 +261,24 @@ function getUtcMonday(referenceDate) {
 }
 
 function buildScheduleDaysGrid(records, referenceDate = new Date(), options = {}) {
-  const monday = getUtcMonday(referenceDate);
+  const monday = getVnMonday(referenceDate);
   const days = [];
   const dayMap = new Map();
-  const todayKey = toUtcDateKey(new Date());
+  const todayKey = toVnDateKey(new Date());
   const dateFields = Array.isArray(options?.dateFields) ? options.dateFields : null;
   const preferredDateField = typeof options?.dateField === 'string' ? options.dateField.trim() : '';
 
   for (let i = 0; i < 7; i += 1) {
     const dt = new Date(monday.getTime());
     dt.setUTCDate(monday.getUTCDate() + i);
-    const dateKey = toUtcDateKey(dt);
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(dt.getUTCDate()).padStart(2, '0');
+    const dateKey = `${y}-${m}-${d}`;
     const weekday = WEEKDAY_LABELS[dt.getUTCDay()];
-    const dayNum = String(dt.getUTCDate()).padStart(2, '0');
-    const monthNum = String(dt.getUTCMonth() + 1).padStart(2, '0');
     const entry = {
       dateKey,
-      label: `${weekday} ${dayNum}/${monthNum}`,
+      label: `${weekday} ${d}/${m}`,
       weekday: dt.getUTCDay(),
       isToday: dateKey === todayKey,
       items: [],
@@ -272,7 +295,7 @@ function buildScheduleDaysGrid(records, referenceDate = new Date(), options = {}
       unscheduled.push(rec);
       continue;
     }
-    const bucket = dayMap.get(toUtcDateKey(dt));
+    const bucket = dayMap.get(toVnDateKey(dt));
     if (bucket) bucket.items.push(rec);
   }
 
@@ -308,7 +331,7 @@ function resolveSlaBadge(rec, statusField = 'status') {
 function formatDateChip(rec, dateFields = null, preferredField = '') {
   const dt = parseRecordScheduleDate(rec, dateFields, preferredField);
   if (!dt) return '';
-  return toUtcDateKey(dt);
+  return toVnDateKey(dt);
 }
 
 function resolveRecordDisplayTitle(rec, titleField) {
@@ -358,6 +381,8 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
     const [cancelTargetId, setCancelTargetId] = React.useState(null);
     const [cancelReason, setCancelReason] = React.useState('');
     const [statusNote, setStatusNote] = React.useState('');
+    const [selectedRecord, setSelectedRecord] = React.useState(null);
+    const [gatedDropCta, setGatedDropCta] = React.useState(false);
     const [reqTracker] = React.useState(() => ({
       seq: 0,
       unmounted: false,
@@ -401,6 +426,8 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
         setCancelTargetId(null);
         setCancelReason('');
         setStatusNote('');
+        setSelectedRecord(null);
+        setGatedDropCta(false);
         setDraggedRecordId(null);
         setDragOverStage(null);
       }
@@ -451,6 +478,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
 
       setLoading(true);
       setStatusNote('');
+      setGatedDropCta(false);
       const limit = Math.max(5, Math.min(100, Number(cfg.pageSize) || 40));
       try {
         const res = await api.request({
@@ -516,9 +544,12 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
     );
 
     const scheduleRefDate = React.useMemo(() => {
-      const mon = getUtcMonday(new Date());
+      const mon = getVnMonday(new Date());
       mon.setUTCDate(mon.getUTCDate() + weekOffset * 7);
-      return mon;
+      const y = mon.getUTCFullYear();
+      const m = String(mon.getUTCMonth() + 1).padStart(2, '0');
+      const d = String(mon.getUTCDate()).padStart(2, '0');
+      return `${y}-${m}-${d}`;
     }, [weekOffset]);
 
     const scheduleGrid = React.useMemo(
@@ -539,6 +570,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
         }
       }
       const targetCollection = activeCollection;
+      setGatedDropCta(false);
       setBusyId(rec.id);
       try {
         setStatusNote(action === 'submit' ? `Đang trình duyệt ${rec.code || `#${rec.id}`}…` : `Đang hủy ${rec.code || `#${rec.id}`}…`);
@@ -566,6 +598,21 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
       }
     };
 
+    const openApprovalInbox = () => {
+      const targetPath = '/admin/lattice-workspace';
+      if (!isSafeAppPath(targetPath)) return;
+      if (app?.router?.navigate) app.router.navigate(targetPath);
+      else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(targetPath) || targetPath);
+    };
+
+    const handleRecordClick = (rec) => {
+      if (!rec) return;
+      if (typeof cfg.onRecordClick === 'function') {
+        cfg.onRecordClick(rec, activeCollection);
+      }
+      setSelectedRecord(rec);
+    };
+
     const moveRecordToStage = async (rec, nextStage) => {
       if (!api?.request || !rec?.id || !nextStage || busyId != null) return;
       const currentStage = resolveRecordStage(rec, activeCollection, {
@@ -580,16 +627,19 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           return;
         }
         if (nextStage === 'cancelled' && CANCELLABLE_STAGES.has(currentStage)) {
+          setGatedDropCta(false);
           setCancelTargetId(rec.id);
           setCancelReason('');
           setStatusNote('Vui lòng nhập lý do hủy chứng từ.');
           return;
         }
+        setGatedDropCta(true);
         setStatusNote('Chứng từ chuẩn chuyển trạng thái qua quy trình Trình duyệt / Phê duyệt / Hủy.');
         return;
       }
 
       const targetCollection = activeCollection;
+      setGatedDropCta(false);
       setBusyId(rec.id);
       try {
         setStatusNote(`Đang cập nhật ${rec.code || rec.lotCode || `#${rec.id}`} → ${formatStatusLabel(nextStage)}…`);
@@ -700,6 +750,8 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
               setRecords([]);
               setStatusNote('');
               setCancelReason('');
+              setSelectedRecord(null);
+              setGatedDropCta(false);
             }
             setActiveCollection(nextCollection);
             setCancelTargetId(null);
@@ -715,7 +767,18 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           style: { flex: '1 1 200px', minWidth: 0, maxWidth: '100%', padding: '5px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
         }),
       ),
-      statusNote ? h('div', { 'data-testid': 'dxos-kanban-status-note', style: { fontSize: 11, color: '#1d4ed8' } }, statusNote) : null,
+      statusNote ? h('div', {
+        'data-testid': 'dxos-kanban-status-note',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, fontSize: 11, color: '#1d4ed8', background: '#eff6ff', padding: '6px 10px', borderRadius: 6, border: '1px solid #bfdbfe' },
+      },
+        h('span', null, statusNote),
+        gatedDropCta ? h('button', {
+          type: 'button',
+          'data-testid': 'dxos-kanban-approval-cta',
+          onClick: openApprovalInbox,
+          style: { padding: '3px 10px', borderRadius: 6, border: '1px solid #1d4ed8', background: '#1d4ed8', color: '#ffffff', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
+        }, 'Mở Hộp Phê duyệt') : null,
+      ) : null,
       viewMode === 'kanban'
         ? h('div', {
             style: {
@@ -779,6 +842,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                       key: rec.id ?? code,
                       'data-testid': `dxos-kanban-card-${rec.id ?? idx}`,
                       draggable: canDrag,
+                      onClick: () => handleRecordClick(rec),
                       onDragStart: (e) => {
                         setDraggedRecordId(rec.id);
                         if (e?.dataTransfer && typeof e.dataTransfer.setData === 'function') {
@@ -793,10 +857,10 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                         padding: 8,
                         borderRadius: 8,
                         background: '#ffffff',
-                        border: sla ? `1px solid ${sla.border}` : '1px solid #e2e8f0',
+                        border: selectedRecord?.id === rec.id ? '1.5px solid #2563eb' : (sla ? `1px solid ${sla.border}` : '1px solid #e2e8f0'),
                         display: 'grid',
                         gap: 4,
-                        cursor: canDrag ? 'grab' : 'default',
+                        cursor: 'pointer',
                       },
                     },
                       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 4 } },
@@ -810,7 +874,9 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                         'data-testid': `dxos-kanban-move-${rec.id}`,
                         value: st,
                         disabled: busyId === rec.id,
+                        onClick: (e) => e?.stopPropagation?.(),
                         onChange: (e) => {
+                          e?.stopPropagation?.();
                           const nextStage = String(e?.target?.value || '').trim();
                           if (nextStage && nextStage !== st) {
                             return moveRecordToStage(rec, nextStage);
@@ -830,7 +896,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                         type: 'button',
                         'data-testid': `dxos-kanban-submit-${rec.id}`,
                         disabled: busyId === rec.id,
-                        onClick: () => runVoucherStageAction(rec, 'submit'),
+                        onClick: (e) => { e?.stopPropagation?.(); return runVoucherStageAction(rec, 'submit'); },
                         style: {
                           marginTop: 2, padding: '3px 8px', borderRadius: 6, border: 'none',
                           background: '#2563eb', color: '#ffffff', fontSize: 11, fontWeight: 700, cursor: 'pointer',
@@ -838,7 +904,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                       }, 'Trình duyệt') : null,
                       isVoucherCol && CANCELLABLE_STAGES.has(st) ? (
                         cancelTargetId === rec.id
-                          ? h('div', { style: { display: 'grid', gap: 4, marginTop: 2 } },
+                          ? h('div', { onClick: (e) => e?.stopPropagation?.(), style: { display: 'grid', gap: 4, marginTop: 2 } },
                               h('input', {
                                 type: 'text',
                                 value: cancelReason,
@@ -850,12 +916,12 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                                 h('button', {
                                   type: 'button',
                                   disabled: busyId === rec.id,
-                                  onClick: () => runVoucherStageAction(rec, 'cancel'),
+                                  onClick: (e) => { e?.stopPropagation?.(); return runVoucherStageAction(rec, 'cancel'); },
                                   style: { padding: '2px 8px', borderRadius: 4, border: 'none', background: '#dc2626', color: '#fff', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
                                 }, 'Xác nhận hủy'),
                                 h('button', {
                                   type: 'button',
-                                  onClick: () => { setCancelTargetId(null); setCancelReason(''); },
+                                  onClick: (e) => { e?.stopPropagation?.(); setCancelTargetId(null); setCancelReason(''); },
                                   style: { padding: '2px 8px', borderRadius: 4, border: '1px solid #cbd5e1', background: '#fff', fontSize: 11, cursor: 'pointer' },
                                 }, 'Đóng'),
                               ),
@@ -863,7 +929,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                           : h('button', {
                               type: 'button',
                               'data-testid': `dxos-kanban-cancel-${rec.id}`,
-                              onClick: () => { setCancelTargetId(rec.id); setCancelReason(''); },
+                              onClick: (e) => { e?.stopPropagation?.(); setCancelTargetId(rec.id); setCancelReason(''); },
                               style: {
                                 marginTop: 2, padding: '3px 8px', borderRadius: 6, border: '1px solid #fca5a5',
                                 background: '#fff', color: '#dc2626', fontSize: 11, fontWeight: 700, cursor: 'pointer',
@@ -921,7 +987,9 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                       const meta = columnStyleMap.get(st) || STAGE_META[st] || { bg: '#f1f5f9', color: '#334155' };
                       return h('div', {
                         key: rec.id ?? idx,
-                        style: { padding: 6, borderRadius: 6, background: '#ffffff', border: '1px solid #e2e8f0', fontSize: 11, display: 'grid', gap: 2 },
+                        'data-testid': `dxos-schedule-day-item-${rec.id ?? idx}`,
+                        onClick: () => handleRecordClick(rec),
+                        style: { padding: 6, borderRadius: 6, background: '#ffffff', border: selectedRecord?.id === rec.id ? '1.5px solid #2563eb' : '1px solid #e2e8f0', fontSize: 11, display: 'grid', gap: 2, cursor: 'pointer' },
                       },
                         h('strong', null, String(rec.code || rec.lotCode || `#${rec.id}`)),
                         h('div', { style: { color: '#475569' } }, resolveRecordDisplayTitle(rec, effectiveTitleField)),
@@ -963,20 +1031,19 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                         stages: kanbanData.stages,
                       });
                       const meta = columnStyleMap.get(st) || STAGE_META[st] || { bg: '#f1f5f9', color: '#334155' };
-                      const onCardClick = typeof cfg.onRecordClick === 'function' ? () => cfg.onRecordClick(rec, activeCollection) : undefined;
                       return h('div', {
                         key: rec.id ?? idx,
                         'data-testid': `dxos-schedule-unscheduled-item-${rec.id ?? idx}`,
-                        onClick: onCardClick,
+                        onClick: () => handleRecordClick(rec),
                         style: {
                           padding: 8,
                           borderRadius: 6,
                           background: '#ffffff',
-                          border: sla ? `1px solid ${sla.border}` : '1px solid #e2e8f0',
+                          border: selectedRecord?.id === rec.id ? '1.5px solid #2563eb' : (sla ? `1px solid ${sla.border}` : '1px solid #e2e8f0'),
                           fontSize: 11,
                           display: 'grid',
                           gap: 3,
-                          cursor: onCardClick ? 'pointer' : 'default',
+                          cursor: 'pointer',
                         },
                       },
                         h('strong', { style: { color: '#0f172a' } }, String(rec.code || rec.lotCode || `#${rec.id ?? idx}`)),
@@ -991,6 +1058,58 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                 )
               : null,
           ),
+      selectedRecord ? (() => {
+        const selCode = selectedRecord.code || selectedRecord.lotCode || `#${selectedRecord.id ?? ''}`;
+        const selName = resolveRecordDisplayTitle(selectedRecord, effectiveTitleField);
+        const selStage = resolveRecordStage(selectedRecord, activeCollection, {
+          statusField: effectiveStatusField,
+          stages: kanbanData.stages,
+        });
+        const selMeta = columnStyleMap.get(selStage) || STAGE_META[selStage] || { bg: '#f1f5f9', color: '#334155' };
+        const selDate = formatDateChip(selectedRecord, effectiveDateFields, effectiveDateField);
+        return h('div', {
+          'data-testid': 'dxos-kanban-detail-drawer',
+          role: 'region',
+          'aria-label': `Chi tiết ${selCode}`,
+          style: {
+            marginTop: 4,
+            padding: 12,
+            borderRadius: 10,
+            border: '1px solid #93c5fd',
+            background: '#f8fafc',
+            display: 'grid',
+            gap: 8,
+          },
+        },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+              h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `${selCode} — ${selName}`),
+              h('span', { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: selMeta.bg, color: selMeta.color } }, selMeta.label || formatStatusLabel(selStage)),
+            ),
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-kanban-detail-close',
+              onClick: () => setSelectedRecord(null),
+              style: { border: '1px solid #cbd5e1', background: '#ffffff', color: '#334155', borderRadius: 6, padding: '2px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer' },
+            }, 'Đóng'),
+          ),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 12, color: '#475569' } },
+            h('span', null, `Phân hệ: ${activeCollection}`),
+            selDate ? h('span', null, `Ngày (Asia/Ho_Chi_Minh): ${selDate}`) : null,
+            selectedRecord.customer ? h('span', null, `Khách hàng: ${selectedRecord.customer}`) : null,
+            selectedRecord.sku ? h('span', null, `SKU: ${selectedRecord.sku}`) : null,
+            selectedRecord.qtyAvailable != null ? h('span', null, `Khả dụng: ${selectedRecord.qtyAvailable}`) : null,
+            selectedRecord.quantity != null ? h('span', null, `Số lượng: ${selectedRecord.quantity}`) : null,
+          ),
+          isVoucherCol && selStage === 'submitted' ? h('div', { style: { display: 'flex', gap: 8 } },
+            h('button', {
+              type: 'button',
+              onClick: openApprovalInbox,
+              style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #1d4ed8', background: '#1d4ed8', color: '#ffffff', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
+            }, 'Mở Hộp Phê duyệt'),
+          ) : null,
+        );
+      })() : null,
     );
   };
 }

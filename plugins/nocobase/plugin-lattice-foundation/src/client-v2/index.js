@@ -28,12 +28,32 @@
       const PublicTrackPage = createPublicTrackPage(client, React, this.app);
       const PublicFormPage = createPublicFormPage(client, React, this.app);
       if (this.app?.router && typeof this.app.router.add === 'function') {
-        this.app.router.add('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage });
-        this.app.router.add('dxos-mobile-field-sub', { path: '/mobile/*', Component: MobileFieldPwaPage });
-        this.app.router.add('dxos-public-track', { path: '/track/:code', Component: PublicTrackPage, skipAuthCheck: true });
-        this.app.router.add('dxos-public-track-root', { path: '/track', Component: PublicTrackPage, skipAuthCheck: true });
-        this.app.router.add('dxos-public-form', { path: '/form/:slug', Component: PublicFormPage, skipAuthCheck: true });
-        this.app.router.add('dxos-public-form-root', { path: '/form', Component: PublicFormPage, skipAuthCheck: true });
+        const router = this.app.router;
+        const origAdd = router.add.bind(router);
+        const isMobileRootRoute = (name, route) => name === 'mobile' && (!route?.path || route.path === '/mobile');
+        const buildMobileOverrideRoute = (route = {}) => ({
+          ...route,
+          path: '/mobile',
+          Component: MobileFieldPwaPage,
+          element: undefined,
+        });
+        router.add = (name, route) => (
+          isMobileRootRoute(name, route)
+            ? origAdd(name, buildMobileOverrideRoute(route))
+            : origAdd(name, route)
+        );
+        const hasMobileRoute = (typeof router.has === 'function' && router.has('mobile'))
+          || Boolean(router.routes && Object.prototype.hasOwnProperty.call(router.routes, 'mobile'));
+        if (hasMobileRoute) {
+          const existingMobile = router.routes?.mobile;
+          origAdd('mobile', buildMobileOverrideRoute(existingMobile));
+        }
+        origAdd('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage });
+        origAdd('dxos-mobile-field-sub', { path: '/mobile/*', Component: MobileFieldPwaPage });
+        origAdd('dxos-public-track', { path: '/track/:code', Component: PublicTrackPage, skipAuthCheck: true });
+        origAdd('dxos-public-track-root', { path: '/track', Component: PublicTrackPage, skipAuthCheck: true });
+        origAdd('dxos-public-form', { path: '/form/:slug', Component: PublicFormPage, skipAuthCheck: true });
+        origAdd('dxos-public-form-root', { path: '/form', Component: PublicFormPage, skipAuthCheck: true });
       }
     }
   }

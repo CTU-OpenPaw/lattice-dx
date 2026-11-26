@@ -76,8 +76,8 @@ const dataNodes = [
   {
     type: 'data.query',
     category: 'data',
-    label: 'Query Collection Records',
-    description: 'Queries tenant-scoped records from an allowlisted business collection.',
+    label: 'Truy vấn Bản ghi',
+    description: 'Truy vấn các bản ghi thuộc phạm vi tổ chức từ bảng dữ liệu nghiệp vụ cho phép.',
     icon: 'SearchOutlined',
     color: '#13c2c2',
     inputs: ['in'],
@@ -85,10 +85,10 @@ const dataNodes = [
     defaultConfig: { collection: 'latticeRequests', filter: {}, limit: 20, sort: [] },
     inputSchema: {
       fields: [
-        { name: 'collection', label: 'Collection', type: 'collection', required: true },
-        { name: 'filter', label: 'Filter (JSON)', type: 'json' },
-        { name: 'limit', label: 'Limit (1..200)', type: 'number' },
-        { name: 'sort', label: 'Sort Fields', type: 'json' },
+        { name: 'collection', label: 'Bảng dữ liệu', type: 'collection', required: true },
+        { name: 'filter', label: 'Bộ lọc (JSON)', type: 'json' },
+        { name: 'limit', label: 'Giới hạn (1..200)', type: 'number' },
+        { name: 'sort', label: 'Sắp xếp (JSON)', type: 'json' },
       ],
     },
     async execute({ node, config, input, context, db, options, helpers }) {
@@ -117,8 +117,8 @@ const dataNodes = [
   {
     type: 'data.create',
     category: 'data',
-    label: 'Create Record',
-    description: 'Creates a tenant-scoped record in an allowlisted business collection.',
+    label: 'Tạo Bản ghi',
+    description: 'Tạo bản ghi mới thuộc phạm vi tổ chức trong bảng dữ liệu nghiệp vụ cho phép.',
     icon: 'PlusSquareOutlined',
     color: '#13c2c2',
     inputs: ['in'],
@@ -126,8 +126,8 @@ const dataNodes = [
     defaultConfig: { collection: '', values: {} },
     inputSchema: {
       fields: [
-        { name: 'collection', label: 'Collection', type: 'collection', required: true },
-        { name: 'values', label: 'Record Values (JSON)', type: 'json', required: true },
+        { name: 'collection', label: 'Bảng dữ liệu', type: 'collection', required: true },
+        { name: 'values', label: 'Giá trị Bản ghi (JSON)', type: 'json', required: true },
       ],
     },
     async execute({ node, config, input, context, db, options, helpers }) {
@@ -152,8 +152,8 @@ const dataNodes = [
   {
     type: 'data.update',
     category: 'data',
-    label: 'Update Records',
-    description: 'Updates matching tenant-scoped records in an allowlisted business collection.',
+    label: 'Cập nhật Bản ghi',
+    description: 'Cập nhật các bản ghi khớp bộ lọc thuộc phạm vi tổ chức trong bảng nghiệp vụ cho phép.',
     icon: 'EditOutlined',
     color: '#13c2c2',
     inputs: ['in'],
@@ -161,10 +161,10 @@ const dataNodes = [
     defaultConfig: { collection: '', filter: {}, recordId: '', values: {}, limit: 20 },
     inputSchema: {
       fields: [
-        { name: 'collection', label: 'Collection', type: 'collection', required: true },
-        { name: 'recordId', label: 'Record ID (optional)', type: 'string' },
-        { name: 'filter', label: 'Filter (JSON)', type: 'json' },
-        { name: 'values', label: 'Update Values (JSON)', type: 'json', required: true },
+        { name: 'collection', label: 'Bảng dữ liệu', type: 'collection', required: true },
+        { name: 'recordId', label: 'ID Bản ghi (tùy chọn)', type: 'string' },
+        { name: 'filter', label: 'Bộ lọc (JSON)', type: 'json' },
+        { name: 'values', label: 'Giá trị Cập nhật (JSON)', type: 'json', required: true },
       ],
     },
     async execute({ node, config, input, context, db, options, helpers }) {

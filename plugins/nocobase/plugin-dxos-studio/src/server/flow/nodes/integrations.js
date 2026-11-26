@@ -123,8 +123,8 @@ const integrationNodes = [
   {
     type: 'integration.http',
     category: 'integration',
-    label: 'Vault HTTP Connector',
-    description: 'Calls a Vault-governed HTTP connector with origin locking, SSRF checks, and HMAC signing.',
+    label: 'Kết nối HTTP qua Vault',
+    description: 'Gọi HTTP connector quản trị trong Vault với khóa origin, kiểm tra SSRF và ký HMAC.',
     icon: 'GlobalOutlined',
     color: '#eb2f96',
     inputs: ['in'],
@@ -132,12 +132,12 @@ const integrationNodes = [
     defaultConfig: { connectorKey: '', method: 'POST', path: '', headers: {}, body: null, timeoutMs: DEFAULT_HTTP_TIMEOUT_MS },
     inputSchema: {
       fields: [
-        { name: 'connectorKey', label: 'Connector Key', type: 'string', required: true },
-        { name: 'method', label: 'HTTP Method', type: 'select', required: true, options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
-        { name: 'path', label: 'Relative Path', type: 'string', placeholder: '/webhooks/sync' },
-        { name: 'headers', label: 'Custom Headers (JSON)', type: 'json' },
-        { name: 'body', label: 'Request Body (JSON)', type: 'json' },
-        { name: 'timeoutMs', label: 'Timeout (ms)', type: 'number' },
+        { name: 'connectorKey', label: 'Mã Kết nối (Connector Key)', type: 'string', required: true },
+        { name: 'method', label: 'Phương thức HTTP', type: 'select', required: true, options: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] },
+        { name: 'path', label: 'Đường dẫn Tương đối', type: 'string', placeholder: '/webhooks/sync' },
+        { name: 'headers', label: 'Header Tùy chỉnh (JSON)', type: 'json' },
+        { name: 'body', label: 'Nội dung Yêu cầu (JSON)', type: 'json' },
+        { name: 'timeoutMs', label: 'Thời gian chờ (ms)', type: 'number' },
       ],
     },
     async execute({ node, config, input, context, db, app, options = {}, helpers }) {
@@ -199,8 +199,8 @@ const integrationNodes = [
   {
     type: 'iot.twin_command',
     category: 'integration',
-    label: 'Digital Twin Command',
-    description: 'Applies or HITL-gates a desired state patch on a Digital Twin asset shadow.',
+    label: 'Lệnh Digital Twin',
+    description: 'Áp dụng hoặc đưa vào cổng duyệt HITL bản vá trạng thái mong muốn cho thực thể Digital Twin.',
     icon: 'ControlOutlined',
     color: '#eb2f96',
     inputs: ['in'],
@@ -208,10 +208,10 @@ const integrationNodes = [
     defaultConfig: { assetId: '', assetEntityId: '', desiredPatch: {}, downlinkUrl: '' },
     inputSchema: {
       fields: [
-        { name: 'assetId', label: 'Asset ID', type: 'string' },
-        { name: 'assetEntityId', label: 'Twin Entity ID / URN', type: 'string', required: true },
-        { name: 'desiredPatch', label: 'Desired Patch (JSON)', type: 'json', required: true },
-        { name: 'downlinkUrl', label: 'Downlink URL (optional)', type: 'string' },
+        { name: 'assetId', label: 'ID Tài sản', type: 'string' },
+        { name: 'assetEntityId', label: 'Entity ID / URN Twin', type: 'string', required: true },
+        { name: 'desiredPatch', label: 'Trạng thái Mong muốn (JSON)', type: 'json', required: true },
+        { name: 'downlinkUrl', label: 'URL Downlink (tùy chọn)', type: 'string' },
       ],
     },
     async execute({ node, config, input, context, db, app, options = {}, helpers }) {
@@ -238,8 +238,8 @@ const integrationNodes = [
   {
     type: 'notify.send',
     category: 'integration',
-    label: 'Send Role Notification',
-    description: 'Dispatches tenant-scoped notifications to target roles across configured channels.',
+    label: 'Gửi Thông báo theo Vai trò',
+    description: 'Gửi thông báo theo phạm vi tổ chức tới các vai trò mục tiêu qua các kênh đã cấu hình.',
     icon: 'BellOutlined',
     color: '#eb2f96',
     inputs: ['in'],
@@ -247,17 +247,17 @@ const integrationNodes = [
     defaultConfig: { roleNames: ['ldx_operator'], title: '', body: '', severity: 'warning', category: 'system', targetCollection: '', targetRecordId: '', targetPath: '', notifyChannels: ['in_app'], templateKey: '', channelConfig: {} },
     inputSchema: {
       fields: [
-        { name: 'roleNames', label: 'Role Names (JSON Array)', type: 'json', required: true },
-        { name: 'title', label: 'Title', type: 'string', required: true },
-        { name: 'body', label: 'Body', type: 'textarea' },
-        { name: 'severity', label: 'Severity', type: 'select', options: ['info', 'warning', 'high', 'critical'] },
-        { name: 'category', label: 'Category', type: 'select', options: ['system', 'mention', 'voucher', 'sla', 'alarm', 'approval'] },
-        { name: 'targetCollection', label: 'Target Collection', type: 'collection' },
-        { name: 'targetRecordId', label: 'Target Record ID', type: 'string' },
-        { name: 'targetPath', label: 'Target Portal Path', type: 'string' },
-        { name: 'notifyChannels', label: 'Notification Channels (JSON Array)', type: 'json', options: NOTIFY_CHANNELS, placeholder: '["in_app","email_smtp","telegram","slack","webhook"]' },
-        { name: 'templateKey', label: 'Template Key', type: 'string', placeholder: 'incident_alert' },
-        { name: 'channelConfig', label: 'Channel Config (JSON)', type: 'json', placeholder: '{"connectorKey":"tg-ops"}' },
+        { name: 'roleNames', label: 'Danh sách Vai trò (JSON)', type: 'json', required: true },
+        { name: 'title', label: 'Tiêu đề', type: 'string', required: true },
+        { name: 'body', label: 'Nội dung', type: 'textarea' },
+        { name: 'severity', label: 'Mức độ nghiêm trọng', type: 'select', options: ['info', 'warning', 'high', 'critical'] },
+        { name: 'category', label: 'Phân loại', type: 'select', options: ['system', 'mention', 'voucher', 'sla', 'alarm', 'approval'] },
+        { name: 'targetCollection', label: 'Bảng dữ liệu Đích', type: 'collection' },
+        { name: 'targetRecordId', label: 'ID Bản ghi Đích', type: 'string' },
+        { name: 'targetPath', label: 'Đường dẫn Portal Đích', type: 'string' },
+        { name: 'notifyChannels', label: 'Kênh Thông báo (JSON)', type: 'json', options: NOTIFY_CHANNELS, placeholder: '["in_app","email_smtp","telegram","slack","webhook"]' },
+        { name: 'templateKey', label: 'Mã Mẫu thông báo', type: 'string', placeholder: 'incident_alert' },
+        { name: 'channelConfig', label: 'Cấu hình Kênh (JSON)', type: 'json', placeholder: '{"connectorKey":"tg-ops"}' },
       ],
     },
     async execute({ node, config, input, context, db, app, options = {}, helpers }) {
@@ -299,8 +299,8 @@ const integrationNodes = [
   {
     type: 'event.emit',
     category: 'integration',
-    label: 'Emit Domain Event',
-    description: 'Publishes a tenant-scoped CloudEvent onto the Lattice Event Bus with recursion depth increment.',
+    label: 'Phát Sự kiện Miền',
+    description: 'Phát một CloudEvent theo phạm vi tổ chức lên Lattice Event Bus với độ sâu đệ quy tăng dần.',
     icon: 'SendOutlined',
     color: '#eb2f96',
     inputs: ['in'],
@@ -308,9 +308,9 @@ const integrationNodes = [
     defaultConfig: { eventType: '', subject: '', data: {} },
     inputSchema: {
       fields: [
-        { name: 'eventType', label: 'Event Type', type: 'string', required: true },
-        { name: 'subject', label: 'Subject', type: 'string' },
-        { name: 'data', label: 'Payload Data (JSON)', type: 'json' },
+        { name: 'eventType', label: 'Loại Sự kiện', type: 'string', required: true },
+        { name: 'subject', label: 'Chủ thể (Subject)', type: 'string' },
+        { name: 'data', label: 'Dữ liệu Payload (JSON)', type: 'json' },
       ],
     },
     async execute({ node, config, input, context, db, app, options = {}, helpers }) {

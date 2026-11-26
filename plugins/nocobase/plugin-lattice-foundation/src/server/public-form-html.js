@@ -276,7 +276,7 @@ function buildClientScriptSource() {
     checkStatus(formMeta.slug, rawCode, effectiveStatusToken, null);
   }
 
-  var formEl = el('form', { 'data-testid': 'public-form-element', class: 'dxos-card' });
+  var formEl = el('form', { 'data-testid': 'public-form-element', novalidate: true, class: 'dxos-card' });
   var hpInput = el('input', {
     type: 'text',
     name: hpName,
@@ -286,9 +286,9 @@ function buildClientScriptSource() {
     autocomplete: 'off',
     class: 'dxos-hp',
   });
-  formEl.appendChild(hpInput);
 
   var tokenInput = null;
+  var tokenErrorEl = null;
   if (formMeta.requireAccessToken) {
     var tokGroup = el('div', { class: 'dxos-field' });
     tokGroup.appendChild(el('label', { class: 'dxos-label' }, 'M\\u00e3 truy c\\u1eadp bi\\u1ec3u m\\u1eabu (Access Token) *'));
@@ -300,7 +300,19 @@ function buildClientScriptSource() {
       class: 'dxos-input',
     });
     if (initialAccessToken) tokenInput.value = initialAccessToken;
+    tokenErrorEl = el('div', {
+      'data-testid': 'public-form-token-error',
+      role: 'alert',
+      class: 'dxos-field-error dxos-hidden',
+    });
+    tokenInput.addEventListener('input', function () {
+      tokenInput.classList.remove('dxos-input-error');
+      tokenErrorEl.textContent = '';
+      tokenErrorEl.classList.add('dxos-hidden');
+      clearError();
+    });
     tokGroup.appendChild(tokenInput);
+    tokGroup.appendChild(tokenErrorEl);
     formEl.appendChild(tokGroup);
   }
 
@@ -355,10 +367,26 @@ function buildClientScriptSource() {
         class: 'dxos-input',
       });
     }
+    var fieldErrorEl = el('div', {
+      'data-testid': 'public-form-field-error-' + field.name,
+      role: 'alert',
+      class: 'dxos-field-error dxos-hidden',
+    });
+    var clearFieldErr = function () {
+      control.classList.remove('dxos-input-error');
+      fieldErrorEl.textContent = '';
+      fieldErrorEl.classList.add('dxos-hidden');
+      clearError();
+    };
+    control.addEventListener('input', clearFieldErr);
+    control.addEventListener('change', clearFieldErr);
     wrap.appendChild(control);
+    wrap.appendChild(fieldErrorEl);
     formEl.appendChild(wrap);
-    fieldControls.push({ field: field, control: control });
+    fieldControls.push({ field: field, control: control, errorEl: fieldErrorEl });
   });
+
+  formEl.appendChild(hpInput);
 
   var submitBtn = el('button', {
     type: 'submit',
@@ -368,10 +396,97 @@ function buildClientScriptSource() {
   formEl.appendChild(submitBtn);
   formArea.appendChild(formEl);
 
+  function setControlError(ctrl, errEl, message) {
+    if (ctrl && ctrl.classList) ctrl.classList.add('dxos-input-error');
+    if (errEl) {
+      errEl.textContent = message;
+      errEl.classList.remove('dxos-hidden');
+    }
+  }
+
+  function clearControlError(ctrl, errEl) {
+    if (ctrl && ctrl.classList) ctrl.classList.remove('dxos-input-error');
+    if (errEl) {
+      errEl.textContent = '';
+      errEl.classList.add('dxos-hidden');
+    }
+  }
+
+  function validateFormInputs() {
+    var firstInvalid = null;
+    var hasErrors = false;
+    clearControlError(tokenInput, tokenErrorEl);
+    fieldControls.forEach(function (entry) {
+      clearControlError(entry.control, entry.errorEl);
+    });
+
+    if (formMeta.requireAccessToken && tokenInput) {
+      var tokVal = String(tokenInput.value || '').trim();
+      if (!tokVal) {
+        setControlError(tokenInput, tokenErrorEl, 'Vui l\\u00f2ng nh\\u1eadp m\\u00e3 truy c\\u1eadp bi\\u1ec3u m\\u1eabu (Access Token).');
+        if (!firstInvalid) firstInvalid = tokenInput;
+        hasErrors = true;
+      }
+    }
+
+    fieldControls.forEach(function (entry) {
+      var f = entry.field;
+      var ctrl = entry.control;
+      var label = String(f.label || f.name);
+      var msg = '';
+      if (f.type === 'boolean') {
+        if (f.required && !ctrl.checked) {
+          msg = 'Vui l\\u00f2ng x\\u00e1c nh\\u1eadn ' + label + '.';
+        }
+      } else {
+        var raw = String(ctrl.value || '');
+        var trimmed = raw.trim();
+        if (f.required && !trimmed) {
+          msg = 'Vui l\\u00f2ng nh\\u1eadp ' + label + '.';
+        } else if (trimmed) {
+          var maxLen = Number(f.maxLength);
+          if (maxLen > 0 && raw.length > maxLen) {
+            msg = label + ' kh\\u00f4ng \\u0111\\u01b0\\u1ee3c v\\u01b0\\u1ee3t qu\\u00e1 ' + maxLen + ' k\\u00fd t\\u1ef1.';
+          } else if (f.type === 'email' && !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(trimmed)) {
+            msg = 'Email kh\\u00f4ng h\\u1ee3p l\\u1ec7. Vui l\\u00f2ng ki\\u1ec3m tra l\\u1ea1i.';
+          } else if (f.type === 'number' || f.type === 'integer') {
+            var num = Number(trimmed);
+            if (!Number.isFinite(num)) {
+              msg = 'Vui l\\u00f2ng nh\\u1eadp s\\u1ed1 h\\u1ee3p l\\u1ec7 cho ' + label + '.';
+            } else if (f.type === 'integer' && !Number.isInteger(num)) {
+              msg = 'Vui l\\u00f2ng nh\\u1eadp s\\u1ed1 nguy\\u00ean h\\u1ee3p l\\u1ec7 cho ' + label + '.';
+            } else if (f.min !== undefined && num < Number(f.min)) {
+              msg = label + ' t\\u1ed1i thi\\u1ec3u l\\u00e0 ' + f.min + '.';
+            } else if (f.max !== undefined && num > Number(f.max)) {
+              msg = label + ' t\\u1ed1i \\u0111a l\\u00e0 ' + f.max + '.';
+            }
+          }
+        }
+      }
+      if (msg) {
+        setControlError(ctrl, entry.errorEl, msg);
+        if (!firstInvalid) firstInvalid = ctrl;
+        hasErrors = true;
+      }
+    });
+
+    if (hasErrors) {
+      showError('Vui l\\u00f2ng ki\\u1ec3m tra v\\u00e0 \\u0111i\\u1ec1n \\u0111\\u1ea7y \\u0111\\u1ee7 c\\u00e1c th\\u00f4ng tin b\\u1eaft bu\\u1ed9c.');
+      if (firstInvalid && typeof firstInvalid.focus === 'function') {
+        firstInvalid.focus();
+      }
+      return false;
+    }
+    return true;
+  }
+
   formEl.addEventListener('submit', function (evt) {
     evt.preventDefault();
     clearError();
     clearStatusError();
+    if (!validateFormInputs()) {
+      return;
+    }
     submitBtn.disabled = true;
     submitBtn.textContent = '\\u0110ang g\\u1eedi h\\u1ed3 s\\u01a1...';
 
@@ -490,6 +605,8 @@ function renderPublicFormHtml({
     .dxos-field { margin-bottom: 14px; }
     .dxos-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
     .dxos-input { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; font-family: inherit; }
+    .dxos-input-error { border-color: #dc2626; background: #fef2f2; }
+    .dxos-field-error { color: #b91c1c; font-size: 12px; margin-top: 5px; font-weight: 500; }
     .dxos-checkbox { width: 16px; height: 16px; }
     .dxos-btn { padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
     .dxos-btn:disabled { cursor: not-allowed; opacity: 0.65; }

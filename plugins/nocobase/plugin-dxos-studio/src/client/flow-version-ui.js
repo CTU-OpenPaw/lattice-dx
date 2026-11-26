@@ -25,6 +25,15 @@ function buildDraftPayload(rule, graph, orgPayload, deriveTriggerEventType) {
   };
 }
 
+function formatVnDateTime(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return String(value).slice(0, 19).replace('T', ' ');
+  const vn = new Date(d.getTime() + 7 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${vn.getUTCFullYear()}-${pad(vn.getUTCMonth() + 1)}-${pad(vn.getUTCDate())} ${pad(vn.getUTCHours())}:${pad(vn.getUTCMinutes())}:${pad(vn.getUTCSeconds())} (+07:00)`;
+}
+
 function getVersionStatusMeta(doc) {
   const rule = doc?.rule || {};
   const pubVer = Math.max(0, Number(rule.publishedVersion || 0));
@@ -33,12 +42,12 @@ function getVersionStatusMeta(doc) {
     && JSON.stringify(rule.draftGraphJson) !== JSON.stringify(rule.graphJson));
   const hasDraft = Boolean(doc?.dirty || draftDiff || (!hasPublished && rule.draftGraphJson?.nodes?.length));
   if (!hasPublished) {
-    return { label: 'Draft (Chưa publish)', bg: '#fffbeb', color: '#b45309', border: '#fcd34d', pubVer: 0 };
+    return { label: 'Draft (Chưa phát hành)', bg: '#fffbeb', color: '#b45309', border: '#fcd34d', pubVer: 0 };
   }
   if (hasDraft) {
-    return { label: `Draft · Live v${pubVer}`, bg: '#fffbeb', color: '#b45309', border: '#fcd34d', pubVer };
+    return { label: `Draft · Đang chạy v${pubVer}`, bg: '#fffbeb', color: '#b45309', border: '#fcd34d', pubVer };
   }
-  return { label: `Published v${pubVer}`, bg: '#f0fdf4', color: '#166534', border: '#86efac', pubVer };
+  return { label: `Đã phát hành v${pubVer}`, bg: '#f0fdf4', color: '#166534', border: '#86efac', pubVer };
 }
 
 function renderVersionStatusBadge(h, doc) {
@@ -87,13 +96,13 @@ function renderVersionsModal(h, { modal, currentVersion, busy, onRollback, onClo
   },
     h('div', { style: { width: 580, maxWidth: '100%', maxHeight: '80vh', overflowY: 'auto', background: '#ffffff', borderRadius: 12, padding: 16, display: 'grid', gap: 10, boxShadow: '0 14px 36px rgba(15,23,42,0.22)' } },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
-        h('strong', { style: { fontSize: 14, color: '#0f172a' } }, `Lịch sử phiên bản (Live v${Math.max(0, Number(currentVersion || 0))})`),
+        h('strong', { style: { fontSize: 14, color: '#0f172a' } }, `Lịch sử phiên bản (Đang chạy v${Math.max(0, Number(currentVersion || 0))})`),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-versions-close-btn', onClick: onClose, style: btnS('ghost') }, 'Đóng'),
       ),
       modal.loading
         ? h('div', { style: { fontSize: 12, color: '#64748b', padding: 12 } }, 'Đang tải phiên bản...')
         : !items.length
-          ? h('div', { style: { fontSize: 12, color: '#64748b', padding: 12 } }, 'Chưa có phiên bản đã publish nào.')
+          ? h('div', { style: { fontSize: 12, color: '#64748b', padding: 12 } }, 'Chưa có phiên bản đã phát hành nào.')
           : items.map((v) => {
             const ver = Number(v.version || 0);
             const isCurrent = Boolean(v.isCurrent) || ver === Number(currentVersion || 0);
@@ -106,8 +115,8 @@ function renderVersionsModal(h, { modal, currentVersion, busy, onRollback, onClo
               h('div', { style: { display: 'grid', gap: 2 } },
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
                   h('strong', { style: { fontSize: 12, color: '#0f172a' } }, `v${ver}`),
-                  isCurrent ? h('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: '#dcfce7', color: '#166534' } }, 'Live') : null,
-                  h('span', { style: { fontSize: 11, color: '#64748b' } }, `${v.publishedBy || 'system'}${v.publishedAt ? ` · ${String(v.publishedAt).slice(0, 19).replace('T', ' ')}` : ''}`),
+                  isCurrent ? h('span', { style: { fontSize: 10, fontWeight: 700, padding: '1px 6px', borderRadius: 999, background: '#dcfce7', color: '#166534' } }, 'Đang chạy') : null,
+                  h('span', { style: { fontSize: 11, color: '#64748b' } }, `${v.publishedBy || 'system'}${v.publishedAt ? ` · ${formatVnDateTime(v.publishedAt)}` : ''}`),
                 ),
                 summaryText ? h('span', { style: { fontSize: 11, color: '#334155' } }, summaryText) : null,
               ),

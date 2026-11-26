@@ -44,7 +44,7 @@ const DEFAULT_EVAL_SUITES = [
   },
   {
     id: 'custom',
-    name: 'Custom Prompt Cases',
+    name: 'Tình huống Tùy chỉnh',
     description: 'Chạy các ca kiểm thử tùy chỉnh do bạn tự thêm.',
     estimatedCaseCount: 0,
     sampleCases: [],
@@ -215,9 +215,9 @@ function renderTraceWaterfallPanel(React, {
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
       h('div', null,
         h('h3', { style: { margin: '0 0 4px', fontSize: 16, color: '#0f172a' } },
-          'Agent Trace Waterfall (OTel GenAI Semantic Conventions)'),
+          'Dòng thời gian Agent Trace Waterfall (Chuẩn OTel GenAI)'),
         h('div', { style: { fontSize: 12, color: '#64748b' } },
-          `Tổ chức: ${organizationId || '—'} · ${safeTraces.length} trace runs${loading ? ' · Đang tải…' : ''}`),
+          `Tổ chức: ${organizationId || '—'} · ${safeTraces.length} phiên truy vết${loading ? ' · Đang tải…' : ''}`),
       ),
       h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
         h('input', {
@@ -234,8 +234,8 @@ function renderTraceWaterfallPanel(React, {
           style: { padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         },
           h('option', { value: 'all' }, 'Tất cả trạng thái'),
-          h('option', { value: 'ok' }, 'OK'),
-          h('option', { value: 'error' }, 'Error'),
+          h('option', { value: 'ok' }, 'Thành công (OK)'),
+          h('option', { value: 'error' }, 'Lỗi (Error)'),
         ),
         h('input', {
           'data-testid': 'dxos-trace-filter-id',
@@ -326,8 +326,8 @@ function renderTraceWaterfallPanel(React, {
                     `Agent: ${traceDetail.summary?.agentName || '—'} · Model: ${traceDetail.summary?.model || '—'} · Tổng: ${wf.totalDurationMs}ms`),
                 ),
                 h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                  h('span', { style: badgeStyle('#e0f2fe', '#075985') }, `In: ${traceDetail.totalInputTokens || 0}`),
-                  h('span', { style: badgeStyle('#ede9fe', '#5b21b6') }, `Out: ${traceDetail.totalOutputTokens || 0}`),
+                  h('span', { style: badgeStyle('#e0f2fe', '#075985') }, `Đầu vào: ${traceDetail.totalInputTokens || 0}`),
+                  h('span', { style: badgeStyle('#ede9fe', '#5b21b6') }, `Đầu ra: ${traceDetail.totalOutputTokens || 0}`),
                   h('span', { style: badgeStyle('#fef3c7', '#92400e') }, `PII che: ${traceDetail.piiRedactedCount || 0}`),
                 ),
               ),
@@ -462,6 +462,8 @@ function renderEvalLabPanel(React, {
   organizationId = '',
   suites = DEFAULT_EVAL_SUITES,
   selectedSuiteId = 'vietnamese-nl-agent',
+  mode = 'deterministic',
+  modelName = '',
   customCases = [],
   customDraft = { prompt: '', isAdmin: true, expectedTool: '', refused: false },
   evalResult = null,
@@ -471,6 +473,8 @@ function renderEvalLabPanel(React, {
   running = false,
   error = null,
   onSelectSuite = null,
+  onModeChange = null,
+  onModelNameChange = null,
   onCustomDraftChange = null,
   onAddCustomCase = null,
   onRemoveCustomCase = null,
@@ -500,7 +504,7 @@ function renderEvalLabPanel(React, {
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
       h('div', null,
         h('h3', { style: { margin: '0 0 4px', fontSize: 16, color: '#0f172a' } },
-          'DX-OS Agent Eval Lab (Vietnamese NL & Benchmark Runner)'),
+          'Phòng Đánh giá DX-OS Agent (Tiếng Việt Tự nhiên & Benchmark)'),
         h('div', { style: { fontSize: 12, color: '#64748b' } },
           `Tổ chức: ${organizationId || '—'} · Kiểm chứng độ chính xác định tuyến & phòng vệ bảo mật`),
       ),
@@ -511,6 +515,22 @@ function renderEvalLabPanel(React, {
           onChange: (e) => onSelectSuite?.(e.target.value),
           style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         }, safeSuites.map((s) => h('option', { key: s.id, value: s.id }, s.name))),
+        h('select', {
+          'data-testid': 'dxos-eval-mode-select',
+          value: mode,
+          onChange: (e) => onModeChange?.(e.target.value),
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+        },
+          h('option', { value: 'deterministic' }, 'Chế độ: Định tuyến Chuẩn (Deterministic)'),
+          h('option', { value: 'llm' }, 'Chế độ: LLM Thực (Live Model)'),
+        ),
+        mode === 'llm' ? h('input', {
+          'data-testid': 'dxos-eval-model-input',
+          value: modelName,
+          onChange: (e) => onModelNameChange?.(e.target.value),
+          placeholder: 'Tên model (tùy chọn, vd: gpt-4o-mini)',
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, width: 210, background: '#fff' },
+        }) : null,
         h('button', {
           type: 'button',
           'data-testid': 'dxos-eval-run-btn',
@@ -565,43 +585,58 @@ function renderEvalLabPanel(React, {
       'data-testid': 'dxos-eval-custom-input',
       style: { padding: 12, borderRadius: 10, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 8 },
     },
-      h('strong', { style: { fontSize: 13, color: '#0c4a6e' } }, `Thêm Test Case tùy chỉnh (${safeCustom.length} ca)`),
-      h('div', { style: { display: 'grid', gridTemplateColumns: 'minmax(240px, 2fr) minmax(180px, 1fr) auto auto', gap: 8, alignItems: 'center' } },
+      h('strong', { style: { fontSize: 13, color: '#0c4a6e' } }, `Thêm tình huống tùy chỉnh (${safeCustom.length} ca)`),
+      h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
         h('input', {
           'data-testid': 'dxos-eval-custom-prompt',
           value: customDraft?.prompt || '',
           onChange: (e) => onCustomDraftChange?.({ ...customDraft, prompt: e.target.value }),
           placeholder: 'Nhập câu lệnh tiếng Việt (vd: Lập kế hoạch dry-run cho ứng dụng vendor-po-suite)',
-          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+          style: { flex: '2 1 240px', minWidth: 0, padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
         }),
         h('input', {
           'data-testid': 'dxos-eval-custom-tool',
-          value: customDraft?.expectedTool || '',
+          value: customDraft?.refused ? '' : (customDraft?.expectedTool || ''),
+          disabled: Boolean(customDraft?.refused),
           onChange: (e) => onCustomDraftChange?.({ ...customDraft, expectedTool: e.target.value }),
           placeholder: 'Công cụ kỳ vọng (tùy chọn)',
-          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+          style: { flex: '1 1 180px', minWidth: 0, padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: customDraft?.refused ? '#f1f5f9' : '#fff' },
         }),
-        h('label', { style: { fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: '#0f172a' } },
+        h('label', { style: { fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: '#0f172a', flexShrink: 0 } },
           h('input', {
             type: 'checkbox',
             'data-testid': 'dxos-eval-custom-isadmin',
             checked: customDraft?.isAdmin !== false,
             onChange: (e) => onCustomDraftChange?.({ ...customDraft, isAdmin: Boolean(e.target.checked) }),
           }),
-          'Admin',
+          'Quyền Admin',
+        ),
+        h('label', { style: { fontSize: 12, display: 'flex', alignItems: 'center', gap: 4, color: '#0f172a', flexShrink: 0 } },
+          h('input', {
+            type: 'checkbox',
+            'data-testid': 'dxos-eval-custom-refused',
+            checked: Boolean(customDraft?.refused),
+            onChange: (e) => {
+              const checked = Boolean(e.target.checked);
+              onCustomDraftChange?.({ ...customDraft, refused: checked, ...(checked ? { expectedTool: '' } : {}) });
+            },
+          }),
+          'Kỳ vọng từ chối',
         ),
         h('button', {
           type: 'button',
           'data-testid': 'dxos-eval-add-case-btn',
           onClick: () => onAddCustomCase?.(),
-          style: btnStyle(false, false),
-        }, '+ Thêm Case'),
+          style: { ...btnStyle(false, false), flexShrink: 0 },
+        }, '+ Thêm tình huống'),
       ),
       safeCustom.length ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
         safeCustom.map((c, idx) => h('span', {
           key: c.id || idx,
           style: { ...badgeStyle('#ffffff', '#0f172a'), border: '1px solid #cbd5e1', display: 'inline-flex', alignItems: 'center', gap: 6 },
         },
+          c.refused ? h('span', { style: badgeStyle('#fee2e2', '#991b1b') }, '[Từ chối]') : null,
+          c.isAdmin === false ? h('span', { style: badgeStyle('#fef3c7', '#92400e') }, '[User]') : null,
           `${c.prompt.slice(0, 48)}${c.prompt.length > 48 ? '…' : ''}`,
           h('button', {
             type: 'button',
@@ -679,13 +714,13 @@ function renderEvalLabPanel(React, {
               h('td', { style: { padding: '6px 10px' } }, row.category),
               h('td', { style: { padding: '6px 10px', maxWidth: 320 } }, row.prompt),
               h('td', { style: { padding: '6px 10px', fontFamily: 'monospace', fontSize: 11 } },
-                row.expectedRefused ? 'REFUSE' : (row.expectedTool || '—')),
+                row.expectedRefused ? 'TỪ CHỐI' : (row.expectedTool || '—')),
               h('td', { style: { padding: '6px 10px', fontFamily: 'monospace', fontSize: 11 } },
-                row.actualRefused ? 'REFUSE' : (row.actualTool || '—')),
+                row.actualRefused ? 'TỪ CHỐI' : (row.actualTool || '—')),
               h('td', { style: { padding: '6px 10px' } }, String(row.latencyMs ?? 0)),
               h('td', { style: { padding: '6px 10px' } },
                 h('span', { style: badgeStyle(row.passed ? '#dcfce7' : '#fee2e2', row.passed ? '#166534' : '#991b1b') },
-                  row.passed ? 'PASS' : 'FAIL')),
+                  row.passed ? 'ĐẠT' : 'LỖI')),
             )),
           ),
         ),
@@ -701,7 +736,7 @@ function renderEvalLabPanel(React, {
         h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } },
           h('thead', null,
             h('tr', { style: { background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left' } },
-              h('th', { style: { padding: '6px 10px' } }, 'Run ID'),
+              h('th', { style: { padding: '6px 10px' } }, 'Mã chạy (Run ID)'),
               h('th', { style: { padding: '6px 10px' } }, 'Bộ kiểm thử'),
               h('th', { style: { padding: '6px 10px' } }, 'Đạt / Tổng'),
               h('th', { style: { padding: '6px 10px' } }, 'Tỷ lệ đạt'),
@@ -752,7 +787,14 @@ function createAiTraceWaterfallPanel(React, defaultApi = null) {
     const [error, setError] = useStateSafe(null);
 
     const loadTraces = useCallbackSafe(async (nextFilters = filters) => {
-      if (!api?.request || !organizationId) return;
+      if (!api?.request) {
+        setError('API client chưa sẵn sàng để tải Agent Traces.');
+        return;
+      }
+      if (!organizationId) {
+        setError('Chưa xác định tổ chức (organizationId) để tải Agent Traces.');
+        return;
+      }
       setLoading(true);
       setError(null);
       try {
@@ -856,6 +898,8 @@ function createAiEvalLabPanel(React, defaultApi = null) {
     const organizationId = String(props.organizationId || '').trim();
     const [suites, setSuites] = useStateSafe(() => (Array.isArray(props.initialSuites) && props.initialSuites.length ? props.initialSuites : DEFAULT_EVAL_SUITES));
     const [selectedSuiteId, setSelectedSuiteId] = useStateSafe(() => props.defaultSuiteId || 'vietnamese-nl-agent');
+    const [mode, setMode] = useStateSafe(() => props.defaultMode || 'deterministic');
+    const [modelName, setModelName] = useStateSafe(() => props.defaultModelName || '');
     const [customCases, setCustomCases] = useStateSafe([]);
     const [customDraft, setCustomDraft] = useStateSafe({ prompt: '', isAdmin: true, expectedTool: '', refused: false });
     const [evalResult, setEvalResult] = useStateSafe(() => props.initialResult || null);
@@ -872,11 +916,24 @@ function createAiEvalLabPanel(React, defaultApi = null) {
           const data = res?.data?.data || res?.data || {};
           if (Array.isArray(data.suites) && data.suites.length) setSuites(data.suites);
         })
-        .catch(() => {});
+        .catch((err) => {
+          setError(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được danh sách bộ kiểm thử Eval Lab.');
+        });
     }, [api]);
 
     const handleRunBenchmark = useCallbackSafe(async () => {
-      if (!api?.request || !organizationId) return;
+      if (!api?.request) {
+        setError('API client chưa sẵn sàng để chạy Eval Benchmark.');
+        return;
+      }
+      if (!organizationId) {
+        setError('Chưa xác định tổ chức (organizationId) để chạy Eval Benchmark.');
+        return;
+      }
+      if (selectedSuiteId === 'custom' && customCases.length === 0) {
+        setError('Vui lòng thêm ít nhất 1 tình huống tùy chỉnh trước khi chạy.');
+        return;
+      }
       setRunning(true);
       setError(null);
       try {
@@ -887,6 +944,8 @@ function createAiEvalLabPanel(React, defaultApi = null) {
             organizationId,
             suiteId: selectedSuiteId,
             customCases,
+            mode,
+            ...(mode === 'llm' && String(modelName || '').trim() ? { modelName: String(modelName).trim() } : {}),
           },
         });
         const data = res?.data?.data || res?.data || null;
@@ -908,12 +967,14 @@ function createAiEvalLabPanel(React, defaultApi = null) {
       } finally {
         setRunning(false);
       }
-    }, [api, organizationId, selectedSuiteId, customCases]);
+    }, [api, organizationId, selectedSuiteId, customCases, mode, modelName]);
 
     return renderEvalLabPanel(React, {
       organizationId,
       suites,
       selectedSuiteId,
+      mode,
+      modelName,
       customCases,
       customDraft,
       evalResult,
@@ -923,10 +984,17 @@ function createAiEvalLabPanel(React, defaultApi = null) {
       running,
       error,
       onSelectSuite: setSelectedSuiteId,
+      onModeChange: setMode,
+      onModelNameChange: setModelName,
       onCustomDraftChange: setCustomDraft,
       onAddCustomCase: () => {
         const prompt = String(customDraft?.prompt || '').trim();
-        if (!prompt) return;
+        if (!prompt) {
+          setError('Vui lòng nhập câu lệnh (Prompt) trước khi thêm tình huống.');
+          return;
+        }
+        setError(null);
+        const refused = Boolean(customDraft?.refused);
         setCustomCases((prev) => [
           ...prev,
           {
@@ -934,8 +1002,8 @@ function createAiEvalLabPanel(React, defaultApi = null) {
             category: 'custom',
             prompt,
             isAdmin: customDraft?.isAdmin !== false,
-            ...(String(customDraft?.expectedTool || '').trim() ? { expectedTool: String(customDraft.expectedTool).trim() } : {}),
-            refused: Boolean(customDraft?.refused),
+            ...(!refused && String(customDraft?.expectedTool || '').trim() ? { expectedTool: String(customDraft.expectedTool).trim() } : {}),
+            refused,
           },
         ]);
         setCustomDraft({ prompt: '', isAdmin: true, expectedTool: '', refused: false });

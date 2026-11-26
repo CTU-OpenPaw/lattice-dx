@@ -63,6 +63,10 @@ const PLATFORM_BINARY_FAMILIES = [
   { re: /^@next\/swc-[a-z0-9-]+$/i, parent: 'next', siblingRe: /^@next\/swc-[a-z0-9-]+$/i },
 ];
 
+export const PLATFORM_OPTIONAL_PACKAGE_LICENSES = Object.freeze({
+  'fsevents@2.3.3': ['MIT'],
+});
+
 function compareAscii(a, b) {
   if (a === b) return 0;
   return a < b ? -1 : 1;
@@ -276,14 +280,15 @@ function collectInstalledNpmLicenses(rootDir) {
 }
 
 function resolveInstalledLicenseForPackage(name, version, installedMap) {
-  if (!installedMap || installedMap.size === 0) return [];
   const exactKey = `${name}@${version}`;
+  const staticFallback = PLATFORM_OPTIONAL_PACKAGE_LICENSES[exactKey] || [];
+  if (!installedMap || installedMap.size === 0) return staticFallback;
   if (installedMap.has(exactKey)) {
     return Array.from(installedMap.get(exactKey)).sort(compareAscii);
   }
 
   const family = PLATFORM_BINARY_FAMILIES.find((item) => item.re.test(name));
-  if (!family) return [];
+  if (!family) return staticFallback;
 
   const siblingLicenses = new Set();
   const suffix = `@${version}`;
@@ -294,7 +299,7 @@ function resolveInstalledLicenseForPackage(name, version, installedMap) {
       for (const lic of licSet) siblingLicenses.add(lic);
     }
   }
-  return siblingLicenses.size === 1 ? Array.from(siblingLicenses) : [];
+  return siblingLicenses.size === 1 ? Array.from(siblingLicenses) : staticFallback;
 }
 
 function collectPackageManifestDirs(baseDir) {

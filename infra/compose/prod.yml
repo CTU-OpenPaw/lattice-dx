@@ -520,6 +520,7 @@ services:
       NOCOBASE_INTERNAL_URL: http://127.0.0.1
     volumes:
       - nocobase-storage:/app/nocobase/storage
+      - ../config/nginx/10-lattice-public-routes.sh:/app/nocobase/storage/scripts/10-lattice-public-routes.sh:ro
       - ../../plugins/nocobase/action-bridge:/app/nocobase/node_modules/@latticedx/plugin-action-bridge:ro
       - ../../plugins/nocobase/plugin-lattice-foundation:/app/nocobase/node_modules/@latticedx/plugin-lattice-foundation:ro
       - ../../plugins/nocobase/plugin-enterprise-auth:/app/nocobase/node_modules/@latticedx/plugin-enterprise-auth:ro

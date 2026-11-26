@@ -82,10 +82,10 @@ function createNodeInspector(React) {
       return [`{{steps.${anc.id}.id}}`, ...(sfx ? sfx.map((s) => `{{steps.${anc.id}.${s}}}`) : [`{{nodes.${anc.id}.output}}`])];
     });
     return [
-      { key: 'event', title: 'Event & Trigger', vars: ['{{event.id}}', '{{event.type}}', '{{event.source}}', '{{event.subject}}', ...[...dataKeys].map((k) => `{{data.${k}}}`)] },
-      { key: 'dmn', title: 'DMN Outputs', vars: [...dmnKeys].map((k) => `{{dmn.${k}}}`) },
-      { key: 'steps', title: `Ancestors (${ancestors.length})`, vars: stepVars.length ? stepVars : ['{{steps.prev.id}}', '{{nodes.prev.output}}'] },
-      { key: 'loop', title: 'Loop Context', vars: ['{{loop.item}}', '{{loop.index}}', '{{loop.count}}'] },
+      { key: 'event', title: 'Sự kiện & Kích hoạt', vars: ['{{event.id}}', '{{event.type}}', '{{event.source}}', '{{event.subject}}', ...[...dataKeys].map((k) => `{{data.${k}}}`)] },
+      { key: 'dmn', title: 'Đầu ra DMN', vars: [...dmnKeys].map((k) => `{{dmn.${k}}}`) },
+      { key: 'steps', title: `Bước trước (${ancestors.length})`, vars: stepVars.length ? stepVars : ['{{steps.prev.id}}', '{{nodes.prev.output}}'] },
+      { key: 'loop', title: 'Ngữ cảnh Vòng lặp', vars: ['{{loop.item}}', '{{loop.index}}', '{{loop.count}}'] },
     ];
   }
 
@@ -156,10 +156,10 @@ function createNodeInspector(React) {
     const [safeCols, safeConns, safeDmns, safeRoles, safeEvents] = ['collections', 'connectors', 'dmnTables', 'roles', 'eventTypes'].map((k) => (Array.isArray(catalog?.[k]) ? catalog[k] : []));
     function resolveSelectOptions(f) {
       const specs = [
-        [f.type === 'collection' || f.name === 'collection' || f.name === 'targetCollection', safeCols, '-- Select collection --', (c) => ({ value: c.name, label: c.title && c.title !== c.name ? `${c.name} (${c.title})` : c.name })],
-        [f.type === 'connector' || f.name === 'connectorKey', safeConns, '-- Select connector --', (c) => ({ value: c.connectorKey, label: `${c.connectorKey} (${c.connectorType || 'http_api'} · ${c.authType || 'none'})` })],
-        [f.type === 'dmn' || f.name === 'tableKey' || f.name === 'dmnTableKey', safeDmns, '-- Select DMN table --', (d) => ({ value: d.tableKey || d.key, label: d.name && d.name !== (d.tableKey || d.key) ? `${d.tableKey || d.key} — ${d.name}` : (d.tableKey || d.key) })],
-        [f.type === 'role' || f.name === 'approverRole', safeRoles, '-- Select role --', (r) => ({ value: r, label: r })],
+        [f.type === 'collection' || f.name === 'collection' || f.name === 'targetCollection', safeCols, '-- Chọn bảng dữ liệu --', (c) => ({ value: c.name, label: c.title && c.title !== c.name ? `${c.name} (${c.title})` : c.name })],
+        [f.type === 'connector' || f.name === 'connectorKey', safeConns, '-- Chọn kết nối --', (c) => ({ value: c.connectorKey, label: `${c.connectorKey} (${c.connectorType || 'http_api'} · ${c.authType || 'none'})` })],
+        [f.type === 'dmn' || f.name === 'tableKey' || f.name === 'dmnTableKey', safeDmns, '-- Chọn bảng DMN --', (d) => ({ value: d.tableKey || d.key, label: d.name && d.name !== (d.tableKey || d.key) ? `${d.tableKey || d.key} — ${d.name}` : (d.tableKey || d.key) })],
+        [f.type === 'role' || f.name === 'approverRole', safeRoles, '-- Chọn vai trò --', (r) => ({ value: r, label: r })],
       ];
       const hit = specs.find(([ok, arr]) => ok && arr.length);
       if (hit) return { placeholder: hit[2], items: hit[1].map(hit[3]) };
@@ -281,13 +281,13 @@ function createNodeInspector(React) {
         const err = bufActive ? jsonBuf.entries[f.name]?.error : null;
         const onRolePick = (r) => r && updateConfigField('roleNames', Array.isArray(val) && val.includes(r) ? val : [...(Array.isArray(val) ? val : []), r]);
         return h('div', { style: S.grid(4) },
-          f.name === 'roleNames' && safeRoles.length ? h('select', { 'data-testid': 'dxos-flow-field-roleNames-picker', value: '', style: S.input, onChange: (e) => onRolePick(e?.target?.value) }, h('option', { value: '' }, '+ Add role from catalog...'), safeRoles.map((r) => h('option', { key: r, value: r }, r))) : null,
+          f.name === 'roleNames' && safeRoles.length ? h('select', { 'data-testid': 'dxos-flow-field-roleNames-picker', value: '', style: S.input, onChange: (e) => onRolePick(e?.target?.value) }, h('option', { value: '' }, '+ Thêm vai trò từ danh mục...'), safeRoles.map((r) => h('option', { key: r, value: r }, r))) : null,
           f.name === 'tools' ? renderToolsPicker(h, { val, catalog, updateConfigField, inputStyle: S.input }) : null,
           h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => { trackCursor(f.name, e); updateJsonFieldText(f.name, e?.target?.value ?? ''); } }),
           err ? h('span', { style: S.err(10) }, err) : null);
       }
       return h('div', { style: S.grid(4) },
-        f.name === 'eventType' && safeEvents.length ? h('select', { 'data-testid': 'dxos-flow-field-eventType-picker', style: S.input, value: safeEvents.some((ev) => ev.type === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Pick standard event --'), safeEvents.map((ev) => h('option', { key: ev.type, value: ev.type }, `${ev.type} — ${ev.label}`))) : null,
+        f.name === 'eventType' && safeEvents.length ? h('select', { 'data-testid': 'dxos-flow-field-eventType-picker', style: S.input, value: safeEvents.some((ev) => ev.type === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Chọn sự kiện chuẩn --'), safeEvents.map((ev) => h('option', { key: ev.type, value: ev.type }, `${ev.type} — ${ev.label}`))) : null,
         f.name === 'path' && node.type === 'integration.http' ? h('select', { 'data-testid': 'dxos-flow-n8n-path-picker', style: S.input, value: N8N_WEBHOOK_PRESETS.some((p) => p.path === val) ? String(val) : '', onChange: (e) => e?.target?.value && updateConfigField(f.name, e.target.value) }, h('option', { value: '' }, '-- Chọn preset n8n Webhook --'), N8N_WEBHOOK_PRESETS.map((p) => h('option', { key: p.key, value: p.path }, `${p.path} — ${p.name}`))) : null,
         f.name === 'connectorKey' && onOpenN8nSetup ? h('button', { type: 'button', 'data-testid': 'dxos-flow-open-n8n-from-inspector', onClick: () => onOpenN8nSetup(), style: S.btn(false, false, false) }, '⚙ Cấu hình dịch vụ n8n') : null,
         h('input', { ...base, type: 'text', value: String(val ?? ''), style: S.input, onChange: (e) => { trackCursor(f.name, e); updateConfigField(f.name, e?.target?.value ?? ''); } }));
@@ -318,10 +318,10 @@ function createNodeInspector(React) {
         ),
         varPickerOpen ? h('div', { 'data-testid': 'dxos-flow-var-picker-panel', style: { ...S.card, background: '#f0f9ff', border: '1px solid #bae6fd' } },
           h('div', { style: S.rowBetween },
-            h('strong', { style: { fontSize: 11, color: '#0369a1' } }, `Variable Tree Picker → ${activeField}`),
+            h('strong', { style: { fontSize: 11, color: '#0369a1' } }, `Chọn biến động → ${activeField}`),
             h('select', { value: activeField, onChange: (e) => setActiveField(e?.target?.value || defaultField), style: { ...S.input, width: 'auto', fontSize: 11, padding: '2px 6px' } },
               fields.filter((f) => !['boolean', 'number'].includes(f.type)).map((f) => h('option', { key: f.name, value: f.name }, f.label || f.name)),
-              h('option', { value: '__raw__' }, 'Raw Config JSON')),
+              h('option', { value: '__raw__' }, 'JSON Cấu hình thô')),
           ),
           varGroups.map((grp) => h('div', { key: grp.key, style: S.grid(4) },
             h('button', { type: 'button', onClick: () => setExpandedGroups((p) => ({ ...p, [grp.key]: !p[grp.key] })), style: { textAlign: 'left', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 11, fontWeight: 700, color: '#1e293b' } }, `${expandedGroups[grp.key] ? '▾' : '▸'} ${grp.title}`),
@@ -331,11 +331,11 @@ function createNodeInspector(React) {
         fields.map((f) => h('div', { key: f.name, style: S.grid(2) }, f.type !== 'boolean' ? h('label', { style: S.label }, `${f.label || f.name}${f.required ? ' *' : ''}`) : null, renderFieldControl(f))),
         node.type === 'trigger.webhook' ? h(WebhookHelper, { nodeId: node.id, nodeCfg, ruleKey, orgKey, onTestNode, onDryRunWebhook, onSwitchToOutput: () => setTab('output'), testBusy }) : null,
         h('div', { style: S.card },
-          h('button', { type: 'button', 'data-testid': 'dxos-flow-inspector-advanced-toggle', 'aria-expanded': advancedOpen, onClick: () => setAdvancedOpen((v) => !v), style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#334155' } }, 'Nâng cao (Execution Policy & Raw JSON)', h('span', null, advancedOpen ? '▾' : '▸')),
+          h('button', { type: 'button', 'data-testid': 'dxos-flow-inspector-advanced-toggle', 'aria-expanded': advancedOpen, onClick: () => setAdvancedOpen((v) => !v), style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'transparent', border: 'none', padding: 0, cursor: 'pointer', fontSize: 12, fontWeight: 700, color: '#334155' } }, 'Nâng cao (Chính sách chạy & JSON thô)', h('span', null, advancedOpen ? '▾' : '▸')),
           advancedOpen ? h('div', { style: S.grid(8) },
             h('div', { style: S.grid2 },
-              h('label', { style: S.checkRow }, h('input', { 'data-testid': 'dxos-flow-continue-on-fail-checkbox', type: 'checkbox', checked: Boolean(node.continueOnFail), onChange: (e) => onUpdateNode?.(node.id, { continueOnFail: Boolean(e?.target?.checked) }) }), 'Continue on Fail'),
-              inpField('Timeout (ms)', 'dxos-flow-timeout-input', { type: 'number', min: 100, value: node.timeoutMs ?? '', placeholder: '30000', onChange: (e) => { const raw = e?.target?.value ?? ''; const n = Number(raw); onUpdateNode?.(node.id, { timeoutMs: raw !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined }); } }),
+              h('label', { style: S.checkRow }, h('input', { 'data-testid': 'dxos-flow-continue-on-fail-checkbox', type: 'checkbox', checked: Boolean(node.continueOnFail), onChange: (e) => onUpdateNode?.(node.id, { continueOnFail: Boolean(e?.target?.checked) }) }), 'Tiếp tục khi lỗi'),
+              inpField('Giới hạn thời gian (ms)', 'dxos-flow-timeout-input', { type: 'number', min: 100, value: node.timeoutMs ?? '', placeholder: '30000', onChange: (e) => { const raw = e?.target?.value ?? ''; const n = Number(raw); onUpdateNode?.(node.id, { timeoutMs: raw !== '' && Number.isFinite(n) && n >= 0 ? Math.floor(n) : undefined }); } }),
             ),
             h('textarea', { 'data-testid': 'dxos-flow-raw-config-json', rows: 4, value: currentRawText(), onFocus: (e) => trackCursor('__raw__', e), onClick: (e) => trackCursor('__raw__', e), onKeyUp: (e) => trackCursor('__raw__', e), onSelect: (e) => trackCursor('__raw__', e), onChange: (e) => { trackCursor('__raw__', e); updateRawConfigText(e?.target?.value ?? ''); }, style: S.textarea }),
             bufActive && jsonBuf.raw?.error ? h('span', { style: S.err(10) }, jsonBuf.raw.error) : null,
@@ -344,12 +344,12 @@ function createNodeInspector(React) {
       ) : null,
       tab === 'input' ? h('div', { style: S.grid(8) },
         h('div', { style: S.rowBetween },
-          h('strong', { style: { fontSize: 12, color: '#0f172a' } }, 'Pinned Mock Input (JSON)'),
-          h('button', { type: 'button', onClick: () => { if (!pinKey) return; const nextMap = { ...pinnedMap }; delete nextMap[pinKey]; setPinnedMap(nextMap); persistPins(nextMap); }, style: S.btn(false, false, false) }, 'Reset Sample'),
+          h('strong', { style: { fontSize: 12, color: '#0f172a' } }, 'Dữ liệu giả lập đầu vào (JSON)'),
+          h('button', { type: 'button', onClick: () => { if (!pinKey) return; const nextMap = { ...pinnedMap }; delete nextMap[pinKey]; setPinnedMap(nextMap); persistPins(nextMap); }, style: S.btn(false, false, false) }, 'Đặt lại mẫu'),
         ),
         h('textarea', { 'data-testid': 'dxos-flow-pinned-input-json', rows: 8, value: pinnedEntry.text, style: S.textarea, onChange: (e) => { if (!pinKey) return; const t = e?.target?.value ?? ''; const parsed = safeParseJson(t); const nextMap = { ...pinnedMap, [pinKey]: { text: t, error: parsed.ok ? null : parsed.error } }; setPinnedMap(nextMap); persistPins(nextMap); } }),
         pinnedEntry.error ? h('span', { style: S.err(11) }, pinnedEntry.error) : null,
-        h('button', { 'data-testid': 'dxos-flow-test-node-btn', type: 'button', disabled: Boolean(testBusy || pinnedEntry.error), onClick: () => { const parsed = safeParseJson(pinnedEntry.text); if (parsed.ok) { setTab('output'); onTestNode?.(node.id, parsed.value); } }, style: S.btn(true, false, Boolean(testBusy || pinnedEntry.error)) }, testBusy ? 'Testing Node…' : 'Test This Node'),
+        h('button', { 'data-testid': 'dxos-flow-test-node-btn', type: 'button', disabled: Boolean(testBusy || pinnedEntry.error), onClick: () => { const parsed = safeParseJson(pinnedEntry.text); if (parsed.ok) { setTab('output'); onTestNode?.(node.id, parsed.value); } }, style: S.btn(true, false, Boolean(testBusy || pinnedEntry.error)) }, testBusy ? 'Đang thử nút…' : 'Thử nút này'),
       ) : null,
       tab === 'output' ? renderTraceIoView(h, { displayOut, activeTrace, formatJson, statusTone, S }) : null,
     );

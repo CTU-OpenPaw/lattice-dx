@@ -143,6 +143,7 @@ class DxosStudioPlugin extends Plugin {
       name: 'pm.dxosStudio',
       actions: ['dxosStudio:*'],
     });
+    this.app.acl.allow('dxosStudio', ['listAutomationRules'], 'loggedIn');
     this.app.acl.allow(
       'dxosWms',
       ['orderLines', 'saveOrderLine', 'receiveStock', 'lots', 'allocateFefo', 'issueStock', 'holdLotByMkt', 'epodCapture', 'printVoucher'],

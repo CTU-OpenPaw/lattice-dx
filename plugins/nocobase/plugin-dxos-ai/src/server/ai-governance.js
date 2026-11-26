@@ -74,6 +74,7 @@ const MODEL_PRICING_USD_PER_1M = {
 };
 
 const quotaBuckets = new Map();
+const quotaPolicyOverrides = new Map();
 const readVal = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 const nonNegInt = (v) => Math.max(0, Math.trunc(Number(v) || 0));
 
@@ -276,17 +277,132 @@ function estimateCostUsd(promptTokens = 0, completionTokens = 0, modelName = '',
   return Number(cost.toFixed(6));
 }
 
-function getQuotaLimits(env = process.env) {
+function getQuotaLimits(env = process.env, overrideLimits = null) {
   const num = (key, def) => {
     const parsed = Number(env?.[key]);
     return Number.isFinite(parsed) && parsed > 0 ? parsed : def;
   };
-  return {
+  const base = {
     orgDailyCalls: num('DXOS_AI_DAILY_ORG_CALL_LIMIT', 5000),
     userDailyCalls: num('DXOS_AI_DAILY_USER_CALL_LIMIT', 500),
     orgDailyTokens: num('DXOS_AI_DAILY_ORG_TOKEN_LIMIT', 5_000_000),
     orgDailyUsd: num('DXOS_AI_DAILY_ORG_USD_LIMIT', 50),
   };
+  if (overrideLimits && typeof overrideLimits === 'object') {
+    for (const k of ['orgDailyCalls', 'userDailyCalls', 'orgDailyTokens', 'orgDailyUsd']) {
+      const v = Number(overrideLimits[k]);
+      if (Number.isFinite(v) && v > 0) {
+        base[k] = k === 'orgDailyUsd' ? Number(v.toFixed(4)) : Math.trunc(v);
+      }
+    }
+  }
+  return base;
+}
+
+function validateQuotaLimitsInput(input = {}) {
+  const fields = [
+    ['orgDailyCalls', true, 'Hạn mức lượt gọi tổ chức/ngày'],
+    ['userDailyCalls', true, 'Hạn mức lượt gọi user/ngày'],
+    ['orgDailyTokens', true, 'Hạn mức token tổ chức/ngày'],
+    ['orgDailyUsd', false, 'Trần chi phí USD/ngày'],
+  ];
+  const out = {};
+  for (const [key, isInt, label] of fields) {
+    const raw = input?.[key];
+    if (raw === undefined || raw === null || raw === '') continue;
+    const valNum = Number(raw);
+    if (!Number.isFinite(valNum) || valNum <= 0) {
+      throw Object.assign(new Error(`${label} (${key}) phải là số dương hợp lệ.`), { status: 400, code: 'AI_QUOTA_LIMIT_INVALID' });
+    }
+    out[key] = isInt ? Math.max(1, Math.trunc(valNum)) : Number(valNum.toFixed(4));
+  }
+  if (!Object.keys(out).length) {
+    throw Object.assign(new Error('Cần cung cấp ít nhất một thông số hạn mức hợp lệ.'), { status: 400, code: 'AI_QUOTA_LIMIT_INVALID' });
+  }
+  return out;
+}
+
+async function getQuotaLimitsForOrg(db, organizationId, env = process.env) {
+  const org = String(organizationId || 'default').trim() || 'default';
+  const memOverride = quotaPolicyOverrides.get(org) || null;
+  if (!db) return getQuotaLimits(env, memOverride);
+  try {
+    let row = null;
+    await runInOptionalTenantRls(db, org, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const repo = db?.getRepository?.('latticeAiQuotaPolicies');
+      if (repo && typeof repo.findOne === 'function') {
+        row = await repo.findOne({ filter: { organizationId: org }, ...txOpt }).catch(() => null);
+      }
+      if (!row && typeof db?.sequelize?.query === 'function') {
+        const [rows] = await db.sequelize.query(
+          'SELECT "orgDailyCalls", "userDailyCalls", "orgDailyTokens", "orgDailyUsd" FROM "latticeAiQuotaPolicies" WHERE "organizationId" = :organizationId LIMIT 1;',
+          { replacements: { organizationId: org }, ...txOpt },
+        ).catch(() => [[]]);
+        row = Array.isArray(rows) ? rows[0] : null;
+      }
+    });
+    if (row) {
+      const dbLimits = {
+        orgDailyCalls: Number(readVal(row, 'orgDailyCalls')),
+        userDailyCalls: Number(readVal(row, 'userDailyCalls')),
+        orgDailyTokens: Number(readVal(row, 'orgDailyTokens')),
+        orgDailyUsd: Number(readVal(row, 'orgDailyUsd')),
+      };
+      quotaPolicyOverrides.set(org, dbLimits);
+      return getQuotaLimits(env, dbLimits);
+    }
+  } catch {
+    // Non-fatal in minimal mock harnesses
+  }
+  return getQuotaLimits(env, memOverride);
+}
+
+async function saveQuotaPolicy(db, organizationId, rawInput = {}, actor = {}, env = process.env) {
+  const org = String(organizationId || '').trim();
+  if (!org || !ORG_ID_RE.test(org) || org.toLowerCase() === 'all') {
+    throw Object.assign(new Error('Mã tổ chức (organizationId) không hợp lệ.'), { status: 400, code: 'AI_ORG_INVALID' });
+  }
+  const patch = validateQuotaLimitsInput(rawInput);
+  const current = await getQuotaLimitsForOrg(db, org, env);
+  const nextLimits = getQuotaLimits(env, { ...current, ...patch });
+  quotaPolicyOverrides.set(org, nextLimits);
+  const updatedByUsername = String(actor?.username || '').slice(0, 120) || null;
+
+  if (db) {
+    await runInOptionalTenantRls(db, org, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const repo = db?.getRepository?.('latticeAiQuotaPolicies');
+      if (repo && typeof repo.findOne === 'function') {
+        const existing = await repo.findOne({ filter: { organizationId: org }, ...txOpt }).catch(() => null);
+        if (existing && typeof existing.update === 'function') {
+          await existing.update({ ...nextLimits, updatedByUsername }, txOpt);
+          return;
+        }
+        if (typeof repo.create === 'function') {
+          await repo.create({ values: { organizationId: org, ...nextLimits, updatedByUsername }, ...txOpt });
+          return;
+        }
+      }
+      if (typeof db?.sequelize?.query === 'function') {
+        await db.sequelize.query(
+          `INSERT INTO "latticeAiQuotaPolicies" ("createdAt", "updatedAt", "organizationId", "orgDailyCalls", "userDailyCalls", "orgDailyTokens", "orgDailyUsd", "updatedByUsername")
+           VALUES (NOW(), NOW(), :organizationId, :orgDailyCalls, :userDailyCalls, :orgDailyTokens, :orgDailyUsd, :updatedByUsername)
+           ON CONFLICT ("organizationId")
+           DO UPDATE SET
+             "updatedAt" = NOW(),
+             "orgDailyCalls" = EXCLUDED."orgDailyCalls",
+             "userDailyCalls" = EXCLUDED."userDailyCalls",
+             "orgDailyTokens" = EXCLUDED."orgDailyTokens",
+             "orgDailyUsd" = EXCLUDED."orgDailyUsd",
+             "updatedByUsername" = EXCLUDED."updatedByUsername";`,
+          { replacements: { organizationId: org, ...nextLimits, updatedByUsername }, ...txOpt },
+        ).catch(() => {});
+      }
+    });
+  }
+
+  return { organizationId: org, limits: nextLimits, updatedByUsername };
 }
 
 function getOrCreateOrgBucket(organizationId, now = new Date()) {
@@ -332,8 +448,8 @@ function quotaError(message, details) {
 }
 
 function checkAndConsumeAiQuota(actor = {}, { estimatedPromptTokens = 0, env = process.env, now = new Date() } = {}) {
-  const limits = getQuotaLimits(env);
   const bucket = getOrCreateOrgBucket(actor.organizationId, now);
+  const limits = getQuotaLimits(env, quotaPolicyOverrides.get(bucket.organizationId) || null);
   const userKey = String(actor.userId || actor.username || 'anon');
   const userEntry = bucket.byUser.get(userKey) || { calls: 0, tokens: 0 };
 
@@ -610,6 +726,7 @@ async function hydrateQuotaBucketFromDb(db, organizationId, now = new Date()) {
   } catch {
     // Non-fatal in minimal mock harnesses
   }
+  await getQuotaLimitsForOrg(db, bucket.organizationId);
   return bucket;
 }
 
@@ -692,9 +809,9 @@ async function recordQuotaUsagePersistent(db, actor = {}, metrics = {}, now = ne
   return mem;
 }
 
-function getQuotaSummary(organizationId, env = process.env, now = new Date()) {
-  const limits = getQuotaLimits(env);
+function getQuotaSummary(organizationId, env = process.env, now = new Date(), overrideLimits = null) {
   const bucket = getOrCreateOrgBucket(organizationId, now);
+  const limits = getQuotaLimits(env, overrideLimits || quotaPolicyOverrides.get(bucket.organizationId) || null);
   return {
     organizationId: bucket.organizationId,
     day: bucket.day,
@@ -719,11 +836,13 @@ function getQuotaSummary(organizationId, env = process.env, now = new Date()) {
 
 async function getQuotaSummaryPersistent(db, organizationId, env = process.env, now = new Date()) {
   await hydrateQuotaBucketFromDb(db, organizationId, now);
-  return getQuotaSummary(organizationId, env, now);
+  const limits = await getQuotaLimitsForOrg(db, organizationId, env);
+  return getQuotaSummary(organizationId, env, now, limits);
 }
 
 function resetQuotaBuckets() {
   quotaBuckets.clear();
+  quotaPolicyOverrides.clear();
 }
 
 module.exports = {
@@ -738,6 +857,8 @@ module.exports = {
   normalizeTokenUsage,
   estimateCostUsd,
   getQuotaLimits,
+  getQuotaLimitsForOrg,
+  saveQuotaPolicy,
   checkAndConsumeAiQuota,
   recordQuotaUsage,
   getQuotaSummary,

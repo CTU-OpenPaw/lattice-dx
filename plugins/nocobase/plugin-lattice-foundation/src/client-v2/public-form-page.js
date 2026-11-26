@@ -169,6 +169,8 @@ function createPublicFormPage(client, React, app) {
 
     const [loading, setLoading] = React.useState(false);
     const [errorMsg, setErrorMsg] = React.useState('');
+    const [fieldErrors, setFieldErrors] = React.useState({});
+    const [tokenError, setTokenError] = React.useState('');
     const [formMeta, setFormMeta] = React.useState(null);
     const [values, setValues] = React.useState({});
     const [accessToken, setAccessToken] = React.useState(initialAccessToken);
@@ -257,11 +259,66 @@ function createPublicFormPage(client, React, app) {
 
     function updateFieldValue(fieldName, val) {
       setValues((prev) => ({ ...(prev || {}), [fieldName]: val }));
+      setFieldErrors((prev) => {
+        if (!prev || !prev[fieldName]) return prev;
+        const next = { ...prev };
+        delete next[fieldName];
+        return next;
+      });
+      setErrorMsg('');
+    }
+
+    function validateClientFields() {
+      const nextFieldErrors = {};
+      let nextTokenError = '';
+      if (formMeta.requireAccessToken && !String(accessToken || '').trim()) {
+        nextTokenError = 'Vui lòng nhập mã truy cập biểu mẫu (Access Token).';
+      }
+      for (const field of formMeta.fields || []) {
+        const label = String(field.label || field.name);
+        const val = values?.[field.name];
+        if (field.type === 'boolean') {
+          if (field.required && !val) {
+            nextFieldErrors[field.name] = `Vui lòng xác nhận ${label}.`;
+          }
+          continue;
+        }
+        const raw = String(val ?? '');
+        const trimmed = raw.trim();
+        if (field.required && !trimmed) {
+          nextFieldErrors[field.name] = `Vui lòng nhập ${label}.`;
+        } else if (trimmed) {
+          if (Number(field.maxLength) > 0 && raw.length > Number(field.maxLength)) {
+            nextFieldErrors[field.name] = `${label} không được vượt quá ${Number(field.maxLength)} ký tự.`;
+          } else if (field.type === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+            nextFieldErrors[field.name] = 'Email không hợp lệ. Vui lòng kiểm tra lại.';
+          } else if (field.type === 'number' || field.type === 'integer') {
+            const num = Number(trimmed);
+            if (!Number.isFinite(num)) {
+              nextFieldErrors[field.name] = `Vui lòng nhập số hợp lệ cho ${label}.`;
+            } else if (field.type === 'integer' && !Number.isInteger(num)) {
+              nextFieldErrors[field.name] = `Vui lòng nhập số nguyên hợp lệ cho ${label}.`;
+            } else if (field.min !== undefined && num < Number(field.min)) {
+              nextFieldErrors[field.name] = `${label} tối thiểu là ${field.min}.`;
+            } else if (field.max !== undefined && num > Number(field.max)) {
+              nextFieldErrors[field.name] = `${label} tối đa là ${field.max}.`;
+            }
+          }
+        }
+      }
+      setTokenError(nextTokenError);
+      setFieldErrors(nextFieldErrors);
+      if (nextTokenError || Object.keys(nextFieldErrors).length > 0) {
+        setErrorMsg('Vui lòng kiểm tra và điền đầy đủ các thông tin bắt buộc.');
+        return false;
+      }
+      return true;
     }
 
     async function handleSubmit(evt) {
       if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
       if (!formMeta) return;
+      if (!validateClientFields()) return;
       setSubmitting(true);
       setErrorMsg('');
       setStatusError('');
@@ -322,9 +379,21 @@ function createPublicFormPage(client, React, app) {
       fontSize: 14,
       boxSizing: 'border-box',
     };
+    const errorInputStyle = {
+      ...inputStyle,
+      border: '1px solid #dc2626',
+      background: '#fef2f2',
+    };
+    const fieldErrorStyle = {
+      color: '#b91c1c',
+      fontSize: 12,
+      marginTop: 5,
+      fontWeight: 500,
+    };
 
     function renderFieldControl(field) {
       const currentVal = values?.[field.name] ?? '';
+      const activeStyle = fieldErrors?.[field.name] ? errorInputStyle : inputStyle;
       if (field.type === 'text') {
         return h('textarea', {
           name: field.name,
@@ -334,7 +403,7 @@ function createPublicFormPage(client, React, app) {
           placeholder: field.placeholder || '',
           value: currentVal,
           onChange: (e) => updateFieldValue(field.name, e?.target?.value ?? ''),
-          style: inputStyle,
+          style: activeStyle,
         });
       }
       if (field.type === 'select' && Array.isArray(field.options)) {
@@ -345,7 +414,7 @@ function createPublicFormPage(client, React, app) {
             required: field.required,
             value: currentVal,
             onChange: (e) => updateFieldValue(field.name, e?.target?.value ?? ''),
-            style: inputStyle,
+            style: activeStyle,
           },
           h('option', { value: '' }, '-- Chọn giá trị --'),
           ...field.options.map((opt) => h('option', { key: opt, value: opt }, opt)),
@@ -372,7 +441,7 @@ function createPublicFormPage(client, React, app) {
         placeholder: field.placeholder || '',
         value: currentVal,
         onChange: (e) => updateFieldValue(field.name, e?.target?.value ?? ''),
-        style: inputStyle,
+        style: activeStyle,
       });
     }
 
@@ -411,20 +480,10 @@ function createPublicFormPage(client, React, app) {
           'form',
           {
             'data-testid': 'public-form-element',
+            noValidate: true,
             onSubmit: handleSubmit,
             style: { background: '#ffffff', padding: 20, borderRadius: 10, border: '1px solid #cbd5e1' },
           },
-          h('input', {
-            type: 'text',
-            name: formMeta.honeypotField || '_hp_website',
-            'data-testid': 'public-form-honeypot',
-            'aria-hidden': 'true',
-            tabIndex: -1,
-            autoComplete: 'off',
-            value: honeypotValue,
-            onChange: (e) => setHoneypotValue(e?.target?.value ?? ''),
-            style: { position: 'absolute', left: -9999, width: 1, height: 1, opacity: 0, pointerEvents: 'none' },
-          }),
           formMeta.requireAccessToken
             ? h(
               'div',
@@ -436,9 +495,16 @@ function createPublicFormPage(client, React, app) {
                 'data-testid': 'public-form-token-input',
                 required: true,
                 value: accessToken,
-                onChange: (e) => setAccessToken(e?.target?.value ?? ''),
-                style: inputStyle,
+                onChange: (e) => {
+                  setAccessToken(e?.target?.value ?? '');
+                  if (tokenError) setTokenError('');
+                  if (errorMsg) setErrorMsg('');
+                },
+                style: tokenError ? errorInputStyle : inputStyle,
               }),
+              tokenError
+                ? h('div', { 'data-testid': 'public-form-token-error', role: 'alert', style: fieldErrorStyle }, tokenError)
+                : null,
             )
             : null,
           ...formMeta.fields.map((field) => h(
@@ -448,7 +514,21 @@ function createPublicFormPage(client, React, app) {
               `${field.label}${field.required ? ' *' : ''}`,
             ),
             renderFieldControl(field),
+            fieldErrors?.[field.name]
+              ? h('div', { 'data-testid': `public-form-field-error-${field.name}`, role: 'alert', style: fieldErrorStyle }, fieldErrors[field.name])
+              : null,
           )),
+          h('input', {
+            type: 'text',
+            name: formMeta.honeypotField || '_hp_website',
+            'data-testid': 'public-form-honeypot',
+            'aria-hidden': 'true',
+            tabIndex: -1,
+            autoComplete: 'off',
+            value: honeypotValue,
+            onChange: (e) => setHoneypotValue(e?.target?.value ?? ''),
+            style: { position: 'absolute', left: -9999, width: 1, height: 1, opacity: 0, pointerEvents: 'none' },
+          }),
           h(
             'button',
             {

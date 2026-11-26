@@ -52,6 +52,7 @@ export function parseSeedArgs(argv, env = process.env) {
   let adminEmail = env.NOCOBASE_ADMIN_EMAIL || 'admin@nocobase.com';
   let adminPassword = env.NOCOBASE_ADMIN_PASSWORD || env.DX_LAB_ADMIN_PASSWORD || '';
   let token = env.NOCOBASE_TOKEN || '';
+  let seedSamples = ['1', 'true'].includes(String(env.DX_SEED_SAMPLES || '').trim().toLowerCase());
 
   for (const arg of argv) {
     if (arg.startsWith('--origin=')) {
@@ -64,6 +65,8 @@ export function parseSeedArgs(argv, env = process.env) {
       adminPassword = arg.slice('--admin-password='.length);
     } else if (arg.startsWith('--token=')) {
       token = arg.slice('--token='.length);
+    } else if (arg === '--seed-samples') {
+      seedSamples = true;
     } else if (arg === '--help' || arg === '-h') {
       return { help: true };
     } else {
@@ -82,6 +85,7 @@ export function parseSeedArgs(argv, env = process.env) {
     adminEmail,
     adminPassword,
     token: String(token || '').trim(),
+    seedSamples,
   };
 }
 
@@ -493,6 +497,20 @@ async function seedHitlApproval(api, organizationId, requests, ctx) {
   return { seeded: true, via: 'latticeAiApprovalQueue:create', approvalId: created?.id ?? null };
 }
 
+export async function seedStudioShowcaseSamples(api, organizationId) {
+  try {
+    return await api('dxosStudio:seedShowcaseData', {
+      method: 'POST',
+      values: { organizationId },
+    });
+  } catch (err) {
+    if (/HTTP (404|501):/.test(err?.message || '')) {
+      return { seeded: false, skippedReason: err.message };
+    }
+    throw err;
+  }
+}
+
 export async function runV030DemoShowcaseSeed(options, fetchImpl = fetch) {
   const api = await createSeederClient(options, fetchImpl);
   const { organizationId } = options;
@@ -502,6 +520,9 @@ export async function runV030DemoShowcaseSeed(options, fetchImpl = fetch) {
   const chatter = await seedChatterComments(api, vouchers.requests, ctx.mentionHandle);
   const sla = await seedSlaPolicies(api, organizationId);
   const telemetry = await seedColdChainTelemetry(api, organizationId, ctx);
+  const studioShowcase = options?.seedSamples === true
+    ? await seedStudioShowcaseSamples(api, organizationId)
+    : undefined;
   const paraReindex = await api('latticePara:reindex', {
     method: 'POST',
     values: { organizationId },
@@ -520,6 +541,7 @@ export async function runV030DemoShowcaseSeed(options, fetchImpl = fetch) {
     chatter,
     sla,
     telemetry,
+    ...(studioShowcase !== undefined ? { studioShowcase } : {}),
     paraReindex,
     hitl,
     portals,
@@ -531,7 +553,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const parsed = parseSeedArgs(process.argv.slice(2));
     if (parsed.help) {
       console.log(
-        'Usage: node scripts/seed-v030-demo-showcase.mjs [--origin=http://localhost:13014] [--org=native-ui-lab] [--admin-email=admin@nocobase.com] [--admin-password=...] [--token=...]',
+        'Usage: node scripts/seed-v030-demo-showcase.mjs [--origin=http://localhost:13014] [--org=native-ui-lab] [--admin-email=admin@nocobase.com] [--admin-password=...] [--token=...] [--seed-samples]',
       );
       process.exit(0);
     }

@@ -8,19 +8,39 @@
  */
 'use strict';
 
+const BRAND_FALLBACK_SRC = '/v/lattice-brand.svg';
+const SEEDED_DEFAULT_LOGO_SRC = '/files/main/main/attachments/1.png';
+
 function createBrandLogo(client, React) {
   if (typeof client.useSystemSettings !== 'function') return () => null;
   return function BrandLogo({size}) {
     const {data} = client.useSystemSettings() || {};
-    const src = data?.data?.logo?.url;
+    const rawSrc = typeof data?.data?.logo?.url === 'string' ? data.data.logo.url.trim() : '';
+    const normalizedSrc = (!rawSrc || rawSrc === SEEDED_DEFAULT_LOGO_SRC) ? BRAND_FALLBACK_SRC : rawSrc;
     const [failedSrc, setFailedSrc] = React.useState(null);
-    if (typeof src !== 'string' || !/^\/(?!\/)[^\\\s]+$/.test(src) || failedSrc === src) return null;
+    const [fallbackFailed, setFallbackFailed] = React.useState(false);
+
+    const effectiveSrc = failedSrc === normalizedSrc ? BRAND_FALLBACK_SRC : normalizedSrc;
+    if (
+      typeof effectiveSrc !== 'string'
+      || !/^\/(?!\/)[^\\\s]+$/.test(effectiveSrc)
+      || (effectiveSrc === BRAND_FALLBACK_SRC && (fallbackFailed || failedSrc === BRAND_FALLBACK_SRC))
+    ) {
+      return null;
+    }
+
     return React.createElement('img', {
-      src,
+      src: effectiveSrc,
       alt: '',
       width: size,
       height: size,
-      onError: () => setFailedSrc(src),
+      onError: () => {
+        if (effectiveSrc === BRAND_FALLBACK_SRC) {
+          setFallbackFailed(true);
+        } else {
+          setFailedSrc(normalizedSrc);
+        }
+      },
       style: {objectFit: 'contain', borderRadius: 6, display: 'block', margin: '0 auto', flexShrink: 0},
     });
   };
@@ -30,6 +50,9 @@ function registerSignInLogo(app, React, BrandLogo) {
   if (typeof app.router.get !== 'function') return;
   const wrapSignIn = () => {
     const route = app.router.get('auth.signin');
+    if (route && route.skipAuthCheck === undefined) {
+      route.skipAuthCheck = true;
+    }
     const withLogo = NativeSignIn => function BrandedSignIn(props) {
       const form = typeof NativeSignIn === 'string'
         ? app.renderComponent(NativeSignIn, props)

@@ -22,6 +22,22 @@ const IMPORT_COLLECTIONS = [
   { label: 'Yêu cầu mua sắm', value: 'latticeRequests' },
 ];
 
+const MAX_BULK_IMPORT_BYTES = 2 * 1024 * 1024;
+
+function readWmsModelConfig(model, defaults, liveConfig) {
+  const stepCfg = model?.getStepParams?.('dxosBlockSettings', 'config')
+    || model?.stepParams?.dxosBlockSettings?.config
+    || {};
+  return { ...defaults, ...(model?.props || {}), ...stepCfg, ...(liveConfig || {}) };
+}
+
+function getUtf8ByteLength(text) {
+  const str = String(text || '');
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(str).length;
+  if (typeof Buffer !== 'undefined') return Buffer.byteLength(str, 'utf8');
+  return str.length;
+}
+
 function parseSamplesList(rawText) {
   const parts = String(rawText || '')
     .split(/[\s,;]+/)
@@ -30,8 +46,8 @@ function parseSamplesList(rawText) {
   const nums = [];
   for (const part of parts) {
     const n = Number(part);
-    if (!Number.isFinite(n)) {
-      return { ok: false, error: `Mẫu nhiệt độ không hợp lệ: "${part}".`, samples: [] };
+    if (!Number.isFinite(n) || n <= -273.15) {
+      return { ok: false, error: `Mẫu nhiệt độ không hợp lệ (> -273.15°C): "${part}".`, samples: [] };
     }
     nums.push(n);
   }
@@ -60,11 +76,19 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     React.useEffect(() => subscribeModelConfig(model, () => setCfgTick((n) => n + 1)), [model]);
     void cfgTick;
 
-    const cfg = liveConfig || model?.props || {};
+    const cfg = readWmsModelConfig(
+      model,
+      { defaultTab: 'fefo', defaultImportCollection: 'latticeStockLots', showBulkImport: true },
+      liveConfig,
+    );
     const orgId = String(cfg.defaultOrganizationId || '').trim();
     const showBulkImport = cfg.showBulkImport !== false;
+    const configTab = cfg.defaultTab === 'import' && showBulkImport ? 'import' : 'fefo';
+    const configImportCollection = IMPORT_COLLECTIONS.some((c) => c.value === cfg.defaultImportCollection)
+      ? cfg.defaultImportCollection
+      : 'latticeStockLots';
 
-    const [activeTab, setActiveTab] = React.useState(cfg.defaultTab === 'import' && showBulkImport ? 'import' : 'fefo');
+    const [activeTab, setActiveTab] = React.useState(configTab);
     const [lots, setLots] = React.useState([]);
     const [loadingLots, setLoadingLots] = React.useState(false);
     const [busy, setBusy] = React.useState(false);
@@ -85,11 +109,14 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     const [mktMax, setMktMax] = React.useState('8');
     const [mktResult, setMktResult] = React.useState(null);
 
-    const [importCollection, setImportCollection] = React.useState(cfg.defaultImportCollection || 'latticeStockLots');
+    const [importCollection, setImportCollection] = React.useState(configImportCollection);
     const [importFormat, setImportFormat] = React.useState('csv');
     const [importContent, setImportContent] = React.useState('');
     const [dryRunResult, setDryRunResult] = React.useState(null);
     const [commitResult, setCommitResult] = React.useState(null);
+
+    React.useEffect(() => { setActiveTab(configTab); }, [configTab]);
+    React.useEffect(() => { setImportCollection(configImportCollection); }, [configImportCollection]);
 
     const loadLots = React.useCallback(async () => {
       if (!api?.request) return;
@@ -117,6 +144,20 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     const handleAllocateFefo = async (e) => {
       e?.preventDefault?.();
       if (!api?.request || busy) return;
+      const sku = String(fefoSku || '').trim();
+      const qty = Number(fefoQty);
+      if (!sku) {
+        setFeedback({ type: 'error', text: 'Vui lòng nhập hoặc chọn Mã SKU trước khi phân bổ FEFO.' });
+        return;
+      }
+      if (sku.length > 128) {
+        setFeedback({ type: 'error', text: 'Mã SKU không được vượt quá 128 ký tự.' });
+        return;
+      }
+      if (!Number.isFinite(qty) || qty <= 0) {
+        setFeedback({ type: 'error', text: 'Số lượng phân bổ FEFO phải lớn hơn 0.' });
+        return;
+      }
       setBusy(true);
       setFeedback(null);
       try {
@@ -125,8 +166,8 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
           method: 'post',
           data: {
             ...(orgId ? { organizationId: orgId } : {}),
-            sku: String(fefoSku || '').trim(),
-            quantity: Number(fefoQty),
+            sku,
+            quantity: qty,
             ...(String(fefoOrder || '').trim() ? { orderCode: String(fefoOrder).trim() } : {}),
           },
         });
@@ -144,6 +185,16 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     const handleIssueStock = async (e) => {
       e?.preventDefault?.();
       if (!api?.request || busy) return;
+      const lotCode = String(issueLot || '').trim();
+      const qty = Number(issueQty);
+      if (!lotCode) {
+        setFeedback({ type: 'error', text: 'Vui lòng nhập hoặc chọn Mã lô hàng trước khi xuất kho.' });
+        return;
+      }
+      if (!Number.isFinite(qty) || qty <= 0) {
+        setFeedback({ type: 'error', text: 'Số lượng xuất kho phải lớn hơn 0.' });
+        return;
+      }
       setBusy(true);
       setFeedback(null);
       try {
@@ -152,14 +203,14 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
           method: 'post',
           data: {
             ...(orgId ? { organizationId: orgId } : {}),
-            lotCode: String(issueLot || '').trim(),
-            quantity: Number(issueQty),
+            lotCode,
+            quantity: qty,
             ...(String(issueOrder || '').trim() ? { orderCode: String(issueOrder).trim() } : {}),
           },
         });
         const d = unwrapPayload(res);
         setIssueResult(d);
-        setFeedback({ type: 'success', text: `Đã xuất kho ${d.issuedQty ?? issueQty} từ lô ${issueLot}.` });
+        setFeedback({ type: 'success', text: `Đã xuất kho ${d.issuedQty ?? qty} từ lô ${lotCode}.` });
         await loadLots();
       } catch (err) {
         setFeedback({ type: 'error', text: extractErr(err, 'Không xuất kho được.') });
@@ -171,9 +222,20 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     const handleHoldMkt = async (e) => {
       e?.preventDefault?.();
       if (!api?.request || busy) return;
+      const lotCode = String(mktLot || '').trim();
+      if (!lotCode) {
+        setFeedback({ type: 'error', text: 'Vui lòng nhập hoặc chọn Mã lô hàng trước khi kiểm định MKT.' });
+        return;
+      }
       const parsed = parseSamplesList(mktSamples);
       if (!parsed.ok) {
         setFeedback({ type: 'error', text: parsed.error });
+        return;
+      }
+      const rawMax = String(mktMax ?? '').trim();
+      const maxC = rawMax === '' ? 8 : Number(rawMax);
+      if (!Number.isFinite(maxC) || maxC <= -273.15) {
+        setFeedback({ type: 'error', text: 'Ngưỡng nhiệt tối đa (°C) phải là số hợp lệ lớn hơn -273.15°C.' });
         return;
       }
       setBusy(true);
@@ -184,9 +246,9 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
           method: 'post',
           data: {
             ...(orgId ? { organizationId: orgId } : {}),
-            lotCode: String(mktLot || '').trim(),
+            lotCode,
             samplesC: parsed.samples,
-            maxAllowedC: Number(mktMax || 8),
+            maxAllowedC: maxC,
           },
         });
         const d = unwrapPayload(res);
@@ -203,6 +265,15 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
 
     const handleBulkDryRun = async () => {
       if (!api?.request || busy) return;
+      const rawContent = String(importContent || '');
+      if (!rawContent.trim()) {
+        setFeedback({ type: 'error', text: 'Vui lòng nhập nội dung CSV hoặc JSON trước khi kiểm thử Dry-Run.' });
+        return;
+      }
+      if (getUtf8ByteLength(rawContent) > MAX_BULK_IMPORT_BYTES) {
+        setFeedback({ type: 'error', text: 'Nội dung nhập lô vượt quá giới hạn tối đa 2 MiB.' });
+        return;
+      }
       setBusy(true);
       setFeedback(null);
       setCommitResult(null);
@@ -214,12 +285,15 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             ...(orgId ? { organizationId: orgId } : {}),
             collection: importCollection,
             format: importFormat,
-            content: importContent,
+            content: rawContent,
           },
         });
         const d = unwrapPayload(res);
         setDryRunResult(d);
-        setFeedback({ type: 'success', text: `Dry-Run hoàn tất: ${d.validCount ?? 0} dòng hợp lệ / ${d.totalRows ?? 0}.` });
+        setFeedback({
+          type: Number(d.invalidCount) > 0 && !(Number(d.validCount) > 0) ? 'error' : 'success',
+          text: `Dry-Run hoàn tất: ${d.validCount ?? 0} dòng hợp lệ / ${d.totalRows ?? 0} (lỗi: ${d.invalidCount ?? 0}).`,
+        });
       } catch (err) {
         setDryRunResult(null);
         setFeedback({ type: 'error', text: extractErr(err, 'Dry-Run nhập lô thất bại.') });
@@ -229,7 +303,7 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
     };
 
     const handleBulkCommit = async () => {
-      if (!api?.request || busy || !dryRunResult?.previewToken) return;
+      if (!api?.request || busy || !dryRunResult?.previewToken || !(Number(dryRunResult?.validCount) > 0)) return;
       setBusy(true);
       setFeedback(null);
       try {
@@ -287,6 +361,21 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
       }),
     };
 
+    const uniqueSkus = React.useMemo(
+      () => [...new Set(lots.map((l) => String(l?.sku || '').trim()).filter(Boolean))],
+      [lots],
+    );
+    const applySelectedLot = (lot) => {
+      if (!lot) return;
+      if (lot.sku) setFefoSku(String(lot.sku));
+      if (lot.lotCode) {
+        setIssueLot(String(lot.lotCode));
+        setMktLot(String(lot.lotCode));
+      }
+    };
+    const commitDisabled = busy || !dryRunResult?.previewToken || !(Number(dryRunResult?.validCount) > 0);
+    const dryRunErrors = Array.isArray(dryRunResult?.errors) ? dryRunResult.errors : [];
+
     return h(
       'div',
       { 'data-testid': 'dxos-wms-ops-block', style: S.root },
@@ -331,14 +420,40 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
       }, feedback.text) : null,
 
       activeTab === 'fefo' ? h('div', { style: { display: 'grid', gap: 12 } },
+        h('datalist', { id: 'dxos-wms-sku-datalist', 'data-testid': 'dxos-wms-sku-datalist' },
+          uniqueSkus.map((sku) => h('option', { key: sku, value: sku }, sku)),
+        ),
+        h('datalist', { id: 'dxos-wms-lot-datalist', 'data-testid': 'dxos-wms-lot-datalist' },
+          lots.filter((l) => l?.lotCode).map((l) => h('option', {
+            key: l.lotCode,
+            value: l.lotCode,
+          }, `${l.lotCode} — ${l.sku || ''} (${l.qtyAvailable ?? l.qtyOnHand ?? 0})`)),
+        ),
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12 } },
+          h('strong', { style: { color: '#334155' } }, 'Chọn nhanh từ lô đang tải:'),
+          h('select', {
+            'data-testid': 'dxos-wms-lot-quickselect',
+            'aria-label': 'Chọn nhanh lô kho để điền biểu mẫu',
+            defaultValue: '',
+            onChange: (e) => {
+              const code = String(e?.target?.value || '').trim();
+              const matched = lots.find((l) => l.lotCode === code);
+              if (matched) applySelectedLot(matched);
+            },
+            style: { ...S.input, maxWidth: 340 },
+          },
+            h('option', { value: '' }, '-- Chọn nhanh Mã lô / SKU --'),
+            lots.filter((l) => l?.lotCode).map((l) => h('option', { key: l.lotCode, value: l.lotCode }, `${l.lotCode} · ${l.sku || '—'} (Khả dụng: ${l.qtyAvailable ?? l.qtyOnHand ?? 0})`)),
+          ),
+        ),
         h('div', { style: { overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 } },
           h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } },
             h('thead', null, h('tr', { style: { background: '#f1f5f9', textAlign: 'left' } },
-              ['Mã lô', 'SKU', 'Tên hàng', 'Khả dụng', 'MKT (°C)', 'Trạng thái'].map((col) => h('th', { key: col, style: { padding: '6px 8px' } }, col)),
+              ['Mã lô', 'SKU', 'Tên hàng', 'Khả dụng', 'MKT (°C)', 'Trạng thái', 'Thao tác'].map((col) => h('th', { key: col, style: { padding: '6px 8px' } }, col)),
             )),
             h('tbody', null,
               !lots.length
-                ? h('tr', null, h('td', { colSpan: 6, style: { padding: 10, color: '#64748b' } }, 'Chưa có lô kho nào.'))
+                ? h('tr', null, h('td', { colSpan: 7, style: { padding: 10, color: '#64748b' } }, 'Chưa có lô kho nào.'))
                 : lots.map((lot) => {
                   const lotStatusMeta = getStatusMeta(lot.status || 'available');
                   return h('tr', { key: lot.lotCode || lot.id, style: { borderTop: '1px solid #f1f5f9' } },
@@ -361,6 +476,12 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
                         whiteSpace: 'nowrap',
                       },
                     }, lotStatusMeta.label)),
+                    h('td', { style: { padding: '6px 8px' } }, h('button', {
+                      type: 'button',
+                      'data-testid': `dxos-wms-select-lot-${lot.lotCode || lot.id}`,
+                      onClick: () => applySelectedLot(lot),
+                      style: { ...S.btn(false, false), padding: '3px 8px', fontSize: 11 },
+                    }, 'Chọn')),
                   );
                 }),
             ),
@@ -371,7 +492,7 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             h('strong', { style: { fontSize: 13 } }, '1. Phân bổ FEFO'),
             h('label', { style: S.fieldLabel },
               'Mã SKU',
-              h('input', { 'data-testid': 'dxos-wms-ops-fefo-sku', placeholder: 'VD: VAC-01', value: fefoSku, onChange: (e) => setFefoSku(e.target.value), style: S.input }),
+              h('input', { 'data-testid': 'dxos-wms-ops-fefo-sku', list: 'dxos-wms-sku-datalist', placeholder: 'VD: VAC-01', value: fefoSku, onChange: (e) => setFefoSku(e.target.value), style: S.input }),
             ),
             h('label', { style: S.fieldLabel },
               'Số lượng phân bổ',
@@ -390,7 +511,7 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             h('strong', { style: { fontSize: 13 } }, '2. Xuất kho thực tế (FEFO)'),
             h('label', { style: S.fieldLabel },
               'Mã lô hàng',
-              h('input', { 'data-testid': 'dxos-wms-ops-issue-lot', placeholder: 'VD: LOT-CT-01', value: issueLot, onChange: (e) => setIssueLot(e.target.value), style: S.input }),
+              h('input', { 'data-testid': 'dxos-wms-ops-issue-lot', list: 'dxos-wms-lot-datalist', placeholder: 'VD: LOT-CT-01', value: issueLot, onChange: (e) => setIssueLot(e.target.value), style: S.input }),
             ),
             h('label', { style: S.fieldLabel },
               'Số lượng xuất kho',
@@ -409,7 +530,7 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
             h('strong', { style: { fontSize: 13 } }, '3. Phong tỏa Lô theo MKT'),
             h('label', { style: S.fieldLabel },
               'Mã lô hàng',
-              h('input', { 'data-testid': 'dxos-wms-ops-mkt-lot', placeholder: 'VD: LOT-CT-01', value: mktLot, onChange: (e) => setMktLot(e.target.value), style: S.input }),
+              h('input', { 'data-testid': 'dxos-wms-ops-mkt-lot', list: 'dxos-wms-lot-datalist', placeholder: 'VD: LOT-CT-01', value: mktLot, onChange: (e) => setMktLot(e.target.value), style: S.input }),
             ),
             h('label', { style: S.fieldLabel },
               'Chuỗi mẫu nhiệt độ (°C)',
@@ -462,14 +583,26 @@ function createWmsOpsBlockView(client, React, antd, app, hooks = {}) {
           h('button', {
             type: 'button',
             'data-testid': 'dxos-wms-ops-import-commit-btn',
-            disabled: busy || !dryRunResult?.previewToken,
+            disabled: commitDisabled,
             onClick: handleBulkCommit,
-            style: S.btn(true, busy || !dryRunResult?.previewToken),
+            style: S.btn(true, commitDisabled),
           }, 'Pha 2: Xác nhận Commit'),
         ),
         dryRunResult ? h('div', { 'data-testid': 'dxos-wms-ops-import-preview', style: { padding: 10, background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: 6, fontSize: 12, display: 'grid', gap: 6 } },
           h('div', null, `Tổng: ${dryRunResult.totalRows ?? 0} · Hợp lệ: ${dryRunResult.validCount ?? 0} · Lỗi: ${dryRunResult.invalidCount ?? 0}`),
           dryRunResult.payloadSha256 ? h('div', null, createCompactIdBadge(React, dryRunResult.payloadSha256, { labelPrefix: 'SHA-256' })) : null,
+          dryRunErrors.length > 0 ? h('div', { style: { overflowX: 'auto', marginTop: 4 } },
+            h('table', { 'data-testid': 'dxos-wms-ops-import-errors', style: { width: '100%', borderCollapse: 'collapse', fontSize: 11 } },
+              h('thead', null, h('tr', { style: { background: '#fef2f2', color: '#991b1b', textAlign: 'left' } },
+                ['Dòng', 'Mã lỗi', 'Chi tiết'].map((col) => h('th', { key: col, style: { padding: '4px 6px', border: '1px solid #fecaca' } }, col)),
+              )),
+              h('tbody', null, dryRunErrors.map((err, idx) => h('tr', { key: `${err.row ?? idx}-${err.code || idx}` },
+                h('td', { style: { padding: '4px 6px', border: '1px solid #fecaca', fontWeight: 600 } }, String(err.row ?? '—')),
+                h('td', { style: { padding: '4px 6px', border: '1px solid #fecaca', fontFamily: 'monospace' } }, String(err.code || 'ERROR')),
+                h('td', { style: { padding: '4px 6px', border: '1px solid #fecaca', color: '#7f1d1d' } }, String(err.message || '')),
+              ))),
+            ),
+          ) : null,
         ) : null,
         commitResult ? h('div', { 'data-testid': 'dxos-wms-ops-import-commit-result', style: { padding: 10, background: '#dcfce7', borderRadius: 6, fontSize: 12, color: '#166534' } },
           `Đã nhập thành công ${commitResult.committedCount ?? 0} bản ghi (bỏ qua trùng: ${commitResult.skippedDuplicates ?? 0}).`,

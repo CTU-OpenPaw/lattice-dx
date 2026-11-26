@@ -243,16 +243,60 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
     let tabRoute = null;
     if (pageId != null && desktopRoutesRepo) {
       const existingOpts = val(pageRoute, 'options') && typeof val(pageRoute, 'options') === 'object' ? val(pageRoute, 'options') : {};
-      if (existingOpts.collectionName !== collectionName || existingOpts.path !== routePath) {
+      const needsRouteUpdate =
+        val(pageRoute, 'title') !== portalTitle
+        || val(pageRoute, 'hidden') === true
+        || val(pageRoute, 'hideInMenu') === true
+        || val(pageRoute, 'displayTitle') !== true
+        || existingOpts.collectionName !== collectionName
+        || existingOpts.path !== routePath;
+      if (needsRouteUpdate) {
         await desktopRoutesRepo.update?.({
           filterByTk: pageId,
-          values: { options: { ...existingOpts, path: routePath, collectionName } },
+          values: {
+            title: portalTitle,
+            hidden: false,
+            hideInMenu: false,
+            displayTitle: true,
+            options: { ...existingOpts, path: routePath, collectionName },
+          },
         });
       }
       tabRoute = typeof desktopRoutesRepo.findOne === 'function'
         ? await desktopRoutesRepo.findOne({ filter: { parentId: pageId, type: 'tabs' } })
         : null;
+      if (tabRoute && val(tabRoute, 'title') !== portalTitle) {
+        await desktopRoutesRepo.update?.({
+          filterByTk: val(tabRoute, 'id'),
+          values: { title: portalTitle },
+        });
+      }
       await linkAndGrantRoutes([pageId, val(tabRoute, 'id')]);
+      const pSchemaUid = val(pageRoute, 'schemaUid');
+      const tSchemaUid = val(tabRoute, 'schemaUid') || tabSchemaOut;
+      if (flowModelsRepo && pSchemaUid) {
+        const existingPageModel = typeof flowModelsRepo.findOne === 'function' ? await flowModelsRepo.findOne({ filter: { uid: pSchemaUid } }) : null;
+        if (existingPageModel) {
+          await upsertFlowModel(flowModelsRepo, {
+            ...existingPageModel,
+            uid: pSchemaUid,
+            use: existingPageModel.use || 'PageModel',
+            props: { ...(existingPageModel.props || {}), title: portalTitle },
+            stepParams: { ...(existingPageModel.stepParams || {}), pageSettings: { ...(existingPageModel.stepParams?.pageSettings || {}), general: { ...(existingPageModel.stepParams?.pageSettings?.general || {}), title: portalTitle } } },
+          });
+        }
+      }
+      if (flowModelsRepo && tSchemaUid) {
+        const existingTabModel = typeof flowModelsRepo.findOne === 'function' ? await flowModelsRepo.findOne({ filter: { uid: tSchemaUid } }) : null;
+        if (existingTabModel) {
+          await upsertFlowModel(flowModelsRepo, {
+            ...existingTabModel,
+            uid: tSchemaUid,
+            use: existingTabModel.use || 'PageTabModel',
+            props: { ...(existingTabModel.props || {}), title: portalTitle, routePath },
+          });
+        }
+      }
     }
 
     return {

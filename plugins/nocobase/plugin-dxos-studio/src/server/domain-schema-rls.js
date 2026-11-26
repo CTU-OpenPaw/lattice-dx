@@ -193,11 +193,8 @@ function mapFieldSpecToNocoBase(field) {
   }
 
   if (field.validation && typeof field.validation === 'object') {
-    base.validation = field.validation;
-    base.options = {
-      ...(base.options || {}),
-      validation: field.validation,
-    };
+    // Store Lattice rich-schema validation only in uiSchema['x-validation'] so NocoBase's
+    // Joi field-validation compiler does not crash on non-Joi validation objects.
     base.uiSchema['x-validation'] = field.validation;
     if (Array.isArray(field.validation.enum) && field.validation.enum.length > 0 && !base.uiSchema.enum) {
       base.interface = 'select';
@@ -464,6 +461,14 @@ async function syncCollectionWithSafeRls(db, collectionDef, expectedColumns, ind
   let registered = null;
   if (typeof db.collection === 'function') {
     registered = db.collection(collectionDef);
+    if (registered?.fields && typeof registered.fields.values === 'function') {
+      for (const memField of registered.fields.values()) {
+        const memVal = memField?.options?.validation;
+        if (memVal && typeof memVal === 'object' && typeof memVal.type !== 'string') {
+          delete memField.options.validation;
+        }
+      }
+    }
     if (registered && typeof registered.sync === 'function') {
       let existingCols = new Set();
       if (isPgWithQuery) {
@@ -631,12 +636,20 @@ async function createOrUpdateDomainCollection(db, params, opts = {}) {
 
   if (fieldsRepo) {
     for (const fSpec of fullFieldsSpec) {
+      const existingField = typeof fieldsRepo.findOne === 'function'
+        ? await fieldsRepo.findOne({ filter: { collectionName, name: fSpec.name } })
+        : null;
+      const existingVal = existingField?.options?.validation;
+      const clearLegacyValidation = Boolean(
+        existingVal && typeof existingVal === 'object' && typeof existingVal.type !== 'string',
+      );
       await upsertRepoRow(
         fieldsRepo,
         { collectionName, name: fSpec.name },
         {
           collectionName,
           ...fSpec,
+          ...(clearLegacyValidation ? { validation: null } : {}),
         },
       );
     }

@@ -14,6 +14,7 @@ import {
   assertLoopbackOrigin,
   createSeederClient,
   parseSeedArgs,
+  seedStudioShowcaseSamples,
 } from './seed-v030-demo-showcase.mjs';
 
 export { assertLoopbackOrigin, parseSeedArgs, createSeederClient };
@@ -641,7 +642,7 @@ async function seedCmmsBusinessPack(api, organizationId) {
   };
 }
 
-async function seedPartnerSettlementBusinessPack(api, organizationId) {
+async function seedPartnerSettlementBusinessPack(api, organizationId, { seedSamples = false } = {}) {
   const packs = unwrapList(
     await api(`dxosBuilder:listBusinessPacks?organizationId=${encodeURIComponent(organizationId)}`),
   );
@@ -672,6 +673,7 @@ async function seedPartnerSettlementBusinessPack(api, organizationId) {
     values: {
       organizationId,
       packKey: 'coldchain-partner-settlement',
+      ...(seedSamples ? { seedSamples: true } : {}),
     },
   });
 
@@ -1171,7 +1173,9 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const delegation = await seedDelegationSample(api, organizationId, ctx);
   const pkiSnapshot = await seedPkiAndColdSnapshot(api, organizationId, wms.orderId);
   const cmmsPack = await seedCmmsBusinessPack(api, organizationId);
-  const settlementPack = await seedPartnerSettlementBusinessPack(api, organizationId);
+  const settlementPack = await seedPartnerSettlementBusinessPack(api, organizationId, {
+    seedSamples: options?.seedSamples === true,
+  });
   const settlementClaim = await seedPartnerSettlementClaim(api, organizationId, assets);
   const connectorVault = await seedConnectorVault(api, organizationId);
   const enterpriseConnectorVault = await seedEnterpriseConnectorVault(api, organizationId);
@@ -1183,6 +1187,9 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const automationShowcase = await seedFlagshipAutomationRules(api, organizationId, assets);
   const webhookSubscription = await seedWebhookSubscription(api, organizationId);
   const enterpriseWebhookSubscription = await seedEnterpriseWebhookSubscription(api, organizationId);
+  const studioShowcase = options?.seedSamples === true
+    ? await seedStudioShowcaseSamples(api, organizationId)
+    : undefined;
 
   const paraReindex = await api('latticePara:reindex', {
     method: 'POST',
@@ -1217,6 +1224,7 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
     mqttDevice,
     webhookSubscription,
     enterpriseWebhookSubscription,
+    ...(studioShowcase !== undefined ? { studioShowcase } : {}),
     paraReindex,
     triage,
     portals,
@@ -1228,7 +1236,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const parsed = parseSeedArgs(process.argv.slice(2));
     if (parsed.help) {
       console.log(
-        'Usage: node scripts/seed-v100-championship-showcase.mjs [--origin=http://localhost:13014] [--org=native-ui-lab] [--admin-email=admin@nocobase.com] [--admin-password=...] [--token=...]',
+        'Usage: node scripts/seed-v100-championship-showcase.mjs [--origin=http://localhost:13014] [--org=native-ui-lab] [--admin-email=admin@nocobase.com] [--admin-password=...] [--token=...] [--seed-samples]',
       );
       process.exit(0);
     }

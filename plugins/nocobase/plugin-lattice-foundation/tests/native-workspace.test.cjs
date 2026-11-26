@@ -24,7 +24,7 @@ test('native workspace lists only host-provided visible pages and safe native pa
   assert.deepEqual(workspacePages(undefined),[]);
 });
 
-function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={}, allAccessRoutes, permissions}={}) {
+function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={}, allAccessRoutes, permissions, requestHandler}={}) {
   let cursor=0;
   const state=[], effects=[], routes=new Map(), navigations=[];
   const React={Fragment:'Fragment', createElement:(type,props,...children)=>({type,props:props||{},children}),
@@ -41,7 +41,7 @@ function workspaceHarness({search='?view=apps', refresh=async()=>{}, service={},
       }
     },
   };
-  const api={auth:{role:'ldx_employee'},request:async()=>({data:{data:permissions}})};
+  const api={auth:{role:'ldx_employee'},request:async(req)=>requestHandler?requestHandler(req):({data:{data:permissions}})};
   const client={SchemaComponent:'NativeSchema', PagePopups:'NativePopups', useAPIClient:()=>api,
     useListBlockContext:()=>({service}),
     useAllAccessDesktopRoutes:()=>({refresh,allAccessRoutes:allAccessRoutes ?? [{type:'flowPage',schemaUid:'demo',title:'Trang demo'}]}),
@@ -171,4 +171,89 @@ test('workspace registers the host popup renderer beneath its landing route', ()
     path: WORKSPACE_PATH + '/popups/*', Component: PagePopups,
   });
   assert.equal(createNativeWorkspace({...client, PagePopups:null}, {}, {}, {}, router), null);
+});
+
+test('workspace merges latticePortals:listAccessible shortcuts when allAccessRoutes is empty', async () => {
+  const requests = [];
+  const portals = [
+    { uid: 'admin-layout-model', title: 'Admin', routePath: '/admin', firstPagePath: '/admin', enabled: true },
+    { uid: 'ldx-portal-procurement', title: 'Mua sắm', routePath: '/p/procurement', firstPagePath: '/p/procurement/requests', enabled: true },
+    { uid: 'ldx-portal-logistics-employee', title: 'Logistics · Đơn của tôi', routePath: '/p/logistics-employee', firstPagePath: '/p/logistics-employee/orders', enabled: true },
+  ];
+  const setup = workspaceHarness({
+    search: '',
+    allAccessRoutes: [],
+    requestHandler: async (req) => {
+      requests.push(req);
+      if (req.url === 'latticePortals:listAccessible') return { data: { data: portals } };
+      if (req.url === 'dxosApprovals:listInbox') return { data: { data: { items: [] } } };
+      return { data: { data: {} } };
+    },
+  });
+  setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const ui = setup.render();
+  assert.ok(requests.some(r => r.url === 'latticePortals:listAccessible' && r.skipNotify === true));
+  assert.ok(find(ui, node => node.type === 'Link' && node.props.to === '/p/procurement/requests'));
+  assert.ok(find(ui, node => node.type === 'Link' && node.props.to === '/p/logistics-employee/orders'));
+  assert.equal(find(ui, node => node.type === 'Empty' && node.props.description === 'Chưa có ứng dụng được cấp quyền.'), null);
+});
+
+test('workspace renders DX-OS Approval Inbox items, supports decide, and suppresses redundant empty tasks notice', async () => {
+  const requests = [];
+  let inboxItems = [
+    {
+      source: 'ai_hitl',
+      itemKey: 'ai:41',
+      id: 41,
+      title: 'AI đề xuất hiệu chuẩn PT100',
+      summary: 'Cập nhật hồ sơ REQ-2026-001',
+      status: 'pending',
+      canAct: true,
+    },
+    {
+      source: 'proposals',
+      itemKey: 'prop:12',
+      id: 12,
+      title: 'Đề xuất AI: latticeOrders #12',
+      summary: 'Ưu tiên xuất kho FEFO lô sắp hết hạn',
+      status: 'pending',
+      canAct: true,
+    },
+  ];
+  const setup = workspaceHarness({
+    search: '',
+    allAccessRoutes: [],
+    requestHandler: async (req) => {
+      requests.push(req);
+      if (req.url === 'latticePortals:listAccessible') return { data: { data: [] } };
+      if (req.url === 'dxosApprovals:listInbox') return { data: { data: { items: inboxItems } } };
+      if (req.url === 'dxosApprovals:decide') {
+        inboxItems = inboxItems.filter(i => i.itemKey !== req.data.itemKey);
+        return { data: { data: { ok: true } } };
+      }
+      return { data: { data: {} } };
+    },
+  });
+  setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const ui = setup.render();
+  const dump = JSON.stringify(ui);
+  assert.ok(dump.includes('Phê duyệt & Đề xuất cần xử lý (DX-OS Inbox)'));
+  assert.ok(dump.includes('AI đề xuất hiệu chuẩn PT100'));
+  assert.ok(dump.includes('Đề xuất AI: latticeOrders #12'));
+
+  const taskSchema = find(ui, node => node.type === 'NativeSchema' && node.props.components);
+  const Tasks = taskSchema.props.components.WorkspaceNativeTasks;
+  const todoProps = taskSchema.props.schema.properties.pending.properties.todos['x-component-props'];
+  assert.equal(todoProps.suppressEmpty, true);
+  const tasksUi = Tasks(todoProps);
+  const cfg = find(tasksUi, node => node.type === 'ConfigProvider');
+  assert.equal(cfg.props.renderEmpty(), null);
+
+  const approveBtn = find(ui, node => node.type === 'Button' && node.props['data-testid'] === 'ldx-inbox-approve-ai:41');
+  assert.ok(approveBtn, 'Expected approve button for ai:41');
+  await approveBtn.props.onClick();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.ok(requests.some(r => r.url === 'dxosApprovals:decide' && r.data.itemKey === 'ai:41' && r.data.decision === 'approve'));
 });

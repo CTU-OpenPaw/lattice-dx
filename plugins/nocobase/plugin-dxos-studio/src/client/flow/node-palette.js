@@ -9,12 +9,12 @@
 'use strict';
 
 const PALETTE_GROUPS = Object.freeze([
-  { key: 'trigger', label: 'Trigger', color: '#2563EB', bg: '#EFF6FF', symbol: '⚡', aliases: ['trigger'] },
-  { key: 'control', label: 'Control Flow', color: '#D97706', bg: '#FFFBEB', symbol: '⑂', aliases: ['control', 'control flow', 'control_flow', 'control-flow'] },
-  { key: 'data', label: 'Data', color: '#0891B2', bg: '#ECFEFF', symbol: '⛁', aliases: ['data'] },
-  { key: 'logic', label: 'Logic', color: '#16A34A', bg: '#F0FDF4', symbol: 'ƒ', aliases: ['logic'] },
-  { key: 'ai', label: 'AI', color: '#7C3AED', bg: '#F5F3FF', symbol: '✦', aliases: ['ai'] },
-  { key: 'integration', label: 'Integrations', color: '#DB2777', bg: '#FDF2F8', symbol: '⇄', aliases: ['integration', 'integrations'] },
+  { key: 'trigger', label: 'Kích hoạt (Trigger)', color: '#2563EB', bg: '#EFF6FF', symbol: '⚡', aliases: ['trigger'] },
+  { key: 'control', label: 'Điều khiển luồng', color: '#D97706', bg: '#FFFBEB', symbol: '⑂', aliases: ['control', 'control flow', 'control_flow', 'control-flow'] },
+  { key: 'data', label: 'Dữ liệu', color: '#0891B2', bg: '#ECFEFF', symbol: '⛁', aliases: ['data'] },
+  { key: 'logic', label: 'Logic & Luật', color: '#16A34A', bg: '#F0FDF4', symbol: 'ƒ', aliases: ['logic'] },
+  { key: 'ai', label: 'Trí tuệ nhân tạo (AI)', color: '#7C3AED', bg: '#F5F3FF', symbol: '✦', aliases: ['ai'] },
+  { key: 'integration', label: 'Tích hợp & Thông báo', color: '#DB2777', bg: '#FDF2F8', symbol: '⇄', aliases: ['integration', 'integrations'] },
 ]);
 
 const QUICK_INSERT_TYPES = ['control.if', 'logic.dmn', 'data.create', 'notify.send'];

@@ -222,7 +222,7 @@ function normalizeDmnTable(rawTable = {}) {
 
   return {
     tableKey: String(rawTable.tableKey || 'decision_table_1'),
-    name: String(rawTable.name || 'Decision Table'),
+    name: String(rawTable.name || 'Bảng Quyết Định'),
     description: typeof rawTable.description === 'string' ? rawTable.description : '',
     hitPolicy,
     inputsJson,
@@ -572,7 +572,7 @@ function buildInitialSimContext(table) {
 function editorStyles() {
   return {
     root: { display: 'grid', gap: 12, padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff' },
-    header: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, alignItems: 'end' },
+    header: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10, alignItems: 'end' },
     toolbar: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between' },
     label: { display: 'block', fontSize: 11, fontWeight: 600, color: '#475569', marginBottom: 4 },
     input: { width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
@@ -614,6 +614,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
     const [simContext, setSimContext] = React.useState(() => buildInitialSimContext(initialNorm));
     const [simJsonText, setSimJsonText] = React.useState(() => JSON.stringify(buildInitialSimContext(initialNorm), null, 2));
     const [simResult, setSimResult] = React.useState(null);
+    const [simValidation, setSimValidation] = React.useState(null);
     const [statusMsg, setStatusMsg] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
 
@@ -625,6 +626,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
         setSimContext(nextCtx);
         setSimJsonText(JSON.stringify(nextCtx, null, 2));
         setSimResult(null);
+        setSimValidation(null);
       }
     }, [props.table]);
 
@@ -702,11 +704,32 @@ function createDmnVisualEditor(ReactLib, antdLib) {
           evalCtx = parsed;
         }
       } catch {
+        setSimValidation('Context JSON mô phỏng không hợp lệ.');
         setStatusMsg({ type: 'error', text: 'Context JSON mô phỏng không hợp lệ.' });
         return;
       }
 
+      const inputs = Array.isArray(table.inputsJson) ? table.inputsJson : [];
+      const strCols = inputs.filter((col) => (col?.type || 'string') === 'string' && col?.name);
+      const missingStringCols = strCols
+        .filter((col) => evalCtx[col.name] === undefined || evalCtx[col.name] === null || String(evalCtx[col.name]).trim() === '')
+        .map((col) => col.name);
+      const hasActiveOtherInput = inputs.some((col) => {
+        if (!col?.name || (col?.type || 'string') === 'string') return false;
+        const val = evalCtx[col.name];
+        if (col.type === 'number') return val !== '' && val !== null && val !== undefined && Number.isFinite(Number(val));
+        if (col.type === 'boolean') return Boolean(val) === true;
+        return val !== undefined && val !== null && String(val).trim() !== '';
+      });
+      if (strCols.length && missingStringCols.length === strCols.length && !hasActiveOtherInput) {
+        const msg = `Vui lòng nhập giá trị cho trường đầu vào: ${missingStringCols.join(', ')}.`;
+        setSimValidation(msg);
+        setStatusMsg({ type: 'error', text: msg });
+        return;
+      }
+
       setBusy(true);
+      setSimValidation(null);
       setStatusMsg(null);
       try {
         let res;
@@ -728,7 +751,9 @@ function createDmnVisualEditor(ReactLib, antdLib) {
         }
         setSimResult(res || simulateDmnTable(table, evalCtx));
       } catch (err) {
-        setStatusMsg({ type: 'error', text: extractError(err, 'Không mô phỏng được bảng quyết định DMN.') });
+        const msg = extractError(err, 'Không mô phỏng được bảng quyết định DMN.');
+        setSimValidation(msg);
+        setStatusMsg({ type: 'error', text: msg });
       } finally {
         setBusy(false);
       }
@@ -768,27 +793,29 @@ function createDmnVisualEditor(ReactLib, antdLib) {
     return h('div', { 'data-testid': 'dmn-visual-editor', style: S.root },
       h('div', { style: S.header },
         h('div', null,
-          h('label', { style: S.label }, 'Table Key'),
+          h('label', { style: S.label }, 'Mã Bảng'),
           h('input', {
             'data-testid': 'dmn-table-key-input',
             type: 'text',
             value: table.tableKey,
+            title: table.tableKey,
             onChange: (e) => commitTable((p) => ({ ...p, tableKey: e.target.value })),
             style: S.input,
           }),
         ),
-        h('div', null,
+        h('div', { style: { gridColumn: 'span 2', minWidth: 230 } },
           h('label', { style: S.label }, 'Tên Bảng Quyết Định'),
           h('input', {
             'data-testid': 'dmn-table-name-input',
             type: 'text',
             value: table.name,
+            title: table.name,
             onChange: (e) => commitTable((p) => ({ ...p, name: e.target.value })),
-            style: S.input,
+            style: { ...S.input, minWidth: 230 },
           }),
         ),
         h('div', null,
-          h('label', { style: S.label }, 'Hit Policy'),
+          h('label', { style: S.label }, 'Chính sách khớp'),
           h('select', {
             'data-testid': 'dmn-hit-policy-select',
             value: table.hitPolicy,
@@ -915,7 +942,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
                 },
                   h('td', { style: { ...S.td, fontWeight: 700, color: isMatched ? '#166534' : '#475569' } },
                     `${rIdx + 1}`,
-                    isMatched ? h('span', { style: { marginLeft: 4, padding: '1px 5px', borderRadius: 999, background: '#16a34a', color: '#fff', fontSize: 10 } }, 'HIT') : null,
+                    isMatched ? h('span', { style: { marginLeft: 4, padding: '1px 5px', borderRadius: 999, background: '#16a34a', color: '#fff', fontSize: 10 } }, 'KHỚP') : null,
                   ),
                   table.inputsJson.map((col) => {
                     const key = `when:${rIdx}:${col.name}`;
@@ -976,7 +1003,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
 
       h('div', { 'data-testid': 'dmn-simulator-panel', style: S.simPanel },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-          h('strong', { style: { fontSize: 13, color: '#0f172a' } }, 'Live Test Simulator (Mô phỏng Luật DMN)'),
+          h('strong', { style: { fontSize: 13, color: '#0f172a' } }, 'Trình Mô Phỏng Luật DMN'),
           renderBtn({
             'data-testid': 'dmn-sim-run-btn',
             'data-variant': 'primary',
@@ -985,20 +1012,35 @@ function createDmnVisualEditor(ReactLib, antdLib) {
             style: S.btn(true, false, isBusy),
           }, 'Chạy Mô Phỏng'),
         ),
+        simValidation ? h('div', {
+          'data-testid': 'dmn-sim-validation',
+          role: 'alert',
+          style: { padding: '8px 10px', borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 12 },
+        }, simValidation) : null,
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 } },
           table.inputsJson.map((col) => h('div', { key: `sim-${col.name}` },
             h('label', { style: S.label }, `${col.name} (${col.type || 'string'})`),
-            h('input', {
-              'data-testid': `dmn-sim-input-${col.name}`,
-              type: col.type === 'number' ? 'number' : 'text',
-              value: simContext[col.name] ?? '',
-              onChange: (e) => handleSimFieldChange(col.name, e.target.value, col.type),
-              style: S.input,
-            }),
+            col.type === 'boolean'
+              ? h('select', {
+                'data-testid': `dmn-sim-input-${col.name}`,
+                value: String(Boolean(simContext[col.name])),
+                onChange: (e) => handleSimFieldChange(col.name, e.target.value, 'boolean'),
+                style: S.input,
+              },
+                h('option', { value: 'false' }, 'false'),
+                h('option', { value: 'true' }, 'true'),
+              )
+              : h('input', {
+                'data-testid': `dmn-sim-input-${col.name}`,
+                type: col.type === 'number' ? 'number' : 'text',
+                value: simContext[col.name] ?? '',
+                onChange: (e) => handleSimFieldChange(col.name, e.target.value, col.type),
+                style: S.input,
+              }),
           )),
         ),
         h('div', null,
-          h('label', { style: S.label }, 'Context JSON'),
+          h('label', { style: S.label }, 'Dữ liệu Ngữ cảnh (JSON)'),
           h('textarea', {
             'data-testid': 'dmn-sim-json-input',
             rows: 3,
@@ -1020,10 +1062,10 @@ function createDmnVisualEditor(ReactLib, antdLib) {
           },
         },
           h('div', null,
-            h('strong', null, `Matched: ${simResult.matched ? 'YES' : 'NO'}`),
-            ` · Hit Policy: ${simResult.hitPolicy || table.hitPolicy}`,
-            ` · Matched Rules: ${matchedIndices.length ? matchedIndices.map((i) => `#${i + 1}`).join(', ') : 'None'}`,
-            simResult.conflict ? ' (CONFLICT: UNIQUE violated)' : '',
+            h('strong', null, `Khớp: ${simResult.matched ? 'CÓ' : 'KHÔNG'}`),
+            ` · Chính sách: ${simResult.hitPolicy || table.hitPolicy}`,
+            ` · Luật khớp: ${matchedIndices.length ? matchedIndices.map((i) => `#${i + 1}`).join(', ') : 'Không có'}`,
+            simResult.conflict ? ' (XUNG ĐỘT: Vi phạm UNIQUE)' : '',
           ),
           h('pre', { style: { margin: 0, fontSize: 11, overflowX: 'auto' } },
             JSON.stringify(

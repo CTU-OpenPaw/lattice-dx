@@ -63,6 +63,7 @@ class DxosBlocksServerPlugin extends Plugin {
     });
     this.app.acl.allow('dxosBlocks', [
       'proposals',
+      'decideProposal',
       'contextTelemetry',
       'telemetrySeries',
       'alarmIngest',

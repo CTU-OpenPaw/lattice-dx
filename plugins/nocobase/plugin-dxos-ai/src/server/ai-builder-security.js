@@ -47,6 +47,7 @@ const SENSITIVE_AUTOMATION_COLLECTIONS = new Set([
   'latticeOrganizations',
   'latticeAutomationRules',
   'latticeAutomationRuns',
+  'latticeAiQuotaPolicies',
 ]);
 const AUTOMATION_CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const AUTOMATION_CORE_VOUCHERS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
@@ -55,7 +56,7 @@ const AUTOMATION_PROTECTED_VOUCHER_FIELDS = new Set([
   'submittedAt', 'submittedBy', 'cancelledAt', 'cancelledBy', 'cancelReason',
 ]);
 const AUTOMATION_INJECTION_RE = /(?:__proto__|constructor\s*\.\s*prototype|\bprototype\b|process\.env|\.env\b|encryptedsecretsjson|ignore\s+(?:all\s+)?previous|bo\s+qua\s+(?:tat\s+ca|moi)?\s*(?:huong\s+dan|kiem\s+tra|quyen|rbac|acl|bao\s+mat)|system\s+prompt|jailbreak|bypass\s+(?:rbac|acl|auth|hitl|quyen|bao\s+mat)|drop\s+table|truncate\s+table|delete\s+from|union\s+select|api_?key|secret_?key|private_?key|mat\s+khau|in\s+ra\s+[^\n]{0,30}?(?:token|secret|password|key)|tiet\s+lo\s+[^\n]{0,30}?(?:token|secret|password|key))/i;
-const AUTOMATION_SYSTEM_TABLE_RE = /(?:\b(?:users|rolesUsers|apiKeys|authenticators|migrations|applicationPlugins|aiSettings|aiEmployees|aiMcpClients|rolesAiEmployees|dataSourcesRoles|dataSourcesRolesResources|dataSourcesRolesResourcesActions|dataSourcesRolesResourcesScopes|latticeAiAuditLogs|latticeAiProfiles|latticeAiQuotaUsage|latticeAiApprovalQueue|latticeUiSnapshots|latticePkiKeys|latticeCryptoLedger|latticeConnectors|latticeWebhookSubscriptions|latticeWebhookDeliveries|latticeEventBus|latticeApiKeys|latticeDelegations|latticeEpodRecords|latticeOrganizations|latticeAutomationRules|latticeAutomationRuns)\b|(?:bang|table|collection|ghi\s+vao|sua|xoa|cap\s+nhat|drop|truncate)\s+roles\b)/i;
+const AUTOMATION_SYSTEM_TABLE_RE = /(?:\b(?:users|rolesUsers|apiKeys|authenticators|migrations|applicationPlugins|aiSettings|aiEmployees|aiMcpClients|rolesAiEmployees|dataSourcesRoles|dataSourcesRolesResources|dataSourcesRolesResourcesActions|dataSourcesRolesResourcesScopes|latticeAiAuditLogs|latticeAiProfiles|latticeAiQuotaUsage|latticeAiQuotaPolicies|latticeAiApprovalQueue|latticeUiSnapshots|latticePkiKeys|latticeCryptoLedger|latticeConnectors|latticeWebhookSubscriptions|latticeWebhookDeliveries|latticeEventBus|latticeApiKeys|latticeDelegations|latticeEpodRecords|latticeOrganizations|latticeAutomationRules|latticeAutomationRuns)\b|(?:bang|table|collection|ghi\s+vao|sua|xoa|cap\s+nhat|drop|truncate)\s+roles\b)/i;
 
 function isPlainObject(value) {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);

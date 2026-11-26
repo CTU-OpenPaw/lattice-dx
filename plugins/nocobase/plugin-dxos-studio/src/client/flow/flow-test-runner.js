@@ -67,12 +67,12 @@ function buildScenarioPresets(rule, graph) {
   if (nodes.some((n) => n?.type === 'integration.http' && (String(n.config?.connectorKey || '').includes('n8n') || String(n.config?.path || '').includes('orchestrator')))) {
     presets.push({
       key: 'n8n_critical_batch',
-      label: 'n8n Critical Batch (PKI Sign)',
+      label: 'n8n Lô khẩn cấp (Ký PKI)',
       event: { type: evtType, data: { id: 1, code: 'REQ-COMP-01', amount: 125000000, severity: 'critical', temperatureC: -9.5, slaOverdueMinutes: 45, items: [{ sku: 'LOT-A1', qty: 40, value: 75000000 }, { sku: 'LOT-B2', qty: 25, value: 50000000 }] } },
     });
     presets.push({
       key: 'n8n_escalated',
-      label: 'n8n Escalated Branch',
+      label: 'n8n Nhánh leo thang',
       event: { type: evtType, data: { id: 1, code: 'REQ-ESC-02', amount: 35000000, severity: 'high', slaOverdueMinutes: 20, items: [{ sku: 'LOT-C3', qty: 10, value: 35000000 }] } },
     });
   }
@@ -133,7 +133,7 @@ function createFlowTestRunner(React) {
       },
     },
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        h('strong', { style: { fontSize: 13, color: '#0F172A' } }, '🧪 Test Payload Runner'),
+        h('strong', { style: { fontSize: 13, color: '#0F172A' } }, '🧪 Trình chạy thử Payload'),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-runner-close-btn', onClick: () => onClose?.(), style: B('#F8FAFC', '#334155', '#CBD5E1', false) }, '×'),
       ),
       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },

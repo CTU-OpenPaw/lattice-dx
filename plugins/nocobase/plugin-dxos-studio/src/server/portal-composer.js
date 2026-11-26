@@ -636,7 +636,14 @@ async function attachDxosBlocksToTab(db, tabSchemaUid, slug, blocks) {
     });
     attached += 1;
   }
-  if (attached > 0 && typeof flowModelsRepo.updateSingleNode === 'function') {
+  const hasAllInLayout = (layoutObj) => {
+    const placed = new Set(Object.values(layoutObj?.rows || {}).flat(2));
+    return allUids.every((uid) => placed.has(uid));
+  };
+  const needsGridRepair = attached > 0
+    || !hasAllInLayout(grid.props)
+    || !hasAllInLayout(grid.stepParams?.gridSettings?.grid || {});
+  if (allUids.length > 0 && needsGridRepair && typeof flowModelsRepo.updateSingleNode === 'function') {
     const nextPropsLayout = mergeGridLayout(grid.props, allUids);
     const nextStepLayout = mergeGridLayout(grid.stepParams?.gridSettings?.grid || grid.props, allUids);
     await flowModelsRepo.updateSingleNode({
@@ -685,6 +692,12 @@ async function composePortals(db, { applyBlueprint }) {
   );
   const portalMeta = val(foundationPlugin, 'options')?.portals || {};
 
+  const linksRepo = db.getRepository?.('desktopRoutesUiLayouts');
+  const getLinkedIds = async (layoutUid) => {
+    if (!linksRepo || typeof linksRepo.find !== 'function') return new Set();
+    const rows = (await linksRepo.find({ filter: { uiLayoutUid: layoutUid } })) || [];
+    return new Set(rows.map((l) => String(val(l, 'desktopRouteId'))).filter(Boolean));
+  };
   let routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : [];
   let createdPages = 0;
   let attachedBlocks = 0;
@@ -692,7 +705,8 @@ async function composePortals(db, { applyBlueprint }) {
   for (const page of EXTRA_DATA_PAGES) {
     if (typeof db.hasCollection === 'function' && !db.hasCollection(page.collection)) continue;
     const layoutUid = `ldx-portal-${page.slug}`;
-    if (findExistingPage(routes, layoutUid, page.groupTitle, page.title)) continue;
+    const linkedIds = await getLinkedIds(layoutUid);
+    if (findExistingPage(routes, layoutUid, page.groupTitle, page.title, linkedIds)) continue;
     await applyBlueprint(buildTablePageBlueprint(layoutUid, page, `${page.slug}-${page.collection}`));
     createdPages += 1;
     routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
@@ -700,7 +714,8 @@ async function composePortals(db, { applyBlueprint }) {
 
   for (const ov of OVERVIEW_SPECS) {
     const layoutUid = `ldx-portal-${ov.slug}`;
-    let pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title);
+    const linkedIds = await getLinkedIds(layoutUid);
+    let pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title, linkedIds);
     let tabSchemaUid = null;
     if (!pageRoute) {
       const seedBlock = resolveOverviewSeedBlock(db, ov);
@@ -716,7 +731,10 @@ async function composePortals(db, { applyBlueprint }) {
       createdPages += 1;
       tabSchemaUid = res?.target?.tabSchemaUid || null;
       routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
-      if (!tabSchemaUid) pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title);
+      if (!tabSchemaUid) {
+        const refreshedLinks = await getLinkedIds(layoutUid);
+        pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title, refreshedLinks);
+      }
     }
     if (!tabSchemaUid && pageRoute) {
       const pid = String(val(pageRoute, 'id'));
@@ -729,7 +747,6 @@ async function composePortals(db, { applyBlueprint }) {
   }
 
   // Ensure newly created overview/domain pages are granted to the portal's existing roles (additive only).
-  const linksRepo = db.getRepository('desktopRoutesUiLayouts');
   if (linksRepo) {
     for (const ov of OVERVIEW_SPECS) {
       const uid = `ldx-portal-${ov.slug}`;

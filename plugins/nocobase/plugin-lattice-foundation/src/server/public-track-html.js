@@ -146,7 +146,7 @@ function buildClientScriptSource() {
   header.appendChild(el('p', { class: 'dxos-desc' }, 'Nh\u1eadp m\u00e3 v\u1eadn \u0111\u01a1n v\u00e0 m\u00e3 x\u00e1c th\u1ef1c theo d\u00f5i (Tracking Token) \u0111\u1ec3 ki\u1ec3m tra tr\u1ea1ng th\u00e1i giao nh\u1eadn kh\u00f4ng l\u1ed9 d\u1eef li\u1ec7u c\u00e1 nh\u00e2n.'));
   page.appendChild(header);
 
-  var lookupForm = el('form', { 'data-testid': 'public-track-lookup-form', class: 'dxos-card' });
+  var lookupForm = el('form', { 'data-testid': 'public-track-lookup-form', novalidate: true, class: 'dxos-card' });
   var grid = el('div', { class: 'dxos-form-grid' });
 
   var codeGroup = el('div', { class: 'dxos-field' });
@@ -161,7 +161,13 @@ function buildClientScriptSource() {
     placeholder: 'VD: LDX-TRK-001 ho\u1eb7c ORD-V100-001',
     class: 'dxos-input',
   });
+  var codeErrorEl = el('div', {
+    'data-testid': 'public-track-code-error',
+    role: 'alert',
+    class: 'dxos-field-error dxos-hidden',
+  });
   codeGroup.appendChild(codeInput);
+  codeGroup.appendChild(codeErrorEl);
   grid.appendChild(codeGroup);
 
   var tokenGroup = el('div', { class: 'dxos-field' });
@@ -176,7 +182,13 @@ function buildClientScriptSource() {
     placeholder: 'Nh\u1eadp token t\u1eeb phi\u1ebfu giao nh\u1eadn / QR (?token=...)',
     class: 'dxos-input',
   });
+  var tokenErrorEl = el('div', {
+    'data-testid': 'public-track-token-error',
+    role: 'alert',
+    class: 'dxos-field-error dxos-hidden',
+  });
   tokenGroup.appendChild(tokenInput);
+  tokenGroup.appendChild(tokenErrorEl);
   grid.appendChild(tokenGroup);
   lookupForm.appendChild(grid);
 
@@ -359,11 +371,42 @@ function buildClientScriptSource() {
     resultArea.appendChild(card);
   }
 
+  function setFieldError(inputEl, errEl, msg) {
+    if (inputEl && inputEl.classList) inputEl.classList.add('dxos-input-error');
+    if (errEl) {
+      errEl.textContent = String(msg || '');
+      errEl.classList.remove('dxos-hidden');
+    }
+  }
+
+  function clearFieldError(inputEl, errEl) {
+    if (inputEl && inputEl.classList) inputEl.classList.remove('dxos-input-error');
+    if (errEl) {
+      errEl.textContent = '';
+      errEl.classList.add('dxos-hidden');
+    }
+  }
+
+  codeInput.addEventListener('input', function () {
+    clearFieldError(codeInput, codeErrorEl);
+    clearError();
+  });
+  tokenInput.addEventListener('input', function () {
+    clearFieldError(tokenInput, tokenErrorEl);
+    clearError();
+  });
+
   function performTrackLookup(code, token) {
     clearError();
+    clearFieldError(codeInput, codeErrorEl);
+    clearFieldError(tokenInput, tokenErrorEl);
     while (resultArea.firstChild) resultArea.removeChild(resultArea.firstChild);
     if (!code || !token) {
-      showError('Vui l\u00f2ng nh\u1eadp \u0111\u1ea7y \u0111\u1ee7 m\u00e3 v\u1eadn \u0111\u01a1n v\u00e0 m\u00e3 x\u00e1c th\u1ef1c (?token=...) \u0111\u1ec3 tra c\u1ee9u.');
+      if (!code) setFieldError(codeInput, codeErrorEl, 'Vui l\\u00f2ng nh\\u1eadp m\\u00e3 v\\u1eadn \\u0111\\u01a1n.');
+      if (!token) setFieldError(tokenInput, tokenErrorEl, 'Vui l\\u00f2ng nh\\u1eadp m\\u00e3 x\\u00e1c th\\u1ef1c (Tracking Token).');
+      showError('Vui l\\u00f2ng nh\\u1eadp \\u0111\\u1ea7y \\u0111\\u1ee7 m\\u00e3 v\\u1eadn \\u0111\\u01a1n v\\u00e0 m\\u00e3 x\\u00e1c th\\u1ef1c (?token=...) \\u0111\\u1ec3 tra c\\u1ee9u.');
+      var focusTarget = !code ? codeInput : tokenInput;
+      if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus();
       return Promise.resolve();
     }
     activeTrackState = { code: code, token: token };
@@ -439,6 +482,8 @@ function renderPublicTrackHtml({
     .dxos-field { margin-bottom: 4px; }
     .dxos-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
     .dxos-input { width: 100%; padding: 9px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; font-family: inherit; }
+    .dxos-input-error { border-color: #dc2626; background: #fef2f2; }
+    .dxos-field-error { color: #b91c1c; font-size: 12px; margin-top: 5px; font-weight: 500; }
     .dxos-btn { padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
     .dxos-btn:disabled { cursor: not-allowed; opacity: 0.65; }
     .dxos-btn-primary { border: 1px solid #0284c7; background: #0284c7; color: #ffffff; }

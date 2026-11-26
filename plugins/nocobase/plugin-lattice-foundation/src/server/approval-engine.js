@@ -37,7 +37,8 @@ const VALID_MODES = new Set(['sequential', 'parallel']);
 const VALID_OPERATIONS = new Set(['submit', 'create', 'update', 'custom']);
 const VALID_RISK_LEVELS = new Set(['low', 'medium', 'high', 'critical']);
 const VALID_DECISIONS = new Set(['approve', 'reject']);
-const VALID_INBOX_SOURCES = new Set(['all', 'business', 'ai_hitl', 'flow']);
+const VALID_PROPOSAL_DECISIONS = new Set(['approve', 'reject', 'review']);
+const VALID_INBOX_SOURCES = new Set(['all', 'business', 'ai_hitl', 'flow', 'proposals']);
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const FORBIDDEN_DELEGATION_ROLES = new Set(['root', 'admin', 'ldx_admin']);
 const ADMIN_ROLES = new Set(['root', 'admin', 'ldx_admin']);
@@ -1625,7 +1626,7 @@ async function listUnifiedInbox(db, {
 } = {}) {
   const cleanSource = String(source || 'all').trim().toLowerCase();
   if (!VALID_INBOX_SOURCES.has(cleanSource)) {
-    throw failApproval('APPROVAL_SOURCE_INVALID', 400, 'source must be all, business, ai_hitl, or flow.');
+    throw failApproval('APPROVAL_SOURCE_INVALID', 400, 'source must be all, business, ai_hitl, flow, or proposals.');
   }
   const cleanStatus = String(status || 'pending').trim().toLowerCase();
   const cap = Math.max(1, Math.min(200, Number(limit) || 50));
@@ -1850,6 +1851,87 @@ async function listUnifiedInbox(db, {
     }
   }
 
+  if ((cleanSource === 'all' || cleanSource === 'proposals') && cleanStatus !== 'executed') {
+    let proposalCount = 0;
+    const propStateFilter = cleanStatus === 'all'
+      ? null
+      : (cleanStatus === 'pending'
+        ? 'proposed'
+        : (['approved', 'rejected', 'reviewed'].includes(cleanStatus) ? cleanStatus : '__none__'));
+    if (propStateFilter !== '__none__') {
+      const propRepo = getRepo(db, 'latticeAgentProposals');
+      if (propRepo && typeof propRepo.find === 'function') {
+        const propFilter = {
+          ...(scopedOrg ? { organizationId: scopedOrg } : {}),
+          ...(propStateFilter ? { state: propStateFilter } : {}),
+        };
+        const rows = (await runScopedDb(db, scopedOrg, (tx) => propRepo.find({
+          filter: propFilter,
+          sort: ['-createdAt', '-id'],
+          limit: cap,
+          ...(tx ? { transaction: tx } : {}),
+        }))) || [];
+
+        const isProposalRole = actor.isRoot
+          || actor.isAdmin
+          || [...verifiedSet].some((r) => DEFAULT_HITL_APPROVER_ROLES.has(r));
+
+        for (const row of rows) {
+          const rowOrg = val(row, 'organizationId');
+          if (scopedOrg && rowOrg !== scopedOrg) continue;
+          const rowState = String(val(row, 'state') || 'proposed');
+          if (propStateFilter && rowState !== propStateFilter) continue;
+
+          const srcUid = val(row, 'sourceUserId') != null ? Number(val(row, 'sourceUserId')) : 0;
+          const rowCol = val(row, 'targetCollection') || null;
+          const dlgProp = allDelegations.some(
+            (d) => (!d.scopeCollection || d.scopeCollection === rowCol || d.scopeCollection === 'latticeAgentProposals')
+              && DEFAULT_HITL_APPROVER_ROLES.has(d.roleName),
+          );
+          const isProposalApprover = isProposalRole || dlgProp;
+          if (!isProposalApprover && srcUid !== Number(actor.userId)) continue;
+
+          const canAct = rowState === 'proposed'
+            && isProposalApprover
+            && (actor.isRoot || srcUid === 0 || srcUid !== Number(actor.userId));
+
+          const propId = val(row, 'id');
+          const targetRecordId = val(row, 'targetRecordId') ?? null;
+          const recommendation = String(val(row, 'recommendation') || '');
+          const evidence = Array.isArray(val(row, 'evidence')) ? val(row, 'evidence') : [];
+
+          const item = {
+            source: 'proposals',
+            itemKey: `prop:${propId}`,
+            id: propId,
+            organizationId: rowOrg,
+            title: `Đề xuất AI: ${rowCol || 'Hồ sơ'}${targetRecordId != null ? ` #${targetRecordId}` : ''}`,
+            summary: recommendation,
+            diffPreview: { summary: recommendation, changes: [] },
+            evidence,
+            targetCollection: rowCol,
+            targetRecordId,
+            eventId: val(row, 'eventId') || null,
+            riskLevel: 'medium',
+            status: rowState === 'proposed' ? 'pending' : rowState,
+            proposalState: rowState,
+            requesterUserId: srcUid || null,
+            sourceEmployeeId: val(row, 'sourceEmployeeId') ?? null,
+            createdAt: val(row, 'createdAt') || null,
+            canAct: Boolean(canAct),
+          };
+          if (!assignedToMe || item.canAct) {
+            proposalCount += 1;
+            items.push(item);
+          }
+        }
+      }
+    }
+    if (cleanSource === 'proposals' || proposalCount > 0) {
+      counts.proposals = proposalCount;
+    }
+  }
+
   items.sort((a, b) => {
     const ta = a.createdAt ? new Date(a.createdAt).getTime() : 0;
     const tb = b.createdAt ? new Date(b.createdAt).getTime() : 0;
@@ -1871,7 +1953,9 @@ function parseSourceAndTarget(params) {
     if (itemKey.startsWith('biz:')) source = 'business';
     else if (itemKey.startsWith('ai:')) source = 'ai_hitl';
     else if (itemKey.startsWith('flow:')) source = 'flow';
+    else if (itemKey.startsWith('prop:')) source = 'proposals';
   }
+  if (source === 'proposal') source = 'proposals';
   if (!source) source = 'business';
   const strippedKey = itemKey.includes(':') ? itemKey.split(':').slice(1).join(':') : itemKey;
   return { source, strippedKey };
@@ -1880,8 +1964,13 @@ function parseSourceAndTarget(params) {
 async function decideUnifiedInboxItem(db, ctx, params) {
   const { source, strippedKey } = parseSourceAndTarget(params);
   const decision = String(params.decision || '').trim().toLowerCase();
-  if (!VALID_DECISIONS.has(decision)) {
-    throw failApproval('APPROVAL_INVALID_DECISION', 400, 'decision must be approve or reject.');
+  const allowedDecisions = source === 'proposals' ? VALID_PROPOSAL_DECISIONS : VALID_DECISIONS;
+  if (!allowedDecisions.has(decision)) {
+    throw failApproval(
+      'APPROVAL_INVALID_DECISION',
+      400,
+      source === 'proposals' ? 'decision must be approve, reject, or review.' : 'decision must be approve or reject.',
+    );
   }
   const note = String(params.note ?? params.decisionNote ?? params.reason ?? '').trim();
 
@@ -2008,6 +2097,167 @@ async function decideUnifiedInboxItem(db, ctx, params) {
       });
     }
     throw failApproval('HOST_ACTION_UNAVAILABLE', 503, 'dxosAutomations:resumeRun is unavailable.');
+  }
+
+  if (source === 'proposals') {
+    assertApiKeyScope(ctx, ['write', 'ai']);
+    const cleanNote = note.slice(0, 2000);
+    if (decision === 'reject' && cleanNote.length < 3) {
+      throw failApproval('APPROVAL_REJECTION_NOTE_REQUIRED', 400, 'Rejection reason must be at least 3 characters.');
+    }
+    const actor = await resolveActorContext(db, ctx, { requestedOrgId: params.organizationId, allowRootCrossOrg: true });
+    const proposalId = Number(params.proposalId ?? params.id ?? strippedKey);
+    if (!Number.isInteger(proposalId) || proposalId <= 0) {
+      throw failApproval('PROPOSAL_ID_REQUIRED', 400, 'Valid numeric proposalId is required for proposals.');
+    }
+    const propRepo = getRepo(db, 'latticeAgentProposals');
+    if (!propRepo || typeof propRepo.findOne !== 'function') {
+      throw failApproval('PROPOSAL_REPO_UNAVAILABLE', 503, 'latticeAgentProposals repository is unavailable.');
+    }
+
+    const nextState = decision === 'approve' ? 'approved' : (decision === 'reject' ? 'rejected' : 'reviewed');
+    const lockKey = `prop:${actor.organizationId || '*'}:${proposalId}`;
+    const outcome = await withCanonicalDecisionLock(lockKey, () => runScopedDb(db, actor.organizationId, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      const where = {
+        id: proposalId,
+        ...(actor.organizationId ? { organizationId: actor.organizationId } : {}),
+      };
+      const model = db?.getModel?.('latticeAgentProposals') || propRepo?.model;
+      let row;
+      if (model && typeof model.findOne === 'function') {
+        row = await model.findOne({
+          where,
+          ...(transaction ? { transaction, lock: transaction.LOCK?.UPDATE } : {}),
+        });
+      } else {
+        row = await propRepo.findOne({ filter: where, ...txOpt });
+      }
+      if (!row || (actor.organizationId && val(row, 'organizationId') !== actor.organizationId)) {
+        throw failApproval('PROPOSAL_NOT_FOUND', 404, 'Proposal not found in organization scope.');
+      }
+
+      const rowOrg = val(row, 'organizationId');
+      const targetCollection = val(row, 'targetCollection') || null;
+      const targetRecordId = val(row, 'targetRecordId') ?? null;
+      const verifiedSet = new Set(Array.isArray(actor.verifiedRoles) ? actor.verifiedRoles : []);
+      const isDirectApprover = actor.isRoot
+        || actor.isAdmin
+        || [...verifiedSet].some((r) => DEFAULT_HITL_APPROVER_ROLES.has(r));
+      let hasDelegatedApprover = false;
+      if (!isDirectApprover && rowOrg) {
+        const dlgRes = await resolveDelegationsForActor(db, {
+          organizationId: rowOrg,
+          userId: actor.userId,
+          scope: [targetCollection, 'latticeAgentProposals'].filter(Boolean),
+        }).catch(() => ({ delegations: [] }));
+        hasDelegatedApprover = (dlgRes.delegations || []).some((d) => DEFAULT_HITL_APPROVER_ROLES.has(d.roleName));
+      }
+      if (!isDirectApprover && !hasDelegatedApprover) {
+        throw failApproval('APPROVAL_FORBIDDEN', 403, 'Caller lacks required role or active delegation to decide proposal.');
+      }
+
+      const srcUid = val(row, 'sourceUserId') != null ? Number(val(row, 'sourceUserId')) : 0;
+      if (!actor.isRoot && srcUid > 0 && srcUid === Number(actor.userId)) {
+        throw failApproval('SELF_APPROVAL_FORBIDDEN', 403, 'Requester cannot self-approve their own proposal.');
+      }
+
+      const rowState = String(val(row, 'state') || '');
+      if (rowState !== 'proposed') {
+        throw failApproval('PROPOSAL_ALREADY_DECIDED', 409, `Proposal is already "${rowState}".`);
+      }
+
+      const preservedEvidence = Array.isArray(val(row, 'evidence')) ? sanitizePlainJson(val(row, 'evidence')) : [];
+      if (typeof propRepo.update === 'function') {
+        const updated = await propRepo.update({
+          filterByTk: proposalId,
+          filter: { id: proposalId, organizationId: rowOrg, state: 'proposed' },
+          values: { state: nextState, evidence: preservedEvidence },
+          ...txOpt,
+        });
+        if (Array.isArray(updated) && updated.length === 0) {
+          throw failApproval('PROPOSAL_ALREADY_DECIDED', 409, 'Proposal was already updated concurrently.');
+        }
+      } else if (typeof row.update === 'function') {
+        await row.update({ state: nextState, evidence: preservedEvidence }, transaction ? { transaction } : undefined);
+      }
+
+      await appendLedgerEntrySafely(db, {
+        organizationId: rowOrg,
+        eventType: `proposal.${nextState}`,
+        targetCollection: 'latticeAgentProposals',
+        targetRecordId: proposalId,
+        actor,
+        payload: {
+          proposalId,
+          targetCollection,
+          targetRecordId,
+          decision,
+          state: nextState,
+          note: cleanNote || null,
+        },
+      }, { transaction, scope: 'dxos:approvals' });
+
+      return {
+        rowOrg,
+        targetCollection,
+        targetRecordId,
+        srcUid,
+        sourceEmployeeId: val(row, 'sourceEmployeeId') ?? null,
+        evidence: preservedEvidence,
+      };
+    }));
+
+    const app = ctx?.app || db?.app;
+    await safePublishApprovalEvent(db, {
+      organizationId: outcome.rowOrg,
+      eventType: `proposal.${nextState}`,
+      requestUid: `prop:${proposalId}`,
+      data: {
+        proposalId,
+        targetCollection: outcome.targetCollection,
+        targetRecordId: outcome.targetRecordId,
+        state: nextState,
+        decision,
+        decidedByUserId: Number(actor.userId),
+        note: cleanNote || null,
+      },
+      app,
+    });
+
+    if (outcome.srcUid > 0) {
+      await dispatchNotification(db, {
+        organizationId: outcome.rowOrg,
+        recipientUserId: outcome.srcUid,
+        recipientEmployeeId: outcome.sourceEmployeeId,
+        category: 'approval',
+        severity: nextState === 'rejected' ? 'high' : 'info',
+        title: nextState === 'approved'
+          ? `Đã phê duyệt đề xuất AI #${proposalId}`
+          : (nextState === 'rejected'
+            ? `Từ chối đề xuất AI #${proposalId}`
+            : `Đã xem xét đề xuất AI #${proposalId}`),
+        body: cleanNote || `Đề xuất AI cho ${outcome.targetCollection || 'hồ sơ'} đã chuyển sang ${nextState}.`,
+        targetCollection: outcome.targetCollection,
+        targetRecordId: outcome.targetRecordId,
+        targetPath: resolveNotificationTargetPath(outcome.targetCollection),
+        dedupKey: `proposal-decision:${outcome.rowOrg}:${proposalId}:${nextState}`,
+      }, { app }).catch(() => {});
+    }
+
+    return {
+      ok: true,
+      id: proposalId,
+      itemKey: `prop:${proposalId}`,
+      organizationId: outcome.rowOrg,
+      targetCollection: outcome.targetCollection,
+      targetRecordId: outcome.targetRecordId,
+      state: nextState,
+      status: nextState,
+      decision,
+      note: cleanNote || null,
+      evidence: outcome.evidence,
+    };
   }
 
   throw failApproval('APPROVAL_SOURCE_INVALID', 400, `Unsupported approval source "${source}".`);

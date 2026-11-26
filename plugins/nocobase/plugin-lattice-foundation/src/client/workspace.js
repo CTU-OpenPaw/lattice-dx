@@ -20,12 +20,87 @@ function createWorkspaceComponent(client, React, runtime) {
     const [expired,setExpired] = React.useState(false), [notice,setNotice] = React.useState(null);
     const [loadFailed,setLoadFailed] = React.useState(false);
     const [search,setSearch]=React.useState(''),[menuOpen,setMenuOpen]=React.useState(false),[helpOpen,setHelpOpen]=React.useState(false);
+    const [notif,setNotif]=React.useState({open:false,unreadCount:0,items:[],loading:false,busy:false,error:''});
     const searchRef=React.useRef(null),helpClose=React.useRef(null);
     const mounted = React.useRef(true), operating = React.useRef(false);
     const api = React.useMemo(() => createWorkspaceApi({apiClient,
       notify: value => {if (mounted.current) setNotice(value?.message?value:null);},
       onExpired: source => {if (mounted.current) {if (source==='nocobase') setExpired(true); else setConnection({connected:false});}},
     }), [apiClient]);
+    async function refreshWorkspaceUnreadCount(isCanceled) {
+      if (typeof apiClient?.request !== 'function') return;
+      try {
+        const res = await apiClient.request({ url: 'latticeNotifications:unreadCount', method: 'get', skipNotify: true });
+        const count = Number(res?.data?.data?.unreadCount ?? res?.data?.unreadCount ?? 0);
+        if (!isCanceled && mounted.current && Number.isFinite(count) && count >= 0) {
+          setNotif(prev => ({ ...prev, unreadCount: count }));
+        }
+      } catch { /* Notifications optional if unavailable */ }
+    }
+    async function loadWorkspaceNotifications() {
+      if (typeof apiClient?.request !== 'function') return;
+      setNotif(prev => ({ ...prev, loading: true, error: '' }));
+      try {
+        const res = await apiClient.request({ url: 'latticeNotifications:listMine', method: 'get', params: { limit: 20 }, skipNotify: true });
+        const data = res?.data?.data || res?.data || {};
+        if (mounted.current) {
+          setNotif(prev => ({
+            ...prev,
+            loading: false,
+            items: Array.isArray(data.items) ? data.items : [],
+            unreadCount: (data.unreadCount != null && Number.isFinite(Number(data.unreadCount)))
+              ? Math.max(0, Number(data.unreadCount))
+              : prev.unreadCount,
+          }));
+        }
+      } catch (err) {
+        if (mounted.current) {
+          setNotif(prev => ({ ...prev, loading: false, error: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể tải thông báo.' }));
+        }
+      }
+    }
+    async function markWorkspaceNotificationRead(item, navigate = false) {
+      if (!item) return;
+      if (!item.readAt && typeof apiClient?.request === 'function') {
+        const nowIso = new Date().toISOString();
+        setNotif(prev => ({
+          ...prev,
+          items: prev.items.map(it => (it.id === item.id ? { ...it, readAt: nowIso } : it)),
+          unreadCount: Math.max(0, prev.unreadCount - 1),
+        }));
+        try {
+          await apiClient.request({ url: 'latticeNotifications:markRead', method: 'post', data: { id: item.id }, skipNotify: true });
+        } catch (err) {
+          if (mounted.current) {
+            setNotif(prev => ({ ...prev, error: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể đánh dấu đã đọc.' }));
+          }
+        }
+      }
+      if (navigate && typeof item.targetPath === 'string' && /^\/(?!\/)[^\s\\]{0,500}$/.test(item.targetPath.trim())) {
+        setNotif(prev => ({ ...prev, open: false }));
+        window.location?.assign?.(item.targetPath.trim());
+      }
+    }
+    async function markAllWorkspaceNotificationsRead() {
+      if (typeof apiClient?.request !== 'function' || notif.busy) return;
+      const nowIso = new Date().toISOString();
+      setNotif(prev => ({
+        ...prev,
+        busy: true,
+        error: '',
+        unreadCount: 0,
+        items: prev.items.map(it => (it.readAt ? it : { ...it, readAt: nowIso })),
+      }));
+      try {
+        await apiClient.request({ url: 'latticeNotifications:markAllRead', method: 'post', data: {}, skipNotify: true });
+      } catch (err) {
+        if (mounted.current) {
+          setNotif(prev => ({ ...prev, error: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể đánh dấu tất cả đã đọc.' }));
+        }
+      } finally {
+        if (mounted.current) setNotif(prev => ({ ...prev, busy: false }));
+      }
+    }
     React.useEffect(() => {
       mounted.current = true;
       let canceled = false;
@@ -49,6 +124,7 @@ function createWorkspaceComponent(client, React, runtime) {
             setConnection(status);
             setLoadFailed(false);
           }
+          await refreshWorkspaceUnreadCount(canceled);
         } catch {if (!canceled) setLoadFailed(true);}
         finally {if (!canceled) setLoading(false);}
       }
@@ -67,6 +143,7 @@ function createWorkspaceComponent(client, React, runtime) {
               setSystems([]);
             }
           }
+          await refreshWorkspaceUnreadCount(canceled);
         } catch { /* Error notification/session state is handled centrally. */ }
       }, 30000);
       return () => {canceled=true;mounted.current=false;clearInterval(timer);};
@@ -79,7 +156,7 @@ function createWorkspaceComponent(client, React, runtime) {
       }, Math.max(0,new Date(connection.expiresAt).getTime()-Date.now()));
       return () => clearTimeout(timer);
     }, [connection]);
-    React.useEffect(()=>{const listener=event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'){event.preventDefault();searchRef.current?.focus();}if(event.key==='Escape'){setSearch('');setHelpOpen(false);setMenuOpen(false);}};window.addEventListener('keydown',listener);return()=>window.removeEventListener('keydown',listener);},[]);
+    React.useEffect(()=>{const listener=event=>{if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==='k'){event.preventDefault();searchRef.current?.focus();}if(event.key==='Escape'){setSearch('');setHelpOpen(false);setMenuOpen(false);setNotif(prev=>({...prev,open:false}));}};window.addEventListener('keydown',listener);return()=>window.removeEventListener('keydown',listener);},[]);
     React.useEffect(()=>{if(!helpOpen)return;const previous=document.activeElement;helpClose.current?.focus();return()=>previous?.focus?.();},[helpOpen]);
     async function act(operation) {
       if (operating.current) return;
@@ -133,16 +210,87 @@ function createWorkspaceComponent(client, React, runtime) {
         h('button',{className:'lx-button lx-mobile-menu','aria-label':'Mở điều hướng','aria-expanded':menuOpen,onClick:()=>setMenuOpen(value=>!value)},h(Icon,{name:'menu'})),
         h('a',{href:'/lattice',className:'lx-brand','aria-label':'Lattice Workspace'},h('span',{className:'lx-brand-mark','aria-hidden':true},'L'),h('strong',null,'LatticeDX'),h('span',{className:'lx-badge'},'Workspace')),
         h('div',{className:'lx-search'},h('label',null,h(Icon,{name:'search'}),h('span',{className:'lx-sr-only'},'Tìm ứng dụng'),h('input',{ref:searchRef,value:search,placeholder:'Tìm ứng dụng hoặc nhấn Ctrl+K',onChange:event=>setSearch(event.target.value),'aria-label':'Tìm ứng dụng','aria-controls':'lx-search-results','aria-expanded':!!search})),search&&h('div',{className:'lx-search-results',id:'lx-search-results'},(results.length||matchingSystems.length)?[...results.map(app=>h('a',{key:app.id,href:app.route},app.name)),...matchingSystems.map(sys=>h('a',{key:sys.id+sys.version,href:'/lattice/systems/'+sys.id+'/'+sys.version},'[Hệ thống] '+(sys.title||sys.id)+' (v'+sys.version+')'))]:h('p',{className:'lx-muted'},'Không tìm thấy ứng dụng hoặc hệ thống phù hợp.'))),
-        h('div',{className:'lx-account'},h('span',{className:'lx-badge'},connection.connected?'Tài khoản doanh nghiệp':'Chưa kết nối'),h('button',{className:'lx-button',disabled:true,'aria-label':'Thông báo — sắp có',title:'Thông báo — sắp có'},h(Icon,{name:'bell'})),h('span',{className:'lx-avatar','aria-hidden':true},actorName.slice(0,1).toUpperCase()),h('span',{className:'lx-account-name'},actorName))),
+        h('div',{className:'lx-account'},
+          h('span',{className:'lx-badge'},connection.connected?'Tài khoản doanh nghiệp':'Chưa kết nối'),
+          h('div',{style:{position:'relative',display:'inline-flex',alignItems:'center'}},
+            h('button',{
+              type:'button',
+              className:'lx-button',
+              'data-testid':'lx-notification-bell',
+              'aria-label':'Thông báo',
+              'aria-expanded':notif.open,
+              title:'Thông báo',
+              onClick:async()=>{
+                const next=!notif.open;
+                setNotif(prev=>({...prev,open:next}));
+                if(next)await loadWorkspaceNotifications();
+              }
+            },
+              h(Icon,{name:'bell'}),
+              notif.unreadCount>0&&h('span',{'data-testid':'lx-notification-badge',style:{minWidth:18,height:18,padding:'0 5px',borderRadius:999,background:'#ef4444',color:'#fff',fontSize:11,fontWeight:700,display:'inline-flex',alignItems:'center',justifyContent:'center',lineHeight:1}},notif.unreadCount>99?'99+':String(notif.unreadCount))
+            ),
+            notif.open&&h('div',{
+              role:'dialog',
+              'aria-label':'Hộp thư thông báo',
+              'data-testid':'lx-notification-popover',
+              style:{position:'absolute',top:'100%',right:0,marginTop:8,width:340,maxWidth:'90vw',maxHeight:420,overflowY:'auto',background:'#fff',border:'1px solid #cad5e2',borderRadius:10,boxShadow:'0 14px 36px rgba(15, 23, 42, 0.16)',padding:12,zIndex:40,whiteSpace:'normal'}
+            },
+              h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,paddingBottom:8,borderBottom:'1px solid #e2e8f0',marginBottom:8}},
+                h('strong',{style:{fontSize:13}},`Thông báo (${notif.unreadCount} chưa đọc)`),
+                h('div',{style:{display:'flex',gap:8,alignItems:'center'}},
+                  h('button',{
+                    type:'button',
+                    'data-testid':'lx-notification-mark-all',
+                    disabled:notif.busy||(notif.unreadCount===0&&!notif.items.some(it=>!it.readAt)),
+                    onClick:markAllWorkspaceNotificationsRead,
+                    style:{border:0,background:'transparent',color:'#2360d6',fontSize:12,fontWeight:600,padding:0}
+                  },'Đánh dấu tất cả đã đọc'),
+                  h('button',{
+                    type:'button',
+                    onClick:()=>setNotif(prev=>({...prev,open:false})),
+                    style:{border:'1px solid #cad5e2',borderRadius:6,background:'#fff',padding:'2px 8px',fontSize:12}
+                  },'Đóng')
+                )
+              ),
+              notif.error&&h('div',{role:'alert','data-testid':'lx-notification-error',style:{padding:8,borderRadius:6,background:'#fff1f1',border:'1px solid #f1caca',color:'#991b1b',fontSize:12,marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center',gap:8}},
+                h('span',null,notif.error),
+                h('button',{type:'button',className:'lx-button',onClick:loadWorkspaceNotifications,style:{padding:'3px 8px',fontSize:11}},'Thử lại')
+              ),
+              notif.loading&&!notif.items.length
+                ? h('p',{className:'lx-muted',style:{margin:0,padding:12,textAlign:'center',fontSize:12}},'Đang tải thông báo…')
+                : !notif.items.length
+                  ? h('p',{className:'lx-muted',style:{margin:0,padding:12,textAlign:'center',fontSize:12}},'Chưa có thông báo nào.')
+                  : h('div',{style:{display:'grid',gap:6}},...notif.items.map(item=>
+                    h('div',{key:item.id,style:{padding:'8px 10px',borderRadius:8,border:`1px solid ${item.readAt?'#e2e8f0':'#bfdbfe'}`,background:item.readAt?'#fff':'#f0f7ff',display:'grid',gap:4}},
+                      h('div',{style:{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:8}},
+                        h('strong',{style:{fontSize:12,color:'#17263b'}},item.title||'Thông báo'),
+                        !item.readAt&&h('button',{
+                          type:'button',
+                          'data-testid':`lx-notification-mark-${item.id}`,
+                          onClick:()=>markWorkspaceNotificationRead(item,false),
+                          style:{border:0,background:'transparent',color:'#2360d6',fontSize:11,fontWeight:600,padding:0,whiteSpace:'nowrap'}
+                        },'Đánh dấu đã đọc')
+                      ),
+                      item.body&&h('div',{style:{fontSize:11,color:'#48576a'}},String(item.body).slice(0,140)),
+                      typeof item.targetPath==='string'&&/^\/(?!\/)[^\s\\]{0,500}$/.test(item.targetPath.trim())&&h('button',{
+                        type:'button',
+                        onClick:()=>markWorkspaceNotificationRead(item,true),
+                        style:{justifySelf:'start',border:0,background:'transparent',color:'#2360d6',fontSize:11,fontWeight:600,padding:0}
+                      },'Mở chi tiết →')
+                    )
+                  ))
+            )
+          ),
+          h('span',{className:'lx-avatar','aria-hidden':true},actorName.slice(0,1).toUpperCase()),
+          h('span',{className:'lx-account-name'},actorName)
+        )),
       h('div',{className:'lx-shell'},h('aside',{className:'lx-sidebar'+(menuOpen?' lx-sidebar-open':'')},
         h('nav',{'aria-label':'Điều hướng Workspace'},
           h('a',{href:'/lattice',className:'lx-nav-item','aria-current':isHome?'page':undefined},h(Icon,{name:'inbox'}),'Công việc của tôi'),
           h('a',{href:'/lattice?view=apps',className:'lx-nav-item','aria-current':showApps||appId&&!isHome?'page':undefined},h(Icon,{name:'apps'}),'Ứng dụng'),
-          h('a',{href:'/lattice/systems',className:'lx-nav-item'},h(Icon,{name:'settings'}),'Hệ thống doanh nghiệp'),
-          h('button',{className:'lx-nav-item',disabled:true,title:'Báo cáo — sắp có'},h(Icon,{name:'report'}),'Báo cáo'),
-          h('button',{className:'lx-nav-item',disabled:true},h(Icon,{name:'bot'}),'AI Assistant',h('span',{className:'lx-badge'},'Dự kiến'))
+          h('a',{href:'/lattice/systems',className:'lx-nav-item'},h(Icon,{name:'settings'}),'Hệ thống doanh nghiệp')
         ),
-        h('div',{className:'lx-sidebar-footer'},h('a',{className:'lx-nav-item',href:'/lattice/console'},h(Icon,{name:'apps'}),'Điều hành doanh nghiệp'),h('button',{className:'lx-nav-item',onClick:()=>setHelpOpen(true)},h(Icon,{name:'help'}),'Trợ giúp'),h('button',{className:'lx-nav-item',disabled:true,title:'Cài đặt cá nhân — sắp có'},h(Icon,{name:'settings'}),'Cài đặt cá nhân'),h('a',{className:'lx-nav-item',href:'/admin'},h(Icon,{name:'settings'}),'Quản trị NocoBase'))),
+        h('div',{className:'lx-sidebar-footer'},h('a',{className:'lx-nav-item',href:'/lattice/console'},h(Icon,{name:'apps'}),'Điều hành doanh nghiệp'),h('button',{className:'lx-nav-item',onClick:()=>setHelpOpen(true)},h(Icon,{name:'help'}),'Trợ giúp'),h('a',{className:'lx-nav-item',href:'/admin'},h(Icon,{name:'settings'}),'Quản trị NocoBase'))),
       h('main',{className:'lx-main'},
         h('h1',null,showApps?'Ứng dụng':isHome?'Công việc của tôi':selected?.name||'Workspace'),
         h('section',{className:'lx-connection','data-connected':connection.connected===true,'aria-label':'Kết nối tài khoản'},h('span',{'data-testid':'api-status'},connection.connected?`API doanh nghiệp: Đã kết nối — ${connection.identity?.username||''}`:'API doanh nghiệp: Chưa kết nối'),h('small',null,expired?'Phiên đăng nhập đã hết hạn.':'Dùng tài khoản nghiệp vụ để xem công việc đúng quyền.'),h('div',{className:'lx-connection-actions'},...controls)),
@@ -155,7 +303,7 @@ function createWorkspaceComponent(client, React, runtime) {
             systems.length>0&&h('section',{'aria-label':'Hệ thống doanh nghiệp',style:{marginTop:24}},h('div',{className:'lx-section-heading'},h('h2',null,'Hệ thống doanh nghiệp đã xuất bản'),h('a',{className:'lx-text-link',href:'/lattice/systems'},'Tất cả hệ thống',h(Icon,{name:'arrow',size:17}))),systemCards(systems))
           ),
           !showApps&&(activeApp?h('section',{className:isHome?'':'lx-panel'},!isHome&&h('a',{className:'lx-back',href:'/lattice?view=apps'},'← Chọn ứng dụng khác'),h(runtime.Application,{key:activeApp.id,manifest:activeApp,api,connection})):h('p',{role:'alert'},appId?'Không tìm thấy ứng dụng.':'Chưa cấu hình trang công việc.',h('a',{href:'/lattice?view=apps'},' Xem ứng dụng')))))),
-      helpOpen&&h('div',{className:'lx-dialog-overlay'},h('section',{className:'lx-dialog',role:'dialog','aria-modal':true,'aria-labelledby':'lx-help-title',onKeyDown:event=>{if(event.key==='Tab'){event.preventDefault();helpClose.current?.focus();}}},h('h2',{id:'lx-help-title'},'Làm việc trong Workspace'),h('p',null,'Kết nối tài khoản nghiệp vụ để xem các công việc và hành động được cấp quyền. Chọn một công việc để xem chi tiết trước khi xử lý.'),h('p',null,'Nếu kết nối hết hạn, kết nối lại rồi tải lại danh sách. Khi kết quả thao tác chưa rõ, dùng “Thử lại lệnh cũ” thay vì tạo yêu cầu mới.'),h('p',null,'Nhấn Ctrl+K để tìm ứng dụng. Các mục “Dự kiến” sẽ được bổ sung sau.'),h('button',{className:'lx-button',ref:helpClose,onClick:()=>setHelpOpen(false)},'Đóng trợ giúp'))));
+      helpOpen&&h('div',{className:'lx-dialog-overlay'},h('section',{className:'lx-dialog',role:'dialog','aria-modal':true,'aria-labelledby':'lx-help-title',onKeyDown:event=>{if(event.key==='Tab'){event.preventDefault();helpClose.current?.focus();}}},h('h2',{id:'lx-help-title'},'Làm việc trong Workspace'),h('p',null,'Kết nối tài khoản nghiệp vụ để xem các công việc và hành động được cấp quyền. Chọn một công việc để xem chi tiết trước khi xử lý.'),h('p',null,'Nếu kết nối hết hạn, kết nối lại rồi tải lại danh sách. Khi kết quả thao tác chưa rõ, dùng “Thử lại lệnh cũ” thay vì tạo yêu cầu mới.'),h('p',null,'Nhấn Ctrl+K để tìm ứng dụng.'),h('button',{className:'lx-button',ref:helpClose,onClick:()=>setHelpOpen(false)},'Đóng trợ giúp'))));
   }
   return Workspace;
 }

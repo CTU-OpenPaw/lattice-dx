@@ -365,6 +365,20 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
       baseURL: '',
     });
   }
+  try {
+    validateQuickConnectBaseUrl(target.baseURL);
+  } catch (err) {
+    return resultBase({
+      ok: false,
+      status: Number(err?.status) || 400,
+      code: String(err?.code || 'LLM_URL_UNSAFE'),
+      llmService: serviceName,
+      modelName: boundModel,
+      provider,
+      baseURL: target.baseURL,
+      message: err?.message || `baseURL của dịch vụ LLM "${serviceName}" không hợp lệ.`,
+    });
+  }
 
   const doFetch = fetchImpl || (typeof globalThis !== 'undefined' && typeof globalThis.fetch === 'function' ? globalThis.fetch : null);
   if (typeof doFetch !== 'function') {
@@ -395,6 +409,7 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
 
   let clearModelsTimer = () => {};
   let clearCompTimer = () => {};
+  let completionProbeStarted = false;
   try {
     const modelsTimeout = createTimeoutSignal(5000);
     clearModelsTimer = modelsTimeout.clear;
@@ -409,19 +424,54 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
     }
 
     const lowerProv = provider.toLowerCase();
+    const isGemini = lowerProv.includes('gemini') || lowerProv.includes('google');
+    const isAnthropic = lowerProv.includes('anthropic') || lowerProv.includes('claude');
+    const isOllama = lowerProv.includes('ollama');
     const isOpenAiCompat = lowerProv.includes('openai') || lowerProv.includes('deepseek') || lowerProv.includes('9router');
-    if (verifyCompletion && boundModel && isOpenAiCompat) {
+
+    if (verifyCompletion && boundModel && (isOpenAiCompat || isGemini || isAnthropic || isOllama)) {
+      completionProbeStarted = true;
       const compTimeout = createTimeoutSignal(8000);
       clearCompTimer = compTimeout.clear;
-      const compRes = await doFetch(`${target.baseURL}/chat/completions`, {
-        method: 'POST',
-        headers: { ...target.headers, 'content-type': 'application/json' },
-        body: JSON.stringify({
+      let compUrl = `${target.baseURL}/chat/completions`;
+      let compBody = {
+        model: boundModel,
+        messages: [{ role: 'user', content: 'ok' }],
+        max_tokens: 4,
+        temperature: 0,
+      };
+      if (isGemini) {
+        const prefix = target.baseURL.endsWith('/v1beta')
+          ? target.baseURL
+          : (target.baseURL.endsWith('/v1beta/models') ? target.baseURL.replace(/\/models$/, '') : `${target.baseURL}/v1beta`);
+        compUrl = `${prefix}/models/${encodeURIComponent(boundModel)}:generateContent`;
+        compBody = {
+          contents: [{ role: 'user', parts: [{ text: 'ok' }] }],
+          generationConfig: { maxOutputTokens: 4, temperature: 0 },
+        };
+      } else if (isAnthropic) {
+        compUrl = target.baseURL.endsWith('/messages')
+          ? target.baseURL
+          : (target.baseURL.endsWith('/v1') ? `${target.baseURL}/messages` : `${target.baseURL}/v1/messages`);
+        compBody = {
           model: boundModel,
-          messages: [{ role: 'user', content: 'ok' }],
           max_tokens: 4,
           temperature: 0,
-        }),
+          messages: [{ role: 'user', content: 'ok' }],
+        };
+      } else if (isOllama && !/\/v1$/i.test(target.baseURL) && !/\/chat\/completions$/i.test(target.baseURL)) {
+        compUrl = `${target.baseURL.replace(/\/api\/?$/, '')}/api/chat`;
+        compBody = {
+          model: boundModel,
+          messages: [{ role: 'user', content: 'ok' }],
+          stream: false,
+          options: { num_predict: 4, temperature: 0 },
+        };
+      }
+      const compRes = await doFetch(compUrl, {
+        method: 'POST',
+        headers: { ...target.headers, 'content-type': 'application/json' },
+        body: JSON.stringify(compBody),
         ...(compTimeout.signal ? { signal: compTimeout.signal } : {}),
       });
       const compStatus = Number(compRes?.status) || (compRes?.ok ? 200 : 503);
@@ -467,6 +517,7 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
       modelName: boundModel,
       provider,
       baseURL: target.baseURL,
+      ...(completionProbeStarted ? { completionChecked: true } : {}),
       message: isTimeout
         ? `Kết nối tới dịch vụ LLM "${serviceName}" quá thời gian chờ.`
         : `Không thể kết nối tới dịch vụ LLM "${serviceName}": ${String(err?.code || err?.message || 'network error').slice(0, 140)}`,

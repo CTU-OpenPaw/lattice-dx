@@ -595,6 +595,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
 
 module.exports = {
   SUPPORTED_PROTOCOL_VERSIONS,
+  MCP_PROMPT_CATALOG,
   extractBearerToken,
   normalizeMcpPath,
   createMcpGatewayMiddleware,

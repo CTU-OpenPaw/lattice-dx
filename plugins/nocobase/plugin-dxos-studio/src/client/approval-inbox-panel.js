@@ -13,9 +13,19 @@ const APPROVAL_SOURCE_TABS = Object.freeze([
   { id: 'business', label: 'Nghiệp vụ (Multi-Level)' },
   { id: 'ai_hitl', label: 'AI HITL' },
   { id: 'flow', label: 'LatticeFlow v2' },
+  { id: 'proposals', label: 'Đề xuất AI' },
 ]);
 
-const STATUS_OPTIONS = Object.freeze(['pending', 'approved', 'rejected', 'executed', 'all']);
+const STATUS_OPTIONS = Object.freeze(['pending', 'reviewed', 'approved', 'rejected', 'executed', 'all']);
+
+function formatVnDateTime(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) return String(value).slice(0, 16).replace('T', ' ');
+  const vn = new Date(d.getTime() + 7 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${vn.getUTCFullYear()}-${pad(vn.getUTCMonth() + 1)}-${pad(vn.getUTCDate())} ${pad(vn.getUTCHours())}:${pad(vn.getUTCMinutes())} (+07:00)`;
+}
 
 function unwrapData(res) {
   return res?.data?.data ?? res?.data ?? {};
@@ -32,12 +42,14 @@ function normalizeSource(raw) {
   const s = String(raw || 'business').toLowerCase();
   if (s === 'flow_approval' || s === 'flow') return 'flow';
   if (s === 'ai' || s === 'ai_hitl') return 'ai_hitl';
+  if (s === 'proposals' || s === 'proposal' || s === 'agent_proposal' || s === 'ai_proposal') return 'proposals';
   return 'business';
 }
 
 function sourceLabel(src) {
   if (src === 'ai_hitl') return 'AI HITL';
   if (src === 'flow') return 'Flow v2';
+  if (src === 'proposals') return 'Đề xuất AI';
   return 'Nghiệp vụ';
 }
 
@@ -60,6 +72,7 @@ function riskLabel(risk) {
 function statusTone(status) {
   const s = String(status || 'pending').toLowerCase();
   if (s === 'approved' || s === 'executed') return 'ok';
+  if (s === 'reviewed') return 'info';
   if (s === 'rejected' || s === 'expired' || s === 'failed') return 'danger';
   if (s === 'pending' || s === 'suspended') return 'warn';
   return 'neutral';
@@ -68,6 +81,7 @@ function statusTone(status) {
 function statusLabel(status) {
   const s = String(status || 'pending').toLowerCase();
   if (s === 'pending') return 'Chờ duyệt';
+  if (s === 'reviewed') return 'Đã xem xét';
   if (s === 'approved') return 'Đã duyệt';
   if (s === 'rejected') return 'Từ chối';
   if (s === 'executed') return 'Đã thực thi';
@@ -488,7 +502,7 @@ function createApprovalInboxPanel(client, React, _antd, app) {
                     : null,
                 ),
                 h('div', { style: { fontSize: 11, color: '#64748b' } },
-                  item.dueAt ? `SLA: ${String(item.dueAt).slice(0, 16).replace('T', ' ')}` : '',
+                  item.dueAt ? `SLA: ${formatVnDateTime(item.dueAt)}` : '',
                   item.escalatedAt ? ' · Đã leo thang' : '',
                 ),
               ),
@@ -499,6 +513,14 @@ function createApprovalInboxPanel(client, React, _antd, app) {
                   `Đối tượng: ${item.targetCollection || '-'} · Mã: ${item.targetCode || item.targetRecordId || '-'} · Người gửi: ${item.requesterUsername || '-'}`,
                 ),
                 item.summary ? h('div', { style: { fontSize: 12, color: '#334155', marginTop: 4 } }, item.summary) : null,
+                Array.isArray(item.evidence) && item.evidence.length
+                  ? h('div', { 'data-testid': `dxos-approval-evidence-${itemKey}`, style: { ...S.rowWrap, marginTop: 6 } },
+                    h('strong', { style: { fontSize: 11, color: '#475569' } }, 'Bằng chứng:'),
+                    item.evidence.filter((e) => e && typeof e === 'object').map((ev, eIdx) => h('span', { key: eIdx, style: S.badge('info') },
+                      `${ev.kind || 'evidence'}${ev.collection ? `: ${ev.collection}#${ev.recordId ?? ''}` : (ev.entityId ? `: ${ev.entityId}` : '')}`,
+                    )),
+                  )
+                  : null,
               ),
 
               stages.length

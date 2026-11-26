@@ -28,7 +28,7 @@ const { recallMemories, buildMemoryContextPrompt } = require('./ai-memory');
 const DEFAULT_SYSTEM_PROTECTED = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'aiSettings', 'aiEmployees', 'aiMcpClients',
-  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
+  'rolesAiEmployees', 'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiQuotaPolicies', 'latticeAiApprovalQueue', 'latticeUiSnapshots',
   'latticeBuiltApps', 'latticeAiMemory', 'latticeAiTraces', 'latticeAutomationRuleVersions',
   'latticeA2aTasks', 'latticeApprovalPolicies', 'latticeApprovalRequests', 'latticeNotificationDeliveries', 'latticePublicForms',
 ]);

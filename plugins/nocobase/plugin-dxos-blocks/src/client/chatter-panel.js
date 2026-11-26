@@ -58,6 +58,24 @@ const ENTRY_TYPE_LABELS = {
   sla_escalation: 'Cảnh báo SLA',
 };
 
+const CHATTER_VN_DT_FMT = typeof Intl !== 'undefined' && typeof Intl.DateTimeFormat === 'function'
+  ? new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  : null;
+
+function formatChatterTimestamp(raw) {
+  if (!raw) return '';
+  const ts = Date.parse(String(raw));
+  if (!Number.isFinite(ts) || !CHATTER_VN_DT_FMT) return String(raw);
+  return CHATTER_VN_DT_FMT.format(new Date(ts));
+}
+
 function createRecordChatterView(client, React, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -68,6 +86,8 @@ function createRecordChatterView(client, React, app) {
     const [typeFilter, setTypeFilter] = React.useState('all');
     const [draftBody, setDraftBody] = React.useState('');
     const [statusNote, setStatusNote] = React.useState('');
+    const [loadError, setLoadError] = React.useState('');
+    const [loading, setLoading] = React.useState(false);
 
     const validTarget = SAFE_COLLECTION_RE.test(String(targetCollection || '')) && Number(targetRecordId) > 0;
     const visibleItems = typeFilter === 'all'
@@ -76,6 +96,8 @@ function createRecordChatterView(client, React, app) {
 
     const loadEntries = React.useCallback(async () => {
       if (!api?.request || !validTarget) return;
+      setLoading(true);
+      setLoadError('');
       try {
         const res = await api.request({
           url: 'latticeChatter:list',
@@ -85,8 +107,15 @@ function createRecordChatterView(client, React, app) {
         });
         const list = res?.data?.data?.items || res?.data?.items || [];
         setItems(Array.isArray(list) ? list : []);
-      } catch {
-        // Degrade without wiping existing timeline
+      } catch (err) {
+        setLoadError(
+          err?.response?.data?.errors?.[0]?.message
+          || err?.response?.data?.message
+          || err?.message
+          || 'Không tải được nhật ký Chatter.',
+        );
+      } finally {
+        setLoading(false);
       }
     }, [api, targetCollection, targetRecordId, validTarget]);
 
@@ -175,15 +204,29 @@ function createRecordChatterView(client, React, app) {
         }, 'Gửi'),
       ) : null,
       statusNote ? h('div', { style: { fontSize: 11, color: '#2563eb' } }, statusNote) : null,
-      !visibleItems.length
+      loadError ? h('div', {
+        'data-testid': 'dxos-chatter-load-error',
+        role: 'alert',
+        style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '8px 10px', borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 12 },
+      },
+        h('span', null, loadError),
+        h('button', {
+          type: 'button',
+          'data-testid': 'dxos-chatter-retry-btn',
+          onClick: () => loadEntries(),
+          style: { padding: '3px 10px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' },
+        }, 'Thử lại'),
+      ) : null,
+      loading && !visibleItems.length ? h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Đang tải nhật ký Chatter…') : null,
+      !loading && !loadError && !visibleItems.length
         ? h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Chưa có ghi nhận Chatter nào.')
-        : h('div', { style: { display: 'grid', gap: 8 } }, visibleItems.map((entry, idx) => h('div', {
+        : (visibleItems.length ? h('div', { style: { display: 'grid', gap: 8 } }, visibleItems.map((entry, idx) => h('div', {
             key: entry.id || idx,
             style: { padding: 8, borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: 12, display: 'grid', gap: 4, minWidth: 0 },
           },
             h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 4, fontSize: 11, color: '#475569' } },
               h('strong', null, `${entry.authorName || 'system'} · ${ENTRY_TYPE_LABELS[entry.entryType] || entry.entryType || 'Ghi chú'}`),
-              h('span', null, String(entry.createdAt || '')),
+              h('span', null, formatChatterTimestamp(entry.createdAt)),
             ),
             h('div', null, formatMentionSegments(entry.body).map((seg, sIdx) => (
               seg.type === 'mention'
@@ -196,7 +239,7 @@ function createRecordChatterView(client, React, app) {
                   style: { fontSize: 11, padding: '2px 6px', borderRadius: 4, background: '#fef3c7', color: '#92400e' },
                 }, `${d.field}: ${d.before ?? '∅'} -> ${d.after ?? '∅'}`)))
               : null,
-          ))),
+          ))) : null),
     );
   };
 }

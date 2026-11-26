@@ -103,6 +103,40 @@ function extractPortalsFromSpec(spec = {}, defaultCollectionName = '') {
   return [];
 }
 
+function inferFieldDefFromSegment(segRaw, collectionName) {
+  const seg = String(segRaw || '').trim();
+  const segNorm = stripDiacriticsSimple(seg).toLowerCase();
+  const idMatch = seg.match(/^([a-z][a-zA-Z0-9_]{1,48})\b/);
+  if (!idMatch) return null;
+  const name = idMatch[1].trim();
+  let type = 'string';
+  if (/\b(formula|cong thuc)\b/.test(segNorm)) type = 'formula';
+  else if (/\b(integer|so nguyen)\b/.test(segNorm)) type = 'integer';
+  else if (/\b(float|so thuc|tien|amount|price|discount)\b/.test(segNorm)) type = 'float';
+  else if (/\b(boolean|co\/khong|checkbox)\b/.test(segNorm)) type = 'boolean';
+  else if (/\b(datetime|ngay gio)\b/.test(segNorm)) type = 'datetime';
+  else if (/\b(date|ngay)\b/.test(segNorm)) type = 'date';
+  else if (/\b(text|van ban|mo ta|ghi chu)\b/.test(segNorm)) type = 'text';
+  else if (/\b(json)\b/.test(segNorm)) type = 'json';
+  const required = /\b(bat buoc|required)\b/.test(segNorm);
+  const unique = /\b(duy nhat|unique)\b/.test(segNorm);
+  const enumMatch = seg.match(/(?:enum|giá trị|gia tri)\s*[:=]\s*([^\n;]+)/i);
+  const enumValues = enumMatch
+    ? enumMatch[1].split(/[,/|]/).map((s) => s.trim()).filter(Boolean)
+    : [];
+  const formulaMatch = seg.match(/(?:formula|công\s+thức|cong\s+thuc)\s*[:=]?\s*([a-zA-Z0-9_+\-*/().\s]+)/i);
+  return {
+    collectionName,
+    name,
+    type: enumValues.length ? 'enum' : type,
+    title: name,
+    ...(required ? { required: true } : {}),
+    ...(unique ? { unique: true } : {}),
+    ...(enumValues.length ? { enumValues } : {}),
+    ...(type === 'formula' && formulaMatch?.[1] ? { formulaExpression: formulaMatch[1].trim() } : {}),
+  };
+}
+
 function parseNaturalAppPlanOrPatch(promptText, baseSpec = {}) {
   const raw = String(promptText || '').trim();
   if (!raw) return {};
@@ -114,56 +148,139 @@ function parseNaturalAppPlanOrPatch(promptText, baseSpec = {}) {
     || existingCols[0]?.collectionName
     || null;
 
-  // Detect "thêm trường <fieldName>" / "add field <fieldName>"
-  const fieldMatches = [
-    ...raw.matchAll(/(?:thêm|bổ\s+sung|add)\s+(?:trường|cột|field)\s+([a-z][a-zA-Z0-9_]{1,48})/gi),
-  ];
-  if (fieldMatches.length && matchedCol) {
-    let fieldType = 'string';
-    if (/\b(integer|so nguyen)\b/.test(n)) fieldType = 'integer';
-    else if (/\b(float|so thuc|tien|amount|price|discount)\b/.test(n)) fieldType = 'float';
-    else if (/\b(boolean|co\/khong|checkbox)\b/.test(n)) fieldType = 'boolean';
-    else if (/\b(datetime|ngay gio)\b/.test(n)) fieldType = 'datetime';
-    else if (/\b(date|ngay)\b/.test(n)) fieldType = 'date';
-    else if (/\b(text|van ban|mo ta|ghi chu)\b/.test(n)) fieldType = 'text';
-    else if (/\b(json)\b/.test(n)) fieldType = 'json';
-    patch.addFields = fieldMatches.map((m) => ({
-      collectionName: matchedCol,
-      name: m[1].trim(),
-      type: fieldType,
-      title: m[1].trim(),
-    }));
-  } else if (/(?:them|bo\s+sung|add)\s+(?:truong|cot|field)\s+([a-z][a-zA-Z0-9_]{1,48})/i.test(n) && matchedCol) {
-    const m = n.match(/(?:them|bo\s+sung|add)\s+(?:truong|cot|field)\s+([a-z][a-zA-Z0-9_]{1,48})/i);
-    if (m?.[1]) {
-      patch.addFields = [{ collectionName: matchedCol, name: m[1].trim(), type: 'string', title: m[1].trim() }];
+  // 1. Detect single or multi-field "thêm (các) trường/cột/field ..." with type & constraints
+  const clauseBoundaryRe = /\b(?:liên\s+kết|lien\s+ket|quan\s+hệ|quan\s+he|belongsTo|ẩn|an\s+trường|ngừng|xóa\s+khối|gỡ\s+khối|sửa\s+trường|cập\s+nhật\s+trường|đổi\s+theme|thêm\s+vai\s+trò|gắn\s+khối|thêm\s+khối)\b|;|\n/i;
+  const multiFieldLead = raw.match(/(?:thêm|bổ\s+sung|add)\s+(?:các\s+)?(?:trường|cột|field)s?\s+([\s\S]+)/i);
+  if (multiFieldLead && matchedCol) {
+    const bodyUntilBoundary = multiFieldLead[1].split(clauseBoundaryRe)[0] || '';
+    const segments = bodyUntilBoundary
+      .split(/\s*(?:,|\bvà\b|\band\b)\s*/i)
+      .map((s) => s.trim())
+      .filter((s) => /^[a-z][a-zA-Z0-9_]{1,48}\b/.test(s));
+    const parsedFields = segments.map((seg) => inferFieldDefFromSegment(seg, matchedCol)).filter(Boolean);
+    if (parsedFields.length) {
+      patch.addFields = parsedFields;
+    }
+  }
+  if (!patch.addFields && matchedCol) {
+    const fieldMatches = [
+      ...raw.matchAll(/(?:thêm|bổ\s+sung|add)\s+(?:trường|cột|field)\s+([a-z][a-zA-Z0-9_]{1,48})/gi),
+    ];
+    if (fieldMatches.length) {
+      patch.addFields = fieldMatches.map((m) => inferFieldDefFromSegment(m[1], matchedCol)).filter(Boolean);
+    } else if (/(?:them|bo\s+sung|add)\s+(?:truong|cot|field)\s+([a-z][a-zA-Z0-9_]{1,48})/i.test(n)) {
+      const m = n.match(/(?:them|bo\s+sung|add)\s+(?:truong|cot|field)\s+([a-z][a-zA-Z0-9_]{1,48})/i);
+      if (m?.[1]) patch.addFields = [{ collectionName: matchedCol, name: m[1].trim(), type: 'string', title: m[1].trim() }];
     }
   }
 
-  // Detect adding BI chart / Kanban / WebGIS block
+  // 2. Detect belongsTo relation additions
+  const relMatches = [
+    ...raw.matchAll(/(?:liên\s+kết|quan\s+hệ|belongsTo)\s+(?:tới\s+|đến\s+|to\s+)?(?:belongsTo\s+)?(latticeCustom[A-Z][A-Za-z0-9]{1,40}|[a-z][a-zA-Z0-9_]{1,48})/gi),
+  ];
+  if (relMatches.length && matchedCol) {
+    patch.addRelations = relMatches.map((m) => {
+      const target = m[1].trim();
+      const baseSlug = target.replace(/^latticeCustom/, '');
+      const fieldName = baseSlug ? `${baseSlug[0].toLowerCase()}${baseSlug.slice(1)}` : 'relatedItem';
+      return {
+        collectionName: matchedCol,
+        name: fieldName,
+        type: 'belongsTo',
+        target,
+        title: target,
+      };
+    });
+  }
+
+  // 3. Detect updateFields & deprecateFields
+  const updateMatches = [...raw.matchAll(/(?:sửa|cập\s+nhật)\s+(?:trường|cột|field)\s+([a-z][a-zA-Z0-9_]{1,48})([^,.;\n]*)/gi)];
+  if (updateMatches.length && matchedCol) {
+    patch.updateFields = updateMatches.map((m) => {
+      const name = m[1].trim();
+      const rest = String(m[2] || '').trim();
+      const titleM = rest.match(/(?:tiêu\s+đề|nhãn|title)\s*[:=]?\s*["']?([^"']+)["']?/i);
+      return {
+        collectionName: matchedCol,
+        name,
+        ...(titleM?.[1] ? { title: titleM[1].trim() } : {}),
+        ...(/\b(bắt\s+buộc|required)\b/i.test(rest) ? { required: true } : {}),
+      };
+    });
+  }
+  const depMatches = [...raw.matchAll(/(?:ẩn|ngừng\s+dùng|bỏ)\s+(?:trường|cột|field)\s+([a-z][a-zA-Z0-9_]{1,48})/gi)];
+  if (depMatches.length) {
+    patch.deprecateFields = depMatches.map((m) => m[1].trim());
+  }
+
+  // 4. Detect adding BI chart / Kanban / WebGIS / WMS / RecordWorkbench / Creative / KPI blocks
+  const addBlocks = [];
   if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:bi\s+chart|bieu\s+do\s+bi|dxosbichartblockmodel)/i.test(n)) {
-    const colForBlock = matchedCol || 'latticeOrders';
-    patch.addBlocks = [{
+    addBlocks.push({
       blockUse: 'DxosBiChartBlockModel',
       title: 'Phân tích BI',
-      collection: colForBlock,
+      collection: matchedCol || 'latticeOrders',
       chartType: n.includes('pie') || n.includes('tron') ? 'pie' : (n.includes('line') || n.includes('duong') ? 'line' : 'bar'),
       groupBy: 'status',
       metricOp: 'count',
-    }];
-  } else if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:kanban|dxoskanbanscheduleblockmodel)/i.test(n) && matchedCol) {
-    patch.addBlocks = [{
+    });
+  }
+  if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:kanban|dxoskanbanscheduleblockmodel)/i.test(n) && matchedCol) {
+    addBlocks.push({
       blockUse: 'DxosKanbanScheduleBlockModel',
       title: 'Bảng Kanban',
       collection: matchedCol,
       statusField: 'status',
-    }];
-  } else if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:webgis|ban\s+do|dxoswebgisblockmodel)/i.test(n) && matchedCol) {
-    patch.addBlocks = [{
+    });
+  }
+  if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:webgis|ban\s+do|dxoswebgisblockmodel)/i.test(n) && matchedCol) {
+    addBlocks.push({
       blockUse: 'DxosWebGisBlockModel',
       title: 'Bản đồ WebGIS',
       collection: matchedCol,
-    }];
+    });
+  }
+  if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:wms|fefo|dxoswmsopsblockmodel)/i.test(n)) {
+    addBlocks.push({
+      blockUse: 'DxosWmsOpsBlockModel',
+      title: 'Vận hành Kho WMS FEFO',
+      collection: matchedCol || 'latticeStockLots',
+    });
+  }
+  if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:workbench|dxosrecordworkbenchblockmodel)/i.test(n) && matchedCol) {
+    addBlocks.push({
+      blockUse: 'DxosRecordWorkbenchBlockModel',
+      title: 'Bàn làm việc Bản ghi',
+      collection: matchedCol,
+    });
+  }
+  if (/(?:them|gan|bo\s+sung)\s+(?:khoi|block)?[^\n]{0,40}(?:creative|buong dieu hanh|dxoscreativestudioblockmodel)/i.test(n) && matchedCol) {
+    addBlocks.push({
+      blockUse: 'DxosCreativeStudioBlockModel',
+      title: 'Buồng Điều hành Sáng tạo',
+      collection: matchedCol,
+    });
+  }
+  if (addBlocks.length) patch.addBlocks = addBlocks;
+
+  // 5. Detect removeBlocks
+  const rmMatches = [...raw.matchAll(/(?:xóa|gỡ)\s+(?:khối|block)\s+([^,.;\n]+)/gi)];
+  if (rmMatches.length) {
+    patch.removeBlocks = rmMatches.map((m) => m[1].trim()).filter(Boolean);
+  }
+
+  // 6. Detect addRoles & creativeTheme
+  const roleMatches = [...raw.matchAll(/thêm\s+vai\s+trò\s+([^,.;\n]+)/gi)];
+  if (roleMatches.length) {
+    patch.addRoles = roleMatches.map((m) => {
+      const roleTitle = m[1].trim();
+      const slug = stripDiacriticsSimple(roleTitle).toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+      return { roleName: `ldx_${slug || 'custom'}`, roleTitle };
+    });
+  }
+  const themeMatch = raw.match(/(?:đổi|chuyển)\s+(?:theme|giao\s+diện)\s+(?:sang\s+)?(industrial-cockpit|emerald-ops|amber-alert|royal-indigo|clean-light)/i);
+  if (themeMatch?.[1]) {
+    patch.creativeTheme = themeMatch[1].toLowerCase();
   }
 
   return patch;

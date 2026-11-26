@@ -499,7 +499,7 @@ function createSchemaBuilderTools(deps) {
           if (args.dryRun) {
             return { dryRun: true, action, blockUid: args.blockUid, use: meta.use, beforeProps: meta.props, afterProps: nextConfig };
           }
-          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: `Before updateBlock ${args.blockUid}`, createdByUsername: actor.username }, val);
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: `Before updateBlock ${args.blockUid}`, createdByUsername: actor.username, organizationId: actor.organizationId }, val);
           if (typeof flowModelsRepo.updateSingleNode === 'function') {
             await flowModelsRepo.updateSingleNode({
               uid: args.blockUid,
@@ -518,7 +518,7 @@ function createSchemaBuilderTools(deps) {
           if (!grid || !flowModelsRepo) throw failTool('PAGE_GRID_NOT_FOUND', 404, `Không tìm thấy grid trên portal "${args.portalSlug}".`);
           const nextLayout = computeMultiColumnGrid(args.rowsLayout, failTool);
           if (args.dryRun) return { dryRun: true, action, portalSlug: args.portalSlug, nextLayout };
-          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: 'Before setGridLayout', createdByUsername: actor.username }, val);
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: 'Before setGridLayout', createdByUsername: actor.username, organizationId: actor.organizationId }, val);
           if (hasRes(ctx, 'flowSurfaces')) {
             try {
               await invokeResourceAction(ctx, 'flowSurfaces', 'setLayout', { values: { target: { uid: grid.uid }, ...nextLayout } });
@@ -543,7 +543,7 @@ function createSchemaBuilderTools(deps) {
           }
           const payload = args.surfacePayload && typeof args.surfacePayload === 'object' ? args.surfacePayload : {};
           if (args.dryRun) return { dryRun: true, action, blockUid: args.blockUid, surfaceAction: args.surfaceAction, surfacePayload: payload };
-          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: `Before ${args.surfaceAction} on ${args.blockUid}`, createdByUsername: actor.username }, val);
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: `Before ${args.surfaceAction} on ${args.blockUid}`, createdByUsername: actor.username, organizationId: actor.organizationId }, val);
           const result = await invokeResourceAction(ctx, 'flowSurfaces', args.surfaceAction, {
             values: { target: { uid: args.blockUid }, ...payload },
           });
@@ -564,7 +564,7 @@ function createSchemaBuilderTools(deps) {
             nextOrder = ordered.filter((u) => u !== args.blockUid);
           }
           if (args.dryRun) return { dryRun: true, action, portalSlug: args.portalSlug, beforeOrder: ordered, afterOrder: nextOrder };
-          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: `Before ${action}`, createdByUsername: actor.username }, val);
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: `Before ${action}`, createdByUsername: actor.username, organizationId: actor.organizationId }, val);
           const nextLayout = normalizeGridState(grid, nextOrder);
           await updateGridLayout(flowModelsRepo, grid, nextLayout);
           if (action === 'removeBlock') {
@@ -683,7 +683,7 @@ function createSchemaBuilderTools(deps) {
           return { dryRun: true, portalSlug: args.portalSlug, blockUse: args.blockUse, nativeType, title, targetGridUid: resolved.grid?.uid || null, previewBlueprint: blueprint };
         }
         if (resolved.grid?.uid) {
-          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, note: `Before addBlock ${args.blockUse}`, createdByUsername: actor.username }, val);
+          await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, note: `Before addBlock ${args.blockUse}`, createdByUsername: actor.username, organizationId: actor.organizationId }, val);
           if (args.blockUse.startsWith('Dxos') && resolved.flowModelsRepo?.upsertModel) {
             const blockUid = `dxos-ai-${args.portalSlug}-${Date.now().toString(36)}`;
             const cfg = {

@@ -178,6 +178,41 @@ function formatMetricEntries(metrics) {
   }));
 }
 
+function formatAuditTimeGmt7(rawTs) {
+  if (!rawTs) return '—';
+  const d = new Date(rawTs);
+  if (Number.isNaN(d.getTime())) return String(rawTs);
+  try {
+    return new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).format(d);
+  } catch {
+    return d.toISOString();
+  }
+}
+
+function formatBuildWarningsText(d) {
+  const parts = [];
+  if (Array.isArray(d?.warnings) && d.warnings.length) {
+    parts.push(...d.warnings);
+  }
+  if (Array.isArray(d?.workflowWarnings) && d.workflowWarnings.length) {
+    parts.push(...d.workflowWarnings.map((w) => (typeof w === 'string' ? w : `${w.workflowName || 'workflow'}: ${w.warning || ''}`)));
+  }
+  const failed = Array.isArray(d?.verification?.failedChecks) ? d.verification.failedChecks : [];
+  if (failed.length) {
+    parts.push(`Checks lỗi: ${failed.map((f) => `${f.type || 'check'}:${f.target || f.detail || 'fail'}`).join(', ')}`);
+  }
+  return parts.filter(Boolean).join(' · ');
+}
+
 function parseToolModeMap(input) {
   const out = {};
   if (!input || typeof input !== 'object') return out;
@@ -390,6 +425,24 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [quickStartPrompt, setQuickStartPrompt] = React.useState('');
     const [quickStartPlan, setQuickStartPlan] = React.useState(null);
     const [quickStartBusy, setQuickStartBusy] = React.useState(false);
+    const [quickStartOpen, setQuickStartOpen] = React.useState(false);
+    const [confirmDialog, setConfirmDialog] = React.useState(null);
+    const [teardownKeepData, setTeardownKeepData] = React.useState(true);
+    const [mcpCatalog, setMcpCatalog] = React.useState(null);
+    const [mcpLoading, setMcpLoading] = React.useState(false);
+    const [mcpEndpointChecks, setMcpEndpointChecks] = React.useState({});
+    const [mcpSearch, setMcpSearch] = React.useState('');
+    const [auditChannelFilter, setAuditChannelFilter] = React.useState('all');
+    const [auditPage, setAuditPage] = React.useState(1);
+    const [auditPageSize, setAuditPageSize] = React.useState(20);
+    const [auditTotal, setAuditTotal] = React.useState(0);
+    const [quotaPolicyDraft, setQuotaPolicyDraft] = React.useState({
+      orgDailyCalls: '5000',
+      userDailyCalls: '500',
+      orgDailyTokens: '5000000',
+      orgDailyUsd: '50',
+    });
+    const [quotaSaveBusy, setQuotaSaveBusy] = React.useState(false);
 
     const selectDraft = (next) => {
       const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app });
@@ -430,9 +483,17 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           api.request({ url: 'dxosAi:checkLlmHealth', method: 'get', skipNotify: true }),
         ]);
         let loadedTopology = null;
+        const partialErrors = [];
         if (tRes.status === 'fulfilled') {
           loadedTopology = tRes.value?.data?.data || tRes.value?.data || null;
           setTopology(loadedTopology);
+        } else {
+          const st = Number(tRes.reason?.response?.status ?? tRes.reason?.status);
+          if (st === 403 || st === 401) {
+            setForbidden(true);
+            return;
+          }
+          partialErrors.push(tRes.reason?.response?.data?.errors?.[0]?.message || tRes.reason?.message || 'Topology');
         }
         if (hRes.status === 'fulfilled') {
           const hData = hRes.value?.data?.data || hRes.value?.data || null;
@@ -459,7 +520,14 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         }
         if (aRes.status === 'fulfilled') {
           const data = aRes.value?.data?.data || aRes.value?.data || {};
-          setAuditItems(Array.isArray(data.items) ? data.items : []);
+          const items = Array.isArray(data.items) ? data.items : [];
+          setAuditItems(items);
+          setAuditTotal(Number(data.total ?? items.length) || 0);
+        } else {
+          partialErrors.push(aRes.reason?.response?.data?.errors?.[0]?.message || aRes.reason?.message || 'Audit logs');
+        }
+        if (partialErrors.length) {
+          setNotice({ type: 'error', text: `Một số dữ liệu studio không tải được: ${partialErrors.join('; ')}` });
         }
       } catch (err) {
         const status = Number(err?.response?.status ?? err?.status);
@@ -486,7 +554,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         }
         const qRes = await api.request({ url: 'dxosAi:quotaSummary', method: 'get', params: { organizationId: targetOrg } });
         if (reqSeq !== quotaReqSeqRef.current) return;
-        setQuotaSummary(qRes?.data?.data || qRes?.data || null);
+        const qData = qRes?.data?.data || qRes?.data || null;
+        setQuotaSummary(qData);
+        if (qData?.limits) {
+          setQuotaPolicyDraft({
+            orgDailyCalls: String(qData.limits.orgDailyCalls ?? 5000),
+            userDailyCalls: String(qData.limits.userDailyCalls ?? 500),
+            orgDailyTokens: String(qData.limits.orgDailyTokens ?? 5000000),
+            orgDailyUsd: String(qData.limits.orgDailyUsd ?? 50),
+          });
+        }
       } catch (err) {
         if (reqSeq !== quotaReqSeqRef.current) return;
         const status = Number(err?.response?.status ?? err?.status);
@@ -573,6 +650,120 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
     }, [api, clientDenied, quotaOrg, resolvedBuiltAppsDefaultOrg]);
 
+    const loadMcpCatalog = React.useCallback(async () => {
+      if (clientDenied || !api?.request) return;
+      setMcpLoading(true);
+      try {
+        const res = await api.request({ url: 'dxosAi:mcpCatalog', method: 'get', skipNotify: true });
+        setMcpCatalog(res?.data?.data || res?.data || null);
+      } catch (err) {
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được danh mục MCP & A2A.' });
+      } finally {
+        setMcpLoading(false);
+      }
+    }, [api, clientDenied]);
+
+    const handleTestMcpEndpoint = async (endpointType) => {
+      if (clientDenied || !api?.request) return;
+      const key = endpointType === 'itot' ? 'itot' : 'enterprise';
+      setMcpEndpointChecks((prev) => ({ ...prev, [key]: { testing: true } }));
+      try {
+        const res = await api.request({
+          url: 'dxosAi:testMcpEndpoint',
+          method: 'post',
+          data: { endpointType: key },
+          skipNotify: true,
+        });
+        const d = res?.data?.data || res?.data || {};
+        setMcpEndpointChecks((prev) => ({ ...prev, [key]: { testing: false, ...d } }));
+        setNotice({
+          type: d.ok ? 'ok' : 'error',
+          text: d.ok
+            ? `MCP (${key}) sẵn sàng (${d.latencyMs || 0}ms · ${d.protocolVersion || '2025-03-26'}).`
+            : `MCP (${key}) kiểm tra thất bại: ${d.error || d.status || 'unreachable'}`,
+        });
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Kiểm tra endpoint MCP thất bại.';
+        setMcpEndpointChecks((prev) => ({ ...prev, [key]: { testing: false, ok: false, error: msg } }));
+        setNotice({ type: 'error', text: msg });
+      }
+    };
+
+    const loadAuditLogsPage = React.useCallback(async (opts = {}) => {
+      if (clientDenied || !api?.request) return;
+      const nextPage = Math.max(1, Number(opts.page ?? auditPage) || 1);
+      const nextSize = Math.min(200, Math.max(1, Number(opts.pageSize ?? auditPageSize) || 20));
+      const nextChannel = opts.channel !== undefined ? opts.channel : auditChannelFilter;
+      const nextStatus = opts.status !== undefined ? opts.status : auditStatusFilter;
+      const nextAgent = opts.aiEmployee !== undefined ? opts.aiEmployee : auditAgentFilter;
+      const nextQ = opts.q !== undefined ? opts.q : auditSearch;
+      try {
+        const res = await api.request({
+          url: 'dxosAi:auditLogs',
+          method: 'get',
+          params: {
+            page: nextPage,
+            pageSize: nextSize,
+            ...(nextChannel && nextChannel !== 'all' ? { channel: nextChannel } : {}),
+            ...(nextStatus && nextStatus !== 'all' ? { status: nextStatus } : {}),
+            ...(nextAgent && nextAgent !== 'all' ? { aiEmployee: nextAgent } : {}),
+            ...(String(nextQ || '').trim() ? { q: String(nextQ).trim() } : {}),
+          },
+        });
+        const data = res?.data?.data || res?.data || {};
+        const items = Array.isArray(data.items) ? data.items : [];
+        setAuditItems(items);
+        setAuditTotal(Number(data.total ?? items.length) || 0);
+        setAuditPage(Number(data.page || nextPage));
+        setAuditPageSize(Number(data.pageSize || nextSize));
+      } catch (err) {
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được nhật ký kiểm toán AI.' });
+      }
+    }, [api, clientDenied, auditPage, auditPageSize, auditChannelFilter, auditStatusFilter, auditAgentFilter, auditSearch]);
+
+    const handleSaveQuotaPolicy = async (e) => {
+      if (e?.preventDefault) e.preventDefault();
+      if (!api?.request || quotaSaveBusy) return;
+      const targetOrg = String(quotaOrg || resolvedBuiltAppsDefaultOrg || '').trim();
+      if (!targetOrg) {
+        setNotice({ type: 'error', text: 'Vui lòng chọn tổ chức trước khi lưu chính sách hạn mức AI.' });
+        return;
+      }
+      const orgDailyCalls = Number(quotaPolicyDraft.orgDailyCalls);
+      const userDailyCalls = Number(quotaPolicyDraft.userDailyCalls);
+      const orgDailyTokens = Number(quotaPolicyDraft.orgDailyTokens);
+      const orgDailyUsd = Number(quotaPolicyDraft.orgDailyUsd);
+      if ([orgDailyCalls, userDailyCalls, orgDailyTokens, orgDailyUsd].some((n) => !Number.isFinite(n) || n <= 0)) {
+        setNotice({ type: 'error', text: 'Các giá trị hạn mức AI phải là số dương hợp lệ.' });
+        return;
+      }
+      setQuotaSaveBusy(true);
+      setNotice(null);
+      try {
+        const res = await api.request({
+          url: 'dxosAi:saveQuotaPolicy',
+          method: 'post',
+          data: {
+            organizationId: targetOrg,
+            orgDailyCalls,
+            userDailyCalls,
+            orgDailyTokens,
+            orgDailyUsd,
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setNotice({ type: 'ok', text: `Đã lưu chính sách hạn mức AI cho tổ chức "${targetOrg}".` });
+        if (d.limits) {
+          setQuotaSummary((prev) => (prev ? { ...prev, limits: d.limits } : prev));
+        }
+        await loadQuota(targetOrg);
+      } catch (err) {
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Lưu chính sách hạn mức thất bại.' });
+      } finally {
+        setQuotaSaveBusy(false);
+      }
+    };
+
     React.useEffect(() => {
       loadAll();
     }, [loadAll]);
@@ -586,6 +777,12 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       }
       if (tab === 'built-apps' && !clientDenied && !forbidden) {
         loadBuiltApps();
+      }
+      if (tab === 'mcp' && !clientDenied && !forbidden) {
+        loadMcpCatalog();
+      }
+      if (tab === 'audit' && !clientDenied && !forbidden) {
+        loadAuditLogsPage({ page: auditPage, pageSize: auditPageSize });
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [tab, quotaOrg, approvalStatusFilter, clientDenied, forbidden]);
@@ -762,6 +959,15 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const handleSaveProfile = async (e) => {
       if (e?.preventDefault) e.preventDefault();
       if (!api?.request) return;
+      const slug = String(draft?.username || '').trim();
+      if (!/^[a-z0-9][a-z0-9_-]{1,62}$/.test(slug)) {
+        setNotice({ type: 'error', text: 'Slug định danh (username) phải dài 2-63 ký tự, chỉ gồm chữ thường, số, "_" hoặc "-".' });
+        return;
+      }
+      if (!String(draft?.nickname || '').trim()) {
+        setNotice({ type: 'error', text: 'Vui lòng nhập Tên hiển thị (nickname) cho nhân sự AI.' });
+        return;
+      }
       let mcpServers = [];
       let quickPrompts = [];
       try {
@@ -824,9 +1030,10 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           },
         });
         const d = res?.data?.data || res?.data || {};
+        const warnTxt = formatBuildWarningsText(d);
         setNotice({
           type: d.ok === false ? 'error' : 'ok',
-          text: `Đã dựng lại ứng dụng "${appItem.appKey}" lên phiên bản v${d.appVersion || ((Number(appItem.version) || 1) + 1)} (${d.ok === false ? 'NEEDS_REVIEW' : 'PASS'}).`,
+          text: `Đã dựng lại ứng dụng "${appItem.appKey}" lên phiên bản v${d.appVersion || ((Number(appItem.version) || 1) + 1)} (${d.ok === false ? 'NEEDS_REVIEW' : 'PASS'}).${warnTxt ? ` Cảnh báo: ${warnTxt}` : ''}`,
         });
         await loadBuiltApps();
       } catch (err) {
@@ -1045,9 +1252,10 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         }
         setBuiltAppPlanOpenKey(null);
         setBuiltAppPlanResults((prev) => ({ ...prev, [appItem.appKey]: null }));
+        const warnTxt = formatBuildWarningsText(d);
         setNotice({
           type: d.ok === false ? 'error' : 'ok',
-          text: `Đã cập nhật "${appItem.appKey}" lên phiên bản v${d.appVersion || ((Number(appItem.version) || 1) + 1)}.`,
+          text: `Đã cập nhật "${appItem.appKey}" lên phiên bản v${d.appVersion || ((Number(appItem.version) || 1) + 1)}.${warnTxt ? ` Cảnh báo: ${warnTxt}` : ''}`,
         });
         await loadBuiltApps();
       } catch (err) {
@@ -1101,9 +1309,10 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           },
         });
         const d = res?.data?.data || res?.data || {};
+        const warnTxt = formatBuildWarningsText(d);
         setNotice({
           type: d.ok === false ? 'error' : 'ok',
-          text: `Đã hoàn tác "${appItem.appKey}" về cấu hình v${d.restoredFromVersion || targetVersion} (phiên bản mới v${d.appVersion || ''}).`,
+          text: `Đã hoàn tác "${appItem.appKey}" về cấu hình v${d.restoredFromVersion || targetVersion} (phiên bản mới v${d.appVersion || ''}).${warnTxt ? ` Cảnh báo: ${warnTxt}` : ''}`,
         });
         await loadBuiltApps();
         const verRes = await api.request({
@@ -1179,11 +1388,13 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           },
         });
         const d = res?.data?.data || res?.data || {};
+        const warnTxt = formatBuildWarningsText(d);
         setQuickStartPlan(null);
         setQuickStartPrompt('');
+        setQuickStartOpen(false);
         setNotice({
           type: d.ok === false ? 'error' : 'ok',
-          text: `Đã dựng ứng dụng "${d.appKey || 'mới'}" (${(d.collections || []).length} bảng, cổng /p/${d.portalSlug || 'services'}).`,
+          text: `Đã dựng ứng dụng "${d.appKey || 'mới'}" (${(d.collections || []).length} bảng, cổng /p/${d.portalSlug || 'services'}).${warnTxt ? ` Cảnh báo: ${warnTxt}` : ''}`,
         });
         await loadBuiltApps();
       } catch (err) {
@@ -1211,18 +1422,18 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         id: 'build-eval',
         title: 'Xây dựng & Đánh giá AI',
         items: [
-          ['built-apps', '7. Ứng dụng Đã dựng (Built Apps)'],
-          ['audit', '4. Nhật ký Kiểm toán'],
-          ['traces', '8. Agent Trace Waterfall'],
-          ['eval-lab', '9. Eval Lab'],
+          ['built-apps', '4. Ứng dụng Đã dựng (Built Apps)'],
+          ['audit', '5. Nhật ký Kiểm toán'],
+          ['traces', '6. Agent Trace Waterfall'],
+          ['eval-lab', '7. Eval Lab'],
         ],
       },
       {
         id: 'governance',
         title: 'Kiểm soát & Phê duyệt',
         items: [
-          ['hitl', '6. Duyệt AI (HITL)'],
-          ['quota', '5. Hạn mức & Chi phí AI'],
+          ['hitl', '8. Duyệt AI (HITL)'],
+          ['quota', '9. Hạn mức & Chi phí AI'],
         ],
       },
     ];
@@ -1461,7 +1672,18 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
               h('button', { type: 'button', onClick: () => selectDraft(p), style: btnStyle(false) }, 'Chỉnh sửa'),
               h('button', { type: 'button', onClick: () => selectDraft(buildProfileDraftFromStarter(p)), style: btnStyle(false) }, 'Nhân bản'),
-              h('button', { type: 'button', onClick: () => handleDeleteProfile(p.username), style: btnStyle(false, true) }, 'Xóa'),
+              h('button', {
+                type: 'button',
+                'data-testid': `dxos-profile-delete-${p.username}`,
+                onClick: () => setConfirmDialog({
+                  kind: 'deleteProfile',
+                  username: p.username,
+                  title: `Xóa nhân sự AI "${p.username}"?`,
+                  message: 'Hành động này sẽ xóa cấu hình nhân sự AI trong DX-OS và đồng bộ gỡ khỏi NocoBase aiEmployees.',
+                  confirmLabel: 'Xác nhận Xóa',
+                }),
+                style: btnStyle(false, true),
+              }, 'Xóa'),
             ),
           )),
         ),
@@ -1473,11 +1695,15 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           h('strong', { style: { fontSize: 15 } }, `Biên tập Nhân sự AI: ${draft.username || '(tạo mới)'}`),
           h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
             h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Slug định danh (username)',
-              h('input', { value: draft.username, onChange: (e) => setDraft({ ...draft, username: e.target.value }), placeholder: 'vd: hr-ops-ai', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
+              h('input', { 'data-testid': 'dxos-profile-username-input', value: draft.username, onChange: (e) => setDraft({ ...draft, username: e.target.value }), placeholder: 'vd: hr-ops-ai', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
             h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Tên hiển thị (nickname)',
-              h('input', { value: draft.nickname, onChange: (e) => setDraft({ ...draft, nickname: e.target.value }), placeholder: 'Trợ lý Nhân sự AI', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
+              h('input', { 'data-testid': 'dxos-profile-nickname-input', value: draft.nickname, onChange: (e) => setDraft({ ...draft, nickname: e.target.value }), placeholder: 'Trợ lý Nhân sự AI', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
             h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Chức danh / Phân hệ',
               h('input', { value: draft.position, onChange: (e) => setDraft({ ...draft, position: e.target.value }), style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
+            h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Tổ chức (organizationId)',
+              h('input', { 'data-testid': 'dxos-profile-org-input', value: draft.organizationId || '', onChange: (e) => setDraft({ ...draft, organizationId: e.target.value }), placeholder: 'vd: ctu-main', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
+            h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Phạm vi phòng ban (departmentScope)',
+              h('input', { 'data-testid': 'dxos-profile-department-input', value: draft.departmentScope || '', onChange: (e) => setDraft({ ...draft, departmentScope: e.target.value }), placeholder: 'vd: general, hr, it-ot', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
             h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'LLM Service / Model',
               h('select', {
                 'data-testid': 'dxos-model-preset-select',
@@ -1522,6 +1748,34 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                 style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' },
               }),
             ),
+          ),
+          h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Lời chào mặc định (Greeting)',
+            h('input', { 'data-testid': 'dxos-profile-greeting-input', value: draft.greeting || '', onChange: (e) => setDraft({ ...draft, greeting: e.target.value }), placeholder: 'Xin chào! Tôi là trợ lý AI DX-OS...', style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
+          h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 16, fontSize: 12, padding: '6px 10px', borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0' } },
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
+              h('input', {
+                type: 'checkbox',
+                'data-testid': 'dxos-profile-enabled-checkbox',
+                checked: draft.enabled !== false,
+                onChange: (e) => setDraft({ ...draft, enabled: Boolean(e.target.checked) }),
+              }),
+              'Kích hoạt nhân sự AI (enabled)'),
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
+              h('input', {
+                type: 'checkbox',
+                'data-testid': 'dxos-profile-admin-builder-checkbox',
+                checked: Boolean(draft.isAdminBuilder),
+                onChange: (e) => setDraft({ ...draft, isAdminBuilder: Boolean(e.target.checked) }),
+              }),
+              'Admin Builder (chỉ quản trị viên)'),
+            h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' } },
+              h('input', {
+                type: 'checkbox',
+                'data-testid': 'dxos-profile-subagent-checkbox',
+                checked: Boolean(draft.allowSubAgentDispatch),
+                onChange: (e) => setDraft({ ...draft, allowSubAgentDispatch: Boolean(e.target.checked) }),
+              }),
+              'Cho phép điều phối Sub-Agent'),
           ),
           h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'SOP & System Prompt',
             h('textarea', { rows: 3, value: draft.systemPrompt, onChange: (e) => setDraft({ ...draft, systemPrompt: e.target.value }), style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1' } })),
@@ -1578,37 +1832,216 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         ),
       ) : null,
 
-      tab === 'mcp' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
-        h('h3', { style: { margin: 0, fontSize: 16 } }, 'Cổng Streamable HTTP MCP 2 Chiều (JSON-RPC 2.0 + User-Context Bearer)'),
-        h('div', { style: { fontSize: 13, color: '#334155', display: 'grid', gap: 6 } },
-          h('div', null, h('strong', null, 'Inbound Enterprise MCP Gateway: '), h('code', null, '/api/dxos-mcp'), ' — phơi toàn bộ công cụ lọc theo vai trò JWT (Admin Builder ẩn hoàn toàn với non-admin).'),
-          h('div', null, h('strong', null, 'IT/OT MCP Endpoint (Outbound loop for AI Employees): '), h('code', null, '/api/dxos-mcp/it-ot'), ' — cung cấp telemetry Orion-LD, timeline sự cố, healthcheck stack & đồng bộ outbox/n8n (timeout 5000ms, degrade an toàn).'),
-          h('div', null, h('strong', null, 'MCP Resources: '), h('code', null, 'dxos://topology/planes'), ' và ', h('code', null, 'dxos://itot/health')),
-        ),
-      ) : null,
+      tab === 'mcp' ? (() => {
+        const mcpQ = String(mcpSearch || '').trim().toLowerCase();
+        const entTools = (mcpCatalog?.enterpriseTools || []).filter((t) => !mcpQ || `${t.name} ${t.description}`.toLowerCase().includes(mcpQ));
+        const itOtTools = (mcpCatalog?.itOtTools || []).filter((t) => !mcpQ || `${t.name} ${t.description}`.toLowerCase().includes(mcpQ));
+        const resources = mcpCatalog?.resources || [
+          { uri: 'dxos://topology/planes', name: 'LatticeDX 6-Plane Topology' },
+          { uri: 'dxos://itot/health', name: 'LatticeDX IT/OT Connector Health' },
+        ];
+        const templates = mcpCatalog?.resourceTemplates || [];
+        const prompts = mcpCatalog?.prompts || [];
+        const agentCard = mcpCatalog?.agentCard || null;
+        const entCheck = mcpEndpointChecks.enterprise || null;
+        const itOtCheck = mcpEndpointChecks.itot || null;
+        const snippetText = mcpCatalog?.configSnippet || JSON.stringify({
+          mcpServers: {
+            'latticedx-enterprise': {
+              transport: 'http',
+              url: `${typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://127.0.0.1:13015'}/api/dxos-mcp`,
+              headers: { Authorization: 'Bearer <YOUR_NOCOBASE_BEARER_TOKEN>' },
+            },
+            'latticedx-itot': {
+              transport: 'http',
+              url: `${typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://127.0.0.1:13015'}/api/dxos-mcp/it-ot`,
+              headers: { Authorization: 'Bearer <YOUR_NOCOBASE_BEARER_TOKEN>' },
+            },
+          },
+        }, null, 2);
+        return h('div', { 'data-testid': 'dxos-mcp-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 14 } },
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
+            h('div', null,
+              h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '3. Cổng Streamable HTTP MCP 2 Chiều & A2A Agent Card (JSON-RPC 2.0)'),
+              h('div', { style: { fontSize: 12, color: '#64748b' } },
+                `Enterprise Tools: ${(mcpCatalog?.enterpriseTools || []).length} · IT/OT Tools: ${(mcpCatalog?.itOtTools || []).length} · Resources: ${resources.length} · Prompts: ${prompts.length}${mcpLoading ? ' · Đang tải…' : ''}`),
+            ),
+            h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+              h('input', {
+                'data-testid': 'dxos-mcp-search-input',
+                value: mcpSearch,
+                onChange: (e) => setMcpSearch(e.target.value),
+                placeholder: 'Lọc công cụ MCP…',
+                style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12 },
+              }),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-mcp-refresh-btn',
+                onClick: loadMcpCatalog,
+                disabled: mcpLoading,
+                style: btnStyle(false),
+              }, mcpLoading ? 'Đang tải…' : 'Tải lại Catalog MCP'),
+            ),
+          ),
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 } },
+            h('div', { style: { padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 8 } },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                h('strong', { style: { fontSize: 13 } }, 'Inbound Enterprise MCP'),
+                entCheck ? h('span', { 'data-testid': 'dxos-mcp-enterprise-status', style: badgeStyle(entCheck.ok ? '#dcfce7' : '#fee2e2', entCheck.ok ? '#166534' : '#991b1b') },
+                  entCheck.testing ? 'Đang ping…' : (entCheck.ok ? `OK (${entCheck.latencyMs || 0}ms)` : `Lỗi: ${entCheck.error || entCheck.status}`)) : null,
+              ),
+              h('code', { style: { fontSize: 12 } }, mcpCatalog?.endpoints?.enterprise || '/api/dxos-mcp'),
+              h('div', { style: { fontSize: 12, color: '#475569' } }, 'Phơi toàn bộ công cụ lọc theo vai trò JWT (Admin Builder ẩn hoàn toàn với non-admin).'),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-mcp-ping-enterprise-btn',
+                onClick: () => handleTestMcpEndpoint('enterprise'),
+                disabled: Boolean(entCheck?.testing),
+                style: btnStyle(true),
+              }, entCheck?.testing ? 'Đang kiểm tra…' : 'Kiểm tra /api/dxos-mcp'),
+            ),
+            h('div', { style: { padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 8 } },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+                h('strong', { style: { fontSize: 13 } }, 'IT/OT Outbound Loop MCP'),
+                itOtCheck ? h('span', { 'data-testid': 'dxos-mcp-itot-status', style: badgeStyle(itOtCheck.ok ? '#dcfce7' : '#fee2e2', itOtCheck.ok ? '#166534' : '#991b1b') },
+                  itOtCheck.testing ? 'Đang ping…' : (itOtCheck.ok ? `OK (${itOtCheck.latencyMs || 0}ms)` : `Lỗi: ${itOtCheck.error || itOtCheck.status}`)) : null,
+              ),
+              h('code', { style: { fontSize: 12 } }, mcpCatalog?.endpoints?.itot || '/api/dxos-mcp/it-ot'),
+              h('div', { style: { fontSize: 12, color: '#475569' } }, 'Telemetry Orion-LD, timeline sự cố, healthcheck stack & outbox/n8n (timeout 5000ms).'),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-mcp-ping-itot-btn',
+                onClick: () => handleTestMcpEndpoint('itot'),
+                disabled: Boolean(itOtCheck?.testing),
+                style: btnStyle(false),
+              }, itOtCheck?.testing ? 'Đang kiểm tra…' : 'Kiểm tra /api/dxos-mcp/it-ot'),
+            ),
+          ),
+          agentCard ? h('div', { 'data-testid': 'dxos-mcp-a2a-card', style: { padding: 12, borderRadius: 10, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 6, fontSize: 12 } },
+            h('strong', null, `A2A Agent Card: ${agentCard.name || 'LatticeDX'} (${mcpCatalog?.endpoints?.agentCard || '/.well-known/agent-card.json'} · ${mcpCatalog?.endpoints?.a2a || '/api/dxos-a2a'})`),
+            h('div', { style: { color: '#334155' } }, agentCard.description || ''),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6 } },
+              (agentCard.skills || []).map((sk) => h('span', { key: sk.id || sk.name, style: badgeStyle('#e0f2fe', '#075985') }, `${sk.name || sk.id}`))),
+          ) : null,
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12 } },
+            h('div', { style: { padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', display: 'grid', gap: 8 } },
+              h('strong', { style: { fontSize: 13 } }, `Công cụ Enterprise MCP (${entTools.length})`),
+              !entTools.length ? h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Không có công cụ khớp tìm kiếm.')
+                : h('div', { style: { display: 'grid', gap: 6, maxHeight: 260, overflowY: 'auto' } },
+                  entTools.map((t) => h('div', { key: t.name, style: { padding: 8, borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: 12 } },
+                    h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 6 } },
+                      h('code', { style: { fontWeight: 700 } }, t.name),
+                      h('span', { style: badgeStyle(t.adminOnly ? '#fef3c7' : '#dcfce7', t.adminOnly ? '#92400e' : '#166534') }, t.adminOnly ? 'Admin' : 'Unified'),
+                    ),
+                    h('div', { style: { color: '#475569', marginTop: 4 } }, t.description || ''),
+                  ))),
+            ),
+            h('div', { style: { padding: 12, borderRadius: 10, border: '1px solid #e2e8f0', display: 'grid', gap: 8 } },
+              h('strong', { style: { fontSize: 13 } }, `Công cụ IT/OT MCP (${itOtTools.length})`),
+              !itOtTools.length ? h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Không có công cụ IT/OT khớp tìm kiếm.')
+                : h('div', { style: { display: 'grid', gap: 6, maxHeight: 260, overflowY: 'auto' } },
+                  itOtTools.map((t) => h('div', { key: t.name, style: { padding: 8, borderRadius: 6, background: '#f8fafc', border: '1px solid #e2e8f0', fontSize: 12 } },
+                    h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: 6 } },
+                      h('code', { style: { fontWeight: 700 } }, t.name),
+                      h('span', { style: badgeStyle('#e0e7ff', '#3730a3') }, t.defaultPermission || 'ALLOW'),
+                    ),
+                    h('div', { style: { color: '#475569', marginTop: 4 } }, t.description || ''),
+                  ))),
+            ),
+          ),
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: 10, fontSize: 12 } },
+            h('div', { style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 4 } },
+              h('strong', null, `MCP Resources & Templates (${resources.length + templates.length})`),
+              resources.map((r) => h('div', { key: r.uri }, h('code', null, r.uri), ` — ${r.name || ''}`)),
+              templates.map((rt) => h('div', { key: rt.uriTemplate }, h('code', null, rt.uriTemplate), ` — ${rt.name || ''}`)),
+            ),
+            h('div', { style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 4 } },
+              h('strong', null, `MCP Prompts (${prompts.length})`),
+              prompts.length ? prompts.map((p) => h('div', { key: p.name }, h('code', null, p.name), ` — ${p.title || p.description || ''}`))
+                : h('div', { style: { color: '#64748b' } }, 'Chưa tải danh sách MCP Prompts.'),
+            ),
+          ),
+          h('div', { style: { display: 'grid', gap: 6 } },
+            h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+              h('strong', { style: { fontSize: 12 } }, 'Cấu hình MCP Client Mẫu (Bearer Placeholder — an toàn không lộ JWT)'),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-mcp-copy-snippet-btn',
+                onClick: async () => {
+                  try {
+                    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+                      await navigator.clipboard.writeText(snippetText);
+                      setNotice({ type: 'ok', text: 'Đã sao chép cấu hình MCP mẫu vào clipboard.' });
+                      return;
+                    }
+                  } catch {
+                    // Fall through to visible manual-copy notice
+                  }
+                  setNotice({ type: 'error', text: 'Trình duyệt không cho phép tự động sao chép — vui lòng bôi đen đoạn JSON bên dưới.' });
+                },
+                style: btnStyle(false),
+              }, 'Sao chép Snippet'),
+            ),
+            h('pre', {
+              'data-testid': 'dxos-mcp-config-snippet',
+              style: { margin: 0, padding: 10, borderRadius: 8, background: '#0f172a', color: '#e2e8f0', fontSize: 11, overflowX: 'auto' },
+            }, snippetText),
+          ),
+        );
+      })() : null,
 
       tab === 'audit' ? (() => {
         const agentChoices = [...new Set((auditItems || []).map((i) => String(i.aiEmployee || i.actorUsername || '').trim()).filter(Boolean))];
+        const channelChoices = [...new Set((auditItems || []).map((i) => String(i.channel || '').trim()).filter(Boolean))];
         const q = String(auditSearch || '').trim().toLowerCase();
         const filteredAuditItems = (auditItems || []).filter((item) => {
           if (auditStatusFilter !== 'all' && String(item.status || '').toLowerCase() !== auditStatusFilter) return false;
+          if (auditChannelFilter !== 'all' && String(item.channel || '').trim() !== auditChannelFilter) return false;
           const agentVal = String(item.aiEmployee || item.actorUsername || '').trim();
           if (auditAgentFilter !== 'all' && agentVal !== auditAgentFilter) return false;
           if (!q) return true;
           const hay = `${item.toolName || ''} ${item.channel || ''} ${item.actorUsername || ''} ${item.aiEmployee || ''} ${item.resultSummary || ''} ${item.errorCode || ''}`.toLowerCase();
           return hay.includes(q);
         });
+        const totalAudit = Math.max(auditTotal || 0, auditItems.length);
+        const totalPages = Math.max(1, Math.ceil(totalAudit / Math.max(1, auditPageSize)));
         return h('div', { 'data-testid': 'dxos-ai-audit-tab', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
           h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
-            h('h3', { style: { margin: 0, fontSize: 16 } }, `Nhật ký Kiểm toán Thực thi AI & MCP (${filteredAuditItems.length} / ${auditItems.length} bản ghi)`),
+            h('h3', { style: { margin: 0, fontSize: 16 } }, `5. Nhật ký Kiểm toán Thực thi AI & MCP (${filteredAuditItems.length} / ${totalAudit} bản ghi)`),
             h('div', { 'data-testid': 'dxos-audit-filter-bar', style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
               h('input', {
                 'data-testid': 'dxos-audit-search-input',
                 value: auditSearch,
                 onChange: (e) => setAuditSearch(e.target.value),
+                onKeyDown: (e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    loadAuditLogsPage({
+                      page: 1,
+                      pageSize: auditPageSize,
+                      channel: auditChannelFilter,
+                      status: auditStatusFilter,
+                      aiEmployee: auditAgentFilter,
+                      q: e.target.value,
+                    });
+                  }
+                },
                 placeholder: 'Tìm công cụ, tác nhân, tóm tắt…',
                 style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, minWidth: 210 },
               }),
+              h('select', {
+                'data-testid': 'dxos-audit-channel-filter',
+                value: auditChannelFilter,
+                onChange: (e) => {
+                  const v = e.target.value;
+                  setAuditChannelFilter(v);
+                  loadAuditLogsPage({ page: 1, channel: v });
+                },
+                style: { padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+              },
+                h('option', { value: 'all' }, 'Tất cả kênh'),
+                channelChoices.map((ch) => h('option', { key: ch, value: ch }, ch)),
+              ),
               h('select', {
                 'data-testid': 'dxos-audit-status-filter',
                 value: auditStatusFilter,
@@ -1630,6 +2063,25 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                 h('option', { value: 'all' }, 'Tất cả tác nhân'),
                 agentChoices.map((ag) => h('option', { key: ag, value: ag }, ag)),
               ),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-audit-apply-filter-btn',
+                onClick: () => loadAuditLogsPage({
+                  page: 1,
+                  pageSize: auditPageSize,
+                  channel: auditChannelFilter,
+                  status: auditStatusFilter,
+                  aiEmployee: auditAgentFilter,
+                  q: auditSearch,
+                }),
+                style: btnStyle(true),
+              }, 'Áp dụng lọc'),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-audit-refresh-btn',
+                onClick: () => loadAuditLogsPage({ page: auditPage, pageSize: auditPageSize }),
+                style: btnStyle(false),
+              }, 'Làm mới'),
             ),
           ),
           !filteredAuditItems.length
@@ -1639,6 +2091,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               h('table', { 'data-testid': 'dxos-audit-table', style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } },
                 h('thead', null,
                   h('tr', { style: { background: '#f8fafc', borderBottom: '1px solid #e2e8f0', textAlign: 'left' } },
+                    h('th', { style: { padding: '8px 10px' } }, 'Thời gian (GMT+7)'),
                     h('th', { style: { padding: '8px 10px' } }, 'Công cụ'),
                     h('th', { style: { padding: '8px 10px' } }, 'Kênh'),
                     h('th', { style: { padding: '8px 10px' } }, 'Tác nhân'),
@@ -1651,6 +2104,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                     const st = String(item.status || 'allowed').toLowerCase();
                     const stLabel = AUDIT_STATUS_LABELS[st] || st;
                     return h('tr', { key: item.id, style: { borderBottom: '1px solid #f1f5f9' } },
+                      h('td', { style: { padding: '8px 10px', color: '#475569', whiteSpace: 'nowrap', fontSize: 11 } }, formatAuditTimeGmt7(item.createdAt)),
                       h('td', { style: { padding: '8px 10px', fontWeight: 600, color: '#0f172a', whiteSpace: 'nowrap' } }, item.toolName || '—'),
                       h('td', { style: { padding: '8px 10px', color: '#475569', whiteSpace: 'nowrap' } }, item.channel || '—'),
                       h('td', { style: { padding: '8px 10px', color: '#334155', whiteSpace: 'nowrap' } }, item.aiEmployee || item.actorUsername || item.actorUserId || 'Hệ thống'),
@@ -1663,6 +2117,40 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                 ),
               ),
             ),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, fontSize: 12, color: '#475569' } },
+            h('span', null, `Trang ${auditPage} / ${totalPages} · Tổng ${totalAudit} bản ghi`),
+            h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('select', {
+                'data-testid': 'dxos-audit-pagesize-select',
+                value: String(auditPageSize),
+                onChange: (e) => {
+                  const sz = Number(e.target.value) || 20;
+                  setAuditPageSize(sz);
+                  loadAuditLogsPage({ page: 1, pageSize: sz });
+                },
+                style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+              },
+                h('option', { value: '10' }, '10 / trang'),
+                h('option', { value: '20' }, '20 / trang'),
+                h('option', { value: '50' }, '50 / trang'),
+                h('option', { value: '100' }, '100 / trang'),
+              ),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-audit-prev-btn',
+                disabled: auditPage <= 1,
+                onClick: () => loadAuditLogsPage({ page: Math.max(1, auditPage - 1), pageSize: auditPageSize }),
+                style: btnStyle(false),
+              }, 'Trước'),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-audit-next-btn',
+                disabled: auditPage >= totalPages,
+                onClick: () => loadAuditLogsPage({ page: auditPage + 1, pageSize: auditPageSize }),
+                style: btnStyle(false),
+              }, 'Sau'),
+            ),
+          ),
         );
       })() : null,
 
@@ -1672,7 +2160,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
           h('div', null,
-            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '5. Hạn mức & Chi phí AI theo Tổ chức (Bền vững DB)'),
+            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '9. Hạn mức & Chi phí AI theo Tổ chức (Bền vững DB)'),
             h('div', { style: { fontSize: 12, color: '#64748b' } },
               `Ngày UTC: ${quotaSummary?.day || new Date().toISOString().slice(0, 10)} · Tổ chức: ${quotaSummary?.organizationId || quotaOrg}${quotaLoading ? ' · Đang tải…' : ''}`),
           ),
@@ -1771,6 +2259,59 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               `Tổng PII đã che: ${allTimeTotals.piiRedactedCount || 0}`),
           ),
         ),
+        h('form', {
+          'data-testid': 'dxos-quota-policy-form',
+          onSubmit: handleSaveQuotaPolicy,
+          style: { padding: 14, borderRadius: 10, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 10 },
+        },
+          h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `Chỉnh sửa Chính sách Hạn mức Tổ chức (${quotaSummary?.organizationId || quotaOrg || 'chưa chọn'})`),
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 8 } },
+            h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Lượt gọi Tổ chức / ngày',
+              h('input', {
+                type: 'number',
+                min: 1,
+                'data-testid': 'dxos-quota-limit-org-calls',
+                value: quotaPolicyDraft.orgDailyCalls,
+                onChange: (e) => setQuotaPolicyDraft((p) => ({ ...p, orgDailyCalls: e.target.value })),
+                style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+              })),
+            h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Lượt gọi User / ngày',
+              h('input', {
+                type: 'number',
+                min: 1,
+                'data-testid': 'dxos-quota-limit-user-calls',
+                value: quotaPolicyDraft.userDailyCalls,
+                onChange: (e) => setQuotaPolicyDraft((p) => ({ ...p, userDailyCalls: e.target.value })),
+                style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+              })),
+            h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Token Tổ chức / ngày',
+              h('input', {
+                type: 'number',
+                min: 100,
+                'data-testid': 'dxos-quota-limit-org-tokens',
+                value: quotaPolicyDraft.orgDailyTokens,
+                onChange: (e) => setQuotaPolicyDraft((p) => ({ ...p, orgDailyTokens: e.target.value })),
+                style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+              })),
+            h('label', { style: { fontSize: 12, display: 'grid', gap: 4 } }, 'Chi phí USD / ngày',
+              h('input', {
+                type: 'number',
+                min: 0.01,
+                step: '0.01',
+                'data-testid': 'dxos-quota-limit-org-usd',
+                value: quotaPolicyDraft.orgDailyUsd,
+                onChange: (e) => setQuotaPolicyDraft((p) => ({ ...p, orgDailyUsd: e.target.value })),
+                style: { padding: 6, borderRadius: 6, border: '1px solid #cbd5e1', background: '#fff' },
+              })),
+          ),
+          h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+            h('button', {
+              type: 'submit',
+              'data-testid': 'dxos-quota-save-btn',
+              disabled: quotaSaveBusy,
+              style: btnStyle(true),
+            }, quotaSaveBusy ? 'Đang lưu…' : 'Lưu Chính sách Hạn mức')),
+        ),
       ) : null,
 
       tab === 'hitl' ? h('div', {
@@ -1779,7 +2320,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
           h('div', null,
-            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '6. Hàng chờ Phê duyệt Tác vụ AI (Human-in-the-Loop)'),
+            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '8. Hàng chờ Phê duyệt Tác vụ AI (Human-in-the-Loop)'),
             h('div', { style: { fontSize: 12, color: '#64748b' } },
               `Hiển thị ${approvals.length} yêu cầu (${approvalStatusFilter})${approvalsLoading ? ' · Đang tải…' : ''}`),
           ),
@@ -1926,11 +2467,18 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 10 } },
           h('div', null,
-            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '7. Ứng dụng doanh nghiệp đã dựng (App Registry)'),
+            h('h3', { style: { margin: '0 0 4px', fontSize: 16 } }, '4. Ứng dụng doanh nghiệp đã dựng (App Registry)'),
             h('div', { style: { fontSize: 12, color: '#64748b' } },
               `Hiển thị ${builtApps.length} ứng dụng trong tổ chức ${quotaOrg || '(mặc định)'}${builtAppsLoading ? ' · Đang tải…' : ''}`),
           ),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-built-apps-new-btn',
+              onClick: () => setQuickStartOpen((prev) => !prev),
+              disabled: Boolean(builtAppBusyKey),
+              style: btnStyle(quickStartOpen, false),
+            }, quickStartOpen ? 'Đóng Quick-Start' : '+ Tạo Ứng dụng Mới'),
             h('button', {
               type: 'button',
               'data-testid': 'dxos-built-apps-refresh-btn',
@@ -1940,7 +2488,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             }, builtAppsLoading ? 'Đang tải…' : 'Tải lại danh sách'),
           ),
         ),
-        !builtApps.length
+        (!builtApps.length || quickStartOpen)
           ? h('div', {
             'data-testid': 'dxos-built-apps-quickstart',
             style: { padding: 18, borderRadius: 12, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 12 },
@@ -2028,8 +2576,9 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                 testIdPrefix: 'dxos-quickstart-er',
               }) : null,
             ) : null,
-          )
-          : h('div', { style: { display: 'grid', gap: 12 } },
+          ) : null,
+        builtApps.length
+          ? h('div', { style: { display: 'grid', gap: 12 } },
             builtApps.map((appItem) => {
               const refs = appItem?.artifactRefsJson || {};
               const cols = Array.isArray(refs.collections) ? refs.collections : [];
@@ -2066,7 +2615,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                   h('span', null, `Tổ chức: ${appItem.organizationId || '—'}`),
                   h('span', null, `Bảng (${cols.length}): ${cols.join(', ') || '—'}`),
                   h('span', null, `Vai trò (${roles.length}): ${roles.join(', ') || '—'}`),
-                  h('span', null, `Portals: ${portals.map((p) => `/p/${p.portalSlug}`).join(', ') || '—'}`),
+                  h('span', { style: { display: 'inline-flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+                    'Portals: ',
+                    portals.length
+                      ? portals.map((p) => h('a', {
+                        key: p.portalSlug,
+                        href: `/p/${p.portalSlug}`,
+                        'data-testid': `dxos-built-app-portal-link-${appItem.appKey}-${p.portalSlug}`,
+                        style: { color: '#0284c7', textDecoration: 'underline', fontWeight: 600 },
+                      }, `/p/${p.portalSlug}`))
+                      : '—'),
                   dmns.length ? h('span', null, `DMN: ${dmns.join(', ')}`) : null,
                   flows.length ? h('span', null, `Flows: ${flows.join(', ')}`) : null,
                   n8ns.length ? h('span', null, `n8n: ${n8ns.join(', ')}`) : null,
@@ -2084,8 +2642,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                 }, verifyState.ok
                   ? `PASS · ${verifyState.passedCount}/${verifyState.totalCount} checks · ${cols.length} bảng đã xác minh`
                   : `FAIL · thiếu bảng [${(verifyState.missingCollections || []).join(', ')}] · trạng thái ${verifyState.status}`)
-                  : (lastVer && typeof lastVer.totalCount === 'number' ? h('div', { style: { fontSize: 11, color: '#64748b' } },
-                    `Lần kiểm chứng gần nhất: ${lastVer.ok ? 'PASS' : 'NEEDS_REVIEW'} (${lastVer.passedCount ?? 0}/${lastVer.totalCount})`) : null),
+                  : (lastVer && typeof lastVer.totalCount === 'number' ? h('div', { style: { fontSize: 11, color: lastVer.ok ? '#64748b' : '#b45309' } },
+                    `Lần kiểm chứng gần nhất: ${lastVer.ok ? 'PASS' : 'NEEDS_REVIEW'} (${lastVer.passedCount ?? 0}/${lastVer.totalCount})${(!lastVer.ok && Array.isArray(lastVer.failedChecks) && lastVer.failedChecks.length) ? ` · Lỗi: ${lastVer.failedChecks.map((f) => `${f.type || 'check'}:${f.target || f.detail || 'fail'}`).join(', ')}` : ''}`) : null),
                 h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
                   h('button', {
                     type: 'button',
@@ -2131,7 +2689,16 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                   h('button', {
                     type: 'button',
                     'data-testid': `dxos-built-app-teardown-${appItem.appKey}`,
-                    onClick: () => handleTeardownBuiltApp(appItem, true),
+                    onClick: () => {
+                      setTeardownKeepData(true);
+                      setConfirmDialog({
+                        kind: 'teardownApp',
+                        appItem,
+                        title: `Gỡ bỏ ứng dụng "${appItem.appKey}"?`,
+                        message: 'Ứng dụng sẽ ngừng hoạt động trong App Registry. Bạn có thể chọn giữ lại hoặc xóa bảng dữ liệu.',
+                        confirmLabel: 'Xác nhận Gỡ bỏ',
+                      });
+                    },
                     disabled: rowBusy || Boolean(builtAppBusyKey),
                     style: btnStyle(false, true),
                   }, 'Gỡ bỏ (Giữ dữ liệu)'),
@@ -2229,7 +2796,14 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                         h('button', {
                           type: 'button',
                           'data-testid': `dxos-rollback-btn-${appItem.appKey}-v${snap.version}`,
-                          onClick: () => handleRollbackBuiltApp(appItem, snap.version),
+                          onClick: () => setConfirmDialog({
+                            kind: 'rollbackApp',
+                            appItem,
+                            targetVersion: snap.version,
+                            title: `Hoàn tác "${appItem.appKey}" về v${snap.version}?`,
+                            message: `Cấu hình hiện tại sẽ được tạo snapshot mới từ phiên bản v${snap.version}.`,
+                            confirmLabel: `Xác nhận Hoàn tác về v${snap.version}`,
+                          }),
                           disabled: rowBusy || Boolean(builtAppBusyKey),
                           style: btnStyle(false, true),
                         }, `Hoàn tác về v${snap.version}`),
@@ -2260,7 +2834,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                 })() : null,
               );
             }),
-          ),
+          ) : null,
         builtAppBundlePreview ? h('div', {
           'data-testid': 'dxos-built-app-bundle-preview',
           style: { padding: 12, borderRadius: 8, border: '1px solid #bae6fd', background: '#f0f9ff', display: 'grid', gap: 8, fontSize: 12 },
@@ -2285,6 +2859,75 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             api,
             organizationId: activeOrgId,
           }) : null,
+
+          confirmDialog ? h('div', {
+            role: 'dialog',
+            'aria-modal': 'true',
+            'data-testid': 'dxos-confirm-modal',
+            style: {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 1200,
+              background: 'rgba(15, 23, 42, 0.45)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: 16,
+            },
+          },
+            h('div', {
+              style: {
+                maxWidth: 460,
+                width: '100%',
+                borderRadius: 12,
+                background: '#fff',
+                border: '1px solid #cbd5e1',
+                padding: 20,
+                display: 'grid',
+                gap: 12,
+                boxShadow: '0 12px 32px rgba(15,23,42,0.2)',
+              },
+            },
+              h('strong', { style: { fontSize: 15, color: '#0f172a' } }, confirmDialog.title || 'Xác nhận thao tác'),
+              h('div', { style: { fontSize: 13, color: '#334155' } }, confirmDialog.message || ''),
+              confirmDialog.kind === 'teardownApp' ? h('label', {
+                style: { display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#0f172a', padding: '8px 10px', borderRadius: 8, background: '#f8fafc', border: '1px solid #e2e8f0', cursor: 'pointer' },
+              },
+                h('input', {
+                  type: 'checkbox',
+                  'data-testid': 'dxos-teardown-keepdata-checkbox',
+                  checked: Boolean(teardownKeepData),
+                  onChange: (e) => setTeardownKeepData(Boolean(e.target.checked)),
+                }),
+                'Giữ lại dữ liệu các bảng đã tạo (keepData = true)') : null,
+              h('div', { style: { display: 'flex', justifyContent: 'flex-end', gap: 8 } },
+                h('button', {
+                  type: 'button',
+                  'data-testid': 'dxos-confirm-modal-cancel',
+                  onClick: () => setConfirmDialog(null),
+                  style: btnStyle(false),
+                }, 'Hủy bỏ'),
+                h('button', {
+                  type: 'button',
+                  'data-testid': 'dxos-confirm-modal-ok',
+                  onClick: async () => {
+                    const dlg = confirmDialog;
+                    const keep = teardownKeepData;
+                    setConfirmDialog(null);
+                    if (!dlg) return;
+                    if (dlg.kind === 'deleteProfile') {
+                      await handleDeleteProfile(dlg.username);
+                    } else if (dlg.kind === 'teardownApp') {
+                      await handleTeardownBuiltApp(dlg.appItem, keep);
+                    } else if (dlg.kind === 'rollbackApp') {
+                      await handleRollbackBuiltApp(dlg.appItem, dlg.targetVersion);
+                    }
+                  },
+                  style: btnStyle(false, true),
+                }, confirmDialog.confirmLabel || 'Xác nhận'),
+              ),
+            ),
+          ) : null,
         ),
       ),
     );

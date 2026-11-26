@@ -434,6 +434,7 @@ const uiSnapshots = {
   createdAt: true,
   updatedAt: true,
   fields: [
+    { name: 'organizationId', type: 'string', interface: 'input' },
     { name: 'snapshotUid', type: 'string', interface: 'input', allowNull: false, unique: true },
     { name: 'portalSlug', type: 'string', interface: 'input', allowNull: false },
     { name: 'pageTitle', type: 'string', interface: 'input' },
@@ -445,8 +446,30 @@ const uiSnapshots = {
     { name: 'blocks', type: 'jsonb', defaultValue: [] },
   ],
   indexes: [
+    { name: 'idx_lattice_ui_snapshots_org_portal_created', fields: ['organizationId', 'portalSlug', 'createdAt'] },
     { name: 'idx_lattice_ui_snapshots_portal_page_created', fields: ['portalSlug', 'pageTitle', 'createdAt'] },
     { name: 'idx_lattice_ui_snapshots_grid_created', fields: ['gridUid', 'createdAt'] },
+  ],
+};
+
+const aiQuotaPolicies = {
+  name: 'latticeAiQuotaPolicies',
+  title: 'Chính sách Hạn mức AI theo Tổ chức',
+  titleField: 'organizationId',
+  origin: '@latticedx/plugin-dxos-ai',
+  uiManageable: false,
+  createdAt: true,
+  updatedAt: true,
+  fields: [
+    { name: 'organizationId', type: 'string', allowNull: false, unique: true },
+    { name: 'orgDailyCalls', type: 'integer', defaultValue: 5000, allowNull: false },
+    { name: 'userDailyCalls', type: 'integer', defaultValue: 500, allowNull: false },
+    { name: 'orgDailyTokens', type: 'bigInt', defaultValue: 5000000, allowNull: false },
+    { name: 'orgDailyUsd', type: 'double', defaultValue: 50, allowNull: false },
+    { name: 'updatedByUsername', type: 'string' },
+  ],
+  indexes: [
+    { name: 'uidx_lattice_ai_quota_policies_org', fields: ['organizationId'], unique: true },
   ],
 };
 
@@ -524,6 +547,15 @@ function validateMcpServerUrl(rawUrl) {
   }
   if (parsed.username || parsed.password) {
     throw failSchema('MCP_URL_CREDENTIALS_FORBIDDEN', 'Credentials inside MCP URL are forbidden');
+  }
+  const authMatch = str.match(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\/([^/?#]+)/);
+  const rawAuthority = authMatch ? authMatch[1] : '';
+  const rawHost = rawAuthority.startsWith('[')
+    ? rawAuthority.slice(0, rawAuthority.indexOf(']') + 1)
+    : rawAuthority.split(':')[0];
+  const rawBare = String(rawHost || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!rawBare || /^(?:\d+|0x[0-9a-f]+)$/i.test(rawBare) || /(?:^|\.)0\d+/i.test(rawBare) || /(?:^|\.)0x[0-9a-f]+/i.test(rawBare)) {
+    throw failSchema('MCP_URL_SSRF_BLOCKED', 'Non-canonical numeric, hex, or octal MCP host blocked');
   }
   const host = parsed.hostname.toLowerCase();
   const bareHost = host.replace(/^\[|\]$/g, '');
@@ -705,6 +737,7 @@ module.exports = {
   aiAuditLogs,
   uiSnapshots,
   aiQuotaUsage,
+  aiQuotaPolicies,
   aiApprovalQueue,
   validateMcpServerUrl,
   redactAuditText,

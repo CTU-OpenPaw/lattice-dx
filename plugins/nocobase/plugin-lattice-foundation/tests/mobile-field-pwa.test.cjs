@@ -1925,8 +1925,10 @@ test('Task 17 (Outbox Inspector & Notification Badge SSE): lists pending/failed 
     assert.ok(findNode(drawer, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-item-${itemPending.id}`));
     assert.ok(findNode(drawer, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-item-${itemFailed.id}`));
 
-    // 3. Delete itemPending -> removes from IndexedDB and updates badge count to 1
+    // 3. Delete itemPending (2-step inline confirmation) -> removes from IndexedDB and updates badge count to 1
     await findNode(drawer, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-delete-${itemPending.id}`).props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
+    await findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-delete-confirm-${itemPending.id}`).props.onClick();
     tree = fakeReact._render(MobilePage, { storage, indexedDB: mockIdb, apiClient: authApi });
     assert.equal((await listOutboxItems({ indexedDB: mockIdb, storage })).length, 1);
     assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge')).includes('1'));
