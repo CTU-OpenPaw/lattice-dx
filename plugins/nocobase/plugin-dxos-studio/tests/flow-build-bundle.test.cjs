@@ -61,7 +61,7 @@ function createReactMockWithHooks() {
 
 test('package.json pins MIT @xyflow/react@12.12.1 and @dagrejs/dagre@3.1.3 in devDependencies only', () => {
   const pkg = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.4.0');
+  assert.equal(pkg.version, '0.4.1');
   assert.equal(pkg.license, 'Apache-2.0');
   assert.equal(pkg.nocobase?.sdkProvidedByHost, true);
   assert.equal(pkg.nocobase?.testedRuntime, '2.2.50');

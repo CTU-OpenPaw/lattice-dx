@@ -1578,13 +1578,13 @@ test('Task 1 remediation: foundation custom-resource HTTP handlers wrap DB opera
   }
 });
 
-test('version lock is 0.4.0 across package/openapi/observability and OpenAPI registers dxosForms, dxosApprovals, dxosNotify + server index loads cleanly', async () => {
+test('version lock is 0.4.1 across package/openapi/observability and OpenAPI registers dxosForms, dxosApprovals, dxosNotify + server index loads cleanly', async () => {
   const pkg = require('../package.json');
-  assert.equal(pkg.version, '0.4.0');
+  assert.equal(pkg.version, '0.4.1');
 
   const { buildOpenApiSpec } = require('../src/server/openapi-spec');
   const spec = buildOpenApiSpec({ serverUrl: 'http://localhost:13015' });
-  assert.equal(spec.info.version, '0.4.0');
+  assert.equal(spec.info.version, '0.4.1');
 
   // Public form endpoints have security: []
   for (const pubPath of ['/api/dxosForms:meta', '/api/dxosForms:submit', '/api/dxosForms:status']) {
@@ -1808,16 +1808,19 @@ test('LatticeFoundationPlugin registers and unregisters publicFormGatewayHandler
     plugin.app = fakeApp;
     plugin.db = fakeApp.db;
     await plugin.load();
-    assert.equal(registered.length, 2);
+    assert.equal(registered.length, 3);
     assert.equal(typeof plugin._publicFormGatewayHandler, 'function');
     assert.equal(typeof plugin._publicTrackGatewayHandler, 'function');
+    assert.equal(typeof plugin._publicBrandingGatewayHandler, 'function');
     assert.ok(registered.includes(plugin._publicFormGatewayHandler));
     assert.ok(registered.includes(plugin._publicTrackGatewayHandler));
+    assert.ok(registered.includes(plugin._publicBrandingGatewayHandler));
     await plugin.unload();
-    assert.equal(unregistered.length, 2);
+    assert.equal(unregistered.length, 3);
     assert.ok(unregistered.includes(plugin._publicFormGatewayHandler) === false);
     assert.equal(plugin._publicFormGatewayHandler, null);
     assert.equal(plugin._publicTrackGatewayHandler, null);
+    assert.equal(plugin._publicBrandingGatewayHandler, null);
   } finally {
     Module._load = origLoad;
     delete require.cache[require.resolve('../src/server/index')];

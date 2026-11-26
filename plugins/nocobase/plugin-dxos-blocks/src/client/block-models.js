@@ -29,10 +29,10 @@ const {
 
 const DXOS_SETTINGS_MODAL_STYLE_ID = 'dxos-block-settings-modal-style';
 const DXOS_MODAL_SCROLL_CSS = [
-  '.ant-modal-wrap { position: fixed !important; inset: 0 !important; top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important; overflow-y: auto !important; }',
+  'body > div > .ant-modal-root .ant-modal-wrap, .ant-modal-wrap { position: fixed !important; inset: 0 !important; top: 0 !important; right: 0 !important; bottom: 0 !important; left: 0 !important; overflow-y: auto !important; z-index: 1050; }',
   '.ant-modal-wrap.ant-modal-centered { display: flex !important; align-items: flex-start !important; justify-content: center !important; padding: 24px 16px !important; }',
   '.ant-modal-wrap.ant-modal-centered::before { display: none !important; }',
-  '.ant-modal-wrap .ant-modal { top: 24px !important; margin: 0 auto !important; padding-bottom: 24px !important; max-width: calc(100vw - 32px); }',
+  '.ant-modal-wrap .ant-modal { position: relative !important; top: 24px !important; margin: 0 auto !important; padding-bottom: 24px !important; max-width: calc(100vw - 32px); }',
   '.ant-modal-wrap.ant-modal-centered .ant-modal { top: 0 !important; margin: 0 auto !important; }',
   '.ant-modal-wrap .ant-modal-content { max-height: calc(100vh - 48px); display: flex; flex-direction: column; }',
   '.ant-modal-wrap .ant-modal-body { max-height: 78vh; overflow-y: auto; }',
@@ -1431,10 +1431,13 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           title: 'Cấu hình nội dung',
           defaultParams,
           uiSchema,
-          modalProps: {
-            top: 24,
-            style: { top: 24 },
-            styles: { body: { maxHeight: '78vh', overflowY: 'auto' } },
+          uiMode: {
+            type: 'dialog',
+            props: {
+              getContainer: () => (typeof document !== 'undefined' ? document.body : undefined),
+              style: { top: 24 },
+              styles: { body: { maxHeight: '78vh', overflowY: 'auto' } },
+            },
           },
           handler(ctx, params) {
             ctx.model.setProps(params || {});

@@ -27,6 +27,14 @@ const DEFAULT_APP_CATALOG = Object.freeze([
 const unwrap = (res) => res?.data?.data ?? res?.data ?? {};
 const errMsg = (err, fb) => err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message || err?.message || fb;
 const BLOCKED_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+const formatVnTs = (v) => {
+  if (!v) return '-';
+  const d = new Date(v);
+  if (!Number.isFinite(d.getTime())) return String(v).slice(0, 19).replace('T', ' ');
+  const vn = new Date(d.getTime() + 7 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${vn.getUTCFullYear()}-${p(vn.getUTCMonth() + 1)}-${p(vn.getUTCDate())} ${p(vn.getUTCHours())}:${p(vn.getUTCMinutes())}:${p(vn.getUTCSeconds())} (+07:00)`;
+};
 
 function resolveConnectorsRedirectUri() {
   const origin = typeof window !== 'undefined' && window.location?.origin ? window.location.origin : 'http://localhost:13014';
@@ -86,6 +94,7 @@ function createConnectedAppsPanel(client, React, _antd, app) {
     const [loading, setLoading] = React.useState(false);
     const [busy, setBusy] = React.useState(false);
     const [localFb, setLocalFb] = React.useState(null);
+    const [n8nError, setN8nError] = React.useState('');
     const [testRes, setTestRes] = React.useState(null);
     const [catalog, setCatalog] = React.useState(DEFAULT_APP_CATALOG);
     const [connectors, setConnectors] = React.useState([]);
@@ -94,6 +103,7 @@ function createConnectedAppsPanel(client, React, _antd, app) {
     const [executions, setExecutions] = React.useState([]);
     const [rotateKey, setRotateKey] = React.useState('');
     const [rotateText, setRotateText] = React.useState('');
+    const [confirmDeleteKey, setConfirmDeleteKey] = React.useState('');
     const [modalApp, setModalApp] = React.useState(null);
     const [wizardMode, setWizardMode] = React.useState('token');
     const [form, setForm] = React.useState({ connectorKey: '', name: '', baseUrl: '', authType: 'api_key', secretsText: '' });
@@ -121,14 +131,39 @@ function createConnectedAppsPanel(client, React, _antd, app) {
       if (reqs[0].status === 'fulfilled' && Array.isArray(unwrap(reqs[0].value).items) && unwrap(reqs[0].value).items.length) setCatalog(unwrap(reqs[0].value).items);
       if (reqs[1].status === 'fulfilled') setConnectors(Array.isArray(unwrap(reqs[1].value).items) ? unwrap(reqs[1].value).items : []);
       else reportFb({ type: 'error', text: errMsg(reqs[1].reason, 'Không tải được Connector Vault.') });
-      setN8nStatus(reqs[2].status === 'fulfilled' ? unwrap(reqs[2].value) : null);
+      const statusData = reqs[2].status === 'fulfilled' ? unwrap(reqs[2].value) : null;
+      setN8nStatus(statusData);
       const pickArr = (r) => (r.status === 'fulfilled' ? (Array.isArray(unwrap(r.value).data) ? unwrap(r.value).data : (unwrap(r.value).items || [])) : []);
       setWorkflows(pickArr(reqs[3]));
       setExecutions(pickArr(reqs[4]));
+      const n8nErr = reqs[2].status === 'rejected'
+        ? errMsg(reqs[2].reason, 'Không kiểm tra được trạng thái n8n.')
+        : (statusData && statusData.ok === false && statusData.reason ? `Cảnh báo n8n: ${statusData.reason}` : '')
+        || (reqs[3].status === 'rejected' ? errMsg(reqs[3].reason, 'Không tải được danh sách workflow n8n.') : '')
+        || (reqs[4].status === 'rejected' ? errMsg(reqs[4].reason, 'Không tải được lịch sử chạy n8n.') : '');
+      setN8nError(reqs[1].status === 'fulfilled' ? n8nErr : '');
       setLoading(false);
     }, [effectiveOrg, Boolean(api?.request)]);
 
     React.useEffect(() => { loadAll(); }, [loadAll]);
+    React.useEffect(() => {
+      try {
+        const search = typeof window !== 'undefined' && window.location ? window.location.search : '';
+        if (!search) return;
+        const sp = new URLSearchParams(search);
+        const code = String(sp.get('code') || '').trim();
+        const state = String(sp.get('state') || '').trim();
+        if (!code && !state) return;
+        const oauthApp = catalog.find((a) => Array.isArray(a.authTypes) && a.authTypes.includes('oauth2')) || DEFAULT_APP_CATALOG.find((a) => a.authTypes.includes('oauth2'));
+        if (oauthApp) {
+          setModalApp(oauthApp);
+          setWizardMode('oauth2');
+          setForm({ connectorKey: `${oauthApp.appType.replace(/_/g, '-')}-primary`, name: oauthApp.name, baseUrl: oauthApp.defaultBaseUrl || '', authType: 'oauth2', secretsText: '' });
+        }
+        setOauth((o) => ({ ...o, code, state }));
+        reportFb({ type: 'success', text: 'Đã nhận mã ủy quyền OAuth2 từ URL. Nhấn "Hoàn tất OAuth2 Callback" để hoàn tất.' });
+      } catch {}
+    }, []);
 
     const runMut = async (fallback, fn) => {
       const cApi = refs.api;
@@ -192,6 +227,7 @@ function createConnectedAppsPanel(client, React, _antd, app) {
 
     return h('div', { 'data-testid': 'dxos-connected-apps-panel', style: S.stack },
       localFb ? h('div', { role: 'status', style: { padding: 10, borderRadius: 8, fontSize: 12, background: localFb.type === 'error' ? '#FEF2F2' : '#F0FDF4', border: `1px solid ${localFb.type === 'error' ? '#FECACA' : '#BBF7D0'}`, color: localFb.type === 'error' ? '#991B1B' : '#166534' } }, localFb.text) : null,
+      n8nError ? h('div', { 'data-testid': 'dxos-n8n-error-banner', role: 'alert', style: { padding: 10, borderRadius: 8, fontSize: 12, background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E' } }, n8nError) : null,
       testRes ? h('div', { 'data-testid': 'dxos-app-test-result', role: 'status', style: { padding: 10, borderRadius: 8, fontSize: 12, background: testRes.ok ? '#F0FDF4' : '#FEF2F2', border: `1px solid ${testRes.ok ? '#BBF7D0' : '#FECACA'}`, color: testRes.ok ? '#166534' : '#991B1B' } }, `Kiểm tra "${testRes.connectorKey || ''}": ${testRes.ok ? 'OK' : 'FAILED'} · HTTP ${testRes.statusCode ?? '-'} · ${testRes.latencyMs ?? 0}ms · ${testRes.message || ''}`) : null,
       (!props.selectedOrg || organizations.length > 1) ? h('div', { style: S.row },
         h('span', { style: { fontSize: 12, fontWeight: 600, color: '#475569' } }, 'Organization ID:'),
@@ -256,14 +292,19 @@ function createConnectedAppsPanel(client, React, _antd, app) {
                 h('td', { style: S.td }, h('code', null, c.connectorKey)),
                 h('td', { style: S.td }, `${c.name || c.connectorKey} (${c.appType || c.connectorType})`),
                 h('td', { style: S.td }, c.authType || 'none'),
-                h('td', { style: S.td }, h('span', { style: S.badge(c.oauthConnected || c.hasSecrets ? 'ok' : 'neutral') }, c.oauthConnected ? 'OAuth2 Connected' : (c.hasSecrets ? 'Encrypted' : 'No secret'))),
+                h('td', { style: S.td }, h('span', { style: S.badge(c.oauthConnected || c.hasSecrets ? 'ok' : 'neutral') }, c.oauthConnected ? 'OAuth2 Đã kết nối' : (c.hasSecrets ? 'Đã mã hóa' : 'Chưa có secret'))),
                 h('td', { style: S.td }, c.n8nCredentialId ? h('code', null, c.n8nCredentialId) : '-'),
                 h('td', { style: S.td }, c.lastTestStatus ? h('span', { style: S.badge(c.lastTestStatus === 'ok' ? 'ok' : 'err') }, c.lastTestStatus) : '-'),
                 h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
                   h('button', { type: 'button', 'data-testid': `dxos-app-test-${c.connectorKey}`, disabled: busy, onClick: () => runMut('Kiểm tra thất bại.', async (cApi) => { const r = await cApi.request({ url: 'dxosVault:testConnection', method: 'post', data: { ...orgPayload, connectorKey: c.connectorKey } }); setTestRes(unwrap(r)); await loadAll(); }), style: S.btn('ghost', busy) }, 'Kiểm tra'),
-                  h('button', { type: 'button', 'data-testid': `dxos-app-sync-n8n-${c.connectorKey}`, disabled: busy, onClick: () => runMut('Đồng bộ sang n8n thất bại.', async (cApi) => { const r = await cApi.request({ url: 'dxosN8n:syncCredential', method: 'post', data: { ...orgPayload, connectorKey: c.connectorKey } }); reportFb({ type: 'success', text: `Đã đồng bộ "${c.connectorKey}" sang n8n (${unwrap(r).n8nCredentialId || 'synced'}).` }); await loadAll(); }), style: S.btn('act', busy) }, 'Đồng bộ sang n8n'),
-                  h('button', { type: 'button', 'data-testid': `dxos-app-rotate-${c.connectorKey}`, disabled: busy, onClick: () => { setRotateKey(c.connectorKey); setRotateText(''); }, style: S.btn('ghost', busy) }, 'Rotate'),
-                  h('button', { type: 'button', 'data-testid': `dxos-app-delete-${c.connectorKey}`, disabled: busy, onClick: () => runMut('Xóa thất bại.', async (cApi) => { await cApi.request({ url: 'dxosVault:delete', method: 'post', data: { ...orgPayload, connectorKey: c.connectorKey } }); await loadAll(); }), style: S.btn('danger', busy) }, 'Xóa'),
+                  h('button', { type: 'button', 'data-testid': `dxos-app-sync-n8n-${c.connectorKey}`, disabled: busy, onClick: () => runMut('Đồng bộ sang n8n thất bại.', async (cApi) => { const r = await cApi.request({ url: 'dxosN8n:syncCredential', method: 'post', data: { ...orgPayload, connectorKey: c.connectorKey } }); reportFb({ type: 'success', text: `Đã đồng bộ "${c.connectorKey}" sang n8n (${unwrap(r).n8nCredentialId || 'đồng bộ'}).` }); await loadAll(); }), style: S.btn('act', busy) }, 'Đồng bộ sang n8n'),
+                  h('button', { type: 'button', 'data-testid': `dxos-app-rotate-${c.connectorKey}`, disabled: busy, onClick: () => { setRotateKey(c.connectorKey); setRotateText(''); }, style: S.btn('ghost', busy) }, 'Xoay vòng'),
+                  confirmDeleteKey === c.connectorKey
+                    ? [
+                      h('button', { key: 'cf', type: 'button', 'data-testid': `dxos-app-delete-confirm-${c.connectorKey}`, disabled: busy, onClick: () => runMut('Xóa thất bại.', async (cApi) => { await cApi.request({ url: 'dxosVault:delete', method: 'post', data: { ...orgPayload, connectorKey: c.connectorKey } }); setConfirmDeleteKey(''); reportFb({ type: 'success', text: `Đã xóa connector "${c.connectorKey}".` }); await loadAll(); }), style: S.btn('danger', busy) }, 'Xác nhận xóa'),
+                      h('button', { key: 'cc', type: 'button', 'data-testid': `dxos-app-delete-cancel-${c.connectorKey}`, onClick: () => setConfirmDeleteKey(''), style: S.btn('ghost') }, 'Hủy'),
+                    ]
+                    : h('button', { type: 'button', 'data-testid': `dxos-app-delete-${c.connectorKey}`, disabled: busy, onClick: () => setConfirmDeleteKey(c.connectorKey), style: S.btn('danger', busy) }, 'Xóa'),
                 ),
               ))),
           ),
@@ -284,7 +325,7 @@ function createConnectedAppsPanel(client, React, _antd, app) {
                 h('td', { style: S.td }, h('code', null, wf.id)),
                 h('td', { style: S.td }, wf.name || wf.id),
                 h('td', { style: S.td }, Array.isArray(wf.nodes) ? wf.nodes.length : '-'),
-                h('td', { style: S.td }, h('span', { style: S.badge(wf.active ? 'ok' : 'neutral') }, wf.active ? 'active' : 'paused')),
+                h('td', { style: S.td }, h('span', { style: S.badge(wf.active ? 'ok' : 'neutral') }, wf.active ? 'Hoạt động' : 'Tạm dừng')),
                 h('td', { style: { ...S.td, display: 'flex', gap: 6 } },
                   h('button', { type: 'button', 'data-testid': `dxos-n8n-wf-toggle-${wf.id}`, disabled: busy, onClick: () => runMut('Không bật/tắt được workflow.', async (cApi) => { await cApi.request({ url: 'dxosN8n:activateWorkflow', method: 'post', data: { ...orgPayload, workflowId: wf.id, active: !wf.active } }); await loadAll(); }), style: S.btn('act', busy) }, wf.active ? 'Tạm dừng' : 'Kích hoạt'),
                   h('a', { href: `${editorUrl}/workflow/${encodeURIComponent(String(wf.id))}`, target: '_blank', rel: 'noopener noreferrer', style: S.btn('ghost') }, 'Mở trên n8n Editor ↗'),
@@ -300,16 +341,16 @@ function createConnectedAppsPanel(client, React, _antd, app) {
               : executions.map((ex) => h('tr', { key: ex.id },
                 h('td', { style: S.td }, h('code', null, ex.id)),
                 h('td', { style: S.td }, h('code', null, ex.workflowId || '-')),
-                h('td', { style: S.td }, h('span', { style: S.badge(ex.status === 'success' ? 'ok' : (ex.status === 'error' ? 'err' : 'warn')) }, ex.status || 'unknown')),
-                h('td', { style: S.td }, ex.startedAt ? String(ex.startedAt).slice(0, 19).replace('T', ' ') : '-'),
-                h('td', { style: S.td }, h('button', { type: 'button', 'data-testid': `dxos-n8n-exec-retry-${ex.id}`, disabled: busy, onClick: () => runMut('Retry thất bại.', async (cApi) => { await cApi.request({ url: 'dxosN8n:retryExecution', method: 'post', data: { ...orgPayload, executionId: ex.id } }); reportFb({ type: 'success', text: `Đã retry execution #${ex.id}.` }); await loadAll(); }), style: S.btn('run', busy) }, 'Retry')),
+                h('td', { style: S.td }, h('span', { style: S.badge(ex.status === 'success' ? 'ok' : (ex.status === 'error' ? 'err' : 'warn')) }, ex.status || 'không rõ')),
+                h('td', { style: S.td }, formatVnTs(ex.startedAt)),
+                h('td', { style: S.td }, h('button', { type: 'button', 'data-testid': `dxos-n8n-exec-retry-${ex.id}`, disabled: busy, onClick: () => runMut('Thử lại thất bại.', async (cApi) => { await cApi.request({ url: 'dxosN8n:retryExecution', method: 'post', data: { ...orgPayload, executionId: ex.id } }); reportFb({ type: 'success', text: `Đã thử lại lượt chạy #${ex.id}.` }); await loadAll(); }), style: S.btn('run', busy) }, 'Thử lại')),
               ))),
           ),
         ),
       ),
 
       modalApp ? h('div', { 'data-testid': 'dxos-app-connect-modal', style: { position: 'fixed', inset: 0, background: 'rgba(15,23,42,0.48)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 60, padding: 16 } },
-        h('div', { style: { width: 560, maxWidth: '100%', background: '#FFFFFF', borderRadius: 14, padding: 18, display: 'grid', gap: 12, boxShadow: '0 20px 44px rgba(15,23,42,0.24)' } },
+        h('div', { style: { width: 560, maxWidth: '100%', maxHeight: '90vh', overflowY: 'auto', background: '#FFFFFF', borderRadius: 14, padding: 18, display: 'grid', gap: 12, boxShadow: '0 20px 44px rgba(15,23,42,0.24)' } },
           h('div', { style: S.rowBetween },
             h('strong', { style: { fontSize: 15 } }, `Kết nối ${modalApp.name}`),
             h('button', { type: 'button', onClick: () => setModalApp(null), style: S.btn('ghost') }, 'Đóng'),
@@ -330,9 +371,10 @@ function createConnectedAppsPanel(client, React, _antd, app) {
             h('label', { style: S.lbl }, 'Scopes'),
             h('input', { type: 'text', value: oauth.scopes, onChange: (e) => setOauth((o) => ({ ...o, scopes: e.target.value })), style: S.inp }),
             h('button', { type: 'button', 'data-testid': 'dxos-app-oauth-start-btn', disabled: busy, onClick: handleOAuthStart, style: S.btn('pri', busy) }, 'Bắt đầu OAuth2 PKCE'),
-            oauth.authorizeUrl ? h('div', { style: S.sub },
-              h('a', { 'data-testid': 'dxos-app-oauth-authorize-link', href: oauth.authorizeUrl, target: '_blank', rel: 'noopener noreferrer', style: { fontSize: 12, color: '#1D4ED8', fontWeight: 600 } }, 'Mở trang cấp quyền OAuth2 ↗'),
+            (oauth.authorizeUrl || oauth.code || oauth.state) ? h('div', { style: S.sub },
+              oauth.authorizeUrl ? h('a', { 'data-testid': 'dxos-app-oauth-authorize-link', href: oauth.authorizeUrl, target: '_blank', rel: 'noopener noreferrer', style: { fontSize: 12, color: '#1D4ED8', fontWeight: 600 } }, 'Mở trang cấp quyền OAuth2 ↗') : null,
               h('input', { 'data-testid': 'dxos-app-oauth-code-input', type: 'text', placeholder: 'Dán authorization code tại đây…', value: oauth.code, onChange: (e) => setOauth((o) => ({ ...o, code: e.target.value })), style: S.inp }),
+              h('input', { 'data-testid': 'dxos-app-oauth-state-input', type: 'text', placeholder: 'OAuth2 state…', value: oauth.state, onChange: (e) => setOauth((o) => ({ ...o, state: e.target.value })), style: S.inp }),
               h('button', { type: 'button', 'data-testid': 'dxos-app-oauth-callback-btn', disabled: busy, onClick: handleOAuthCallback, style: S.btn('run', busy) }, 'Hoàn tất OAuth2 Callback'),
             ) : null,
           ) : h('form', { 'data-testid': 'dxos-app-save-form', onSubmit: handleSaveToken, style: { display: 'grid', gap: 8 } },

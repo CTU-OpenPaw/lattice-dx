@@ -48,25 +48,40 @@
     return h(antd.Alert,{type:'info',showIcon:true,message:'Kết nối Keycloak native',description:'Issuer, Client ID và callback do cấu hình triển khai quản lý. Liên kết subject với tài khoản có sẵn tại Enterprise identity mappings. Không tự tạo người dùng hoặc cấp quyền khi đăng nhập.'});
   }
   function MappingSettings(){
-    const api=client.useAPIClient(),[form]=antd.Form.useForm(),[configuration,setConfiguration]=React.useState(),[mappings,setMappings]=React.useState([]),[status,setStatus]=React.useState();
-    const loadMappings=React.useCallback(()=>api.request({url:'enterpriseAuth:listMappings',skipNotify:true}).then(r=>setMappings(r.data.data?.items||[])).catch(()=>{}),[api]);
+    const api=client.useAPIClient(),[form]=antd.Form.useForm(),[configuration,setConfiguration]=React.useState(),[mappings,setMappings]=React.useState([]),[loadingMappings,setLoadingMappings]=React.useState(false),[unlinkingKey,setUnlinkingKey]=React.useState(null),[linking,setLinking]=React.useState(false),[status,setStatus]=React.useState();
+    const loadMappings=React.useCallback(async()=>{
+      setLoadingMappings(true);
+      try{
+        const r=await api.request({url:'enterpriseAuth:listMappings',skipNotify:true});
+        setMappings(r.data.data?.items||[]);
+      }catch{
+        setStatus({type:'error',message:'Không thể tải danh sách liên kết danh tính.'});
+      }finally{
+        setLoadingMappings(false);
+      }
+    },[api]);
     React.useEffect(()=>{
       api.request({url:'enterpriseAuth:configuration',skipNotify:true}).then(r=>setConfiguration(r.data.data)).catch(()=>setStatus({type:'error',message:'Chỉ quản trị viên root được cấu hình. Kiểm tra cấu hình triển khai.'}));
       loadMappings();
     },[api,loadMappings]);
     const handleUnlink=async(row)=>{
+      const rowKey=`${row.authenticator}:${row.subject}:${row.userId}`;
+      setUnlinkingKey(rowKey);
       try{
         await api.request({url:'enterpriseAuth:unlink',method:'post',data:{authenticator:row.authenticator,subject:row.subject,userId:row.userId},skipNotify:true});
         setStatus({type:'success',message:`Đã gỡ liên kết ${row.subject} khỏi user #${row.userId} và thu hồi phiên hiện tại.`});
         await loadMappings();
       }catch{
         setStatus({type:'error',message:'Không thể gỡ liên kết tài khoản.'});
+      }finally{
+        setUnlinkingKey(null);
       }
     };
     const info=configuration?h(antd.Descriptions,{column:1,items:Object.entries(configuration).map(([key,value])=>({key,label:key,children:value}))}):null;
     const mappingTable=h(antd.Table,{
       rowKey:r=>`${r.authenticator}:${r.subject}:${r.userId}`,
       size:'small',
+      loading:loadingMappings,
       pagination:false,
       dataSource:mappings,
       locale:{emptyText:'Chưa có liên kết danh tính doanh nghiệp nào.'},
@@ -75,12 +90,38 @@
         {title:'Subject (Keycloak)',dataIndex:'subject'},
         {title:'User ID',dataIndex:'userId'},
         {title:'Issuer',dataIndex:'issuer'},
-        {title:'Thao tác',key:'action',render:(_v,row)=>h(antd.Button,{danger:true,size:'small',onClick:()=>handleUnlink(row)},'Gỡ liên kết')},
+        {title:'Thao tác',key:'action',render:(_v,row)=>{
+          const rowKey=`${row.authenticator}:${row.subject}:${row.userId}`;
+          const isUnlinking=unlinkingKey===rowKey;
+          return h(antd.Popconfirm,{
+            title:'Xác nhận gỡ liên kết?',
+            description:`Gỡ liên kết ${row.subject} khỏi user #${row.userId} và thu hồi phiên hiện tại?`,
+            okText:'Gỡ liên kết',
+            cancelText:'Hủy',
+            okButtonProps:{danger:true,loading:isUnlinking},
+            onConfirm:()=>handleUnlink(row),
+          },h(antd.Button,{danger:true,size:'small',loading:isUnlinking,disabled:Boolean(unlinkingKey)&&!isUnlinking},'Gỡ liên kết'));
+        }},
       ],
     });
-    return h(antd.Space,{direction:'vertical',style:{padding:24,maxWidth:880,width:'100%'}},h(antd.Typography.Title,{level:4},'Enterprise identity mappings'),h(AdminSettings),info,status?h(antd.Alert,status):null,mappingTable,h(antd.Form,{form,layout:'vertical',onFinish:async values=>{try{await api.request({url:'enterpriseAuth:link',method:'post',data:values,skipNotify:true});setStatus({type:'success',message:'Đã liên kết tài khoản. Quyền và đơn vị giữ theo NocoBase.'});await loadMappings();}catch{setStatus({type:'error',message:'Không thể liên kết. Kiểm tra subject, user ID, nhân viên đang hoạt động hoặc mapping đã tồn tại.'});}}},...[
-      ['authenticator','Tên authenticator','native-keycloak'],['subject','Keycloak user ID (subject)','UUID người dùng Keycloak'],['userId','NocoBase user ID','ID tài khoản đã có nhân viên']
-    ].map(([name,label,placeholder])=>h(antd.Form.Item,{key:name,name,label,rules:[{required:true}]},h(antd.Input,{placeholder}))),h(antd.Button,{type:'primary',htmlType:'submit'},'Liên kết tài khoản')));
+    const linkFields=[
+      {name:'authenticator',label:'Tên authenticator',placeholder:'native-keycloak',rules:[{required:true,message:'Vui lòng nhập tên authenticator.'}]},
+      {name:'subject',label:'Keycloak user ID (subject)',placeholder:'UUID người dùng Keycloak',rules:[{required:true,message:'Vui lòng nhập Keycloak user ID (subject).'}]},
+      {name:'userId',label:'NocoBase user ID',placeholder:'ID tài khoản đã có nhân viên',rules:[{required:true,message:'Vui lòng nhập NocoBase user ID.'},{pattern:/^\d+$/,message:'User ID phải là số nguyên dương.'}]},
+    ];
+    return h(antd.Space,{direction:'vertical',style:{padding:24,maxWidth:880,width:'100%'}},h(antd.Typography.Title,{level:4},'Enterprise identity mappings'),h(AdminSettings),info,status?h(antd.Alert,status):null,mappingTable,h(antd.Form,{form,layout:'vertical',onFinish:async values=>{
+      setLinking(true);
+      try{
+        await api.request({url:'enterpriseAuth:link',method:'post',data:values,skipNotify:true});
+        form.resetFields();
+        setStatus({type:'success',message:'Đã liên kết tài khoản. Quyền và đơn vị giữ theo NocoBase.'});
+        await loadMappings();
+      }catch{
+        setStatus({type:'error',message:'Không thể liên kết. Kiểm tra subject, user ID, nhân viên đang hoạt động hoặc mapping đã tồn tại.'});
+      }finally{
+        setLinking(false);
+      }
+    }},...linkFields.map(({name,label,placeholder,rules})=>h(antd.Form.Item,{key:name,name,label,rules},h(antd.Input,{placeholder}))),h(antd.Button,{type:'primary',htmlType:'submit',loading:linking,disabled:linking},'Liên kết tài khoản')));
   }
   class EnterpriseLoginClient extends client.Plugin{
     async load(){

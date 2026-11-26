@@ -97,8 +97,8 @@ const logicNodes = [
   {
     type: 'logic.dmn',
     category: 'logic',
-    label: 'Evaluate DMN Decision Table',
-    description: 'Evaluates an organization-scoped DMN decision table and exposes outputs.',
+    label: 'Đánh giá Bảng Quyết định DMN',
+    description: 'Đánh giá bảng quyết định DMN theo tổ chức và trả về kết quả đầu ra.',
     icon: 'TableOutlined',
     color: '#52c41a',
     inputs: ['in'],
@@ -106,8 +106,8 @@ const logicNodes = [
     defaultConfig: { tableKey: '', facts: {} },
     inputSchema: {
       fields: [
-        { name: 'tableKey', label: 'DMN Table Key', type: 'string', required: true },
-        { name: 'facts', label: 'Facts Override (JSON)', type: 'json' },
+        { name: 'tableKey', label: 'Mã Bảng DMN', type: 'string', required: true },
+        { name: 'facts', label: 'Dữ liệu Bổ sung (JSON)', type: 'json' },
       ],
     },
     async execute({ node, config, input, context, db, options, helpers }) {
@@ -140,8 +140,8 @@ const logicNodes = [
   {
     type: 'logic.transform',
     category: 'logic',
-    label: 'Declarative Data Transform',
-    description: 'Transforms, maps, coerces, and computes fields safely without dynamic code execution.',
+    label: 'Chuyển đổi Dữ liệu Khai báo',
+    description: 'Chuyển đổi, ánh xạ, ép kiểu và tính toán trường dữ liệu an toàn không cần chạy mã động.',
     icon: 'FunctionOutlined',
     color: '#52c41a',
     inputs: ['in'],
@@ -149,8 +149,8 @@ const logicNodes = [
     defaultConfig: { operations: [], baseFromInput: true },
     inputSchema: {
       fields: [
-        { name: 'operations', label: 'Transform Operations (JSON)', type: 'json', required: true },
-        { name: 'baseFromInput', label: 'Start From Input Object', type: 'boolean' },
+        { name: 'operations', label: 'Phép biến đổi (JSON)', type: 'json', required: true },
+        { name: 'baseFromInput', label: 'Bắt đầu từ Dữ liệu Đầu vào', type: 'boolean' },
       ],
     },
     async execute({ node, config, input, context, helpers }) {

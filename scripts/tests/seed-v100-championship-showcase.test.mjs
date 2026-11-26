@@ -59,6 +59,7 @@ function createMockShowcaseServer({
   initialAutomationRuns = [],
   delegationCreateError = null,
   omitCmmsPortalOnDomain = false,
+  studioShowcaseError = null,
 } = {}) {
   const state = {
     nextId: 100,
@@ -574,6 +575,18 @@ function createMockShowcaseServer({
     if (parsedUrl.pathname === '/api/dxosStudio:composePortals') {
       return jsonResp({ composed: 7 });
     }
+    if (parsedUrl.pathname === '/api/dxosStudio:seedShowcaseData') {
+      if (studioShowcaseError) {
+        return errorResp(studioShowcaseError.status, studioShowcaseError.code, studioShowcaseError.message);
+      }
+      return jsonResp({
+        ok: true,
+        organizationId: body.organizationId,
+        paraDocsSeeded: 4,
+        workOrdersSeeded: 2,
+        partnerClaimsSeeded: 2,
+      });
+    }
 
     throw new Error(`Unexpected path in mock: ${path}`);
   };
@@ -925,5 +938,63 @@ test('seedDelegationSample skips missing/inactive user preconditions but surface
   await assert.rejects(
     () => runV100ChampionshipShowcaseSeed(options, serverErrMock.mockFetch),
     /HTTP 500: INTERNAL_ERROR/,
+  );
+});
+
+test('parseSeedArgs supports --seed-samples and DX_SEED_SAMPLES=1 with default false', () => {
+  const defaults = parseSeedArgs(['--origin=http://127.0.0.1:13014', '--org=mekong-ops'], {});
+  assert.equal(defaults.seedSamples, false);
+
+  const fromFlag = parseSeedArgs(['--origin=http://127.0.0.1:13014', '--seed-samples'], {});
+  assert.equal(fromFlag.seedSamples, true);
+
+  const fromEnv = parseSeedArgs(['--origin=http://127.0.0.1:13014'], { DX_SEED_SAMPLES: '1' });
+  assert.equal(fromEnv.seedSamples, true);
+});
+
+test('runV100ChampionshipShowcaseSeed with seedSamples: true calls dxosStudio:seedShowcaseData after runNow and before latticePara:reindex', async () => {
+  const { state, mockFetch } = createMockShowcaseServer();
+  const res = await runV100ChampionshipShowcaseSeed({
+    origin: 'http://localhost:13014',
+    organizationId: 'native-ui-lab',
+    token: 'tok-root',
+    seedSamples: true,
+  }, mockFetch);
+
+  assert.equal(res.result, 'PASS');
+  assert.equal(res.automationShowcase.initialRunTriggered, true);
+  assert.equal(res.studioShowcase?.ok, true);
+  assert.equal(res.studioShowcase?.paraDocsSeeded, 4);
+
+  const runNowIdx = state.calls.indexOf('/api/dxosAutomations:runNow');
+  const seedShowcaseIdx = state.calls.indexOf('/api/dxosStudio:seedShowcaseData');
+  const paraReindexIdx = state.calls.indexOf('/api/latticePara:reindex');
+  assert.ok(runNowIdx >= 0 && seedShowcaseIdx >= 0 && paraReindexIdx >= 0);
+  assert.ok(runNowIdx < seedShowcaseIdx, 'dxosStudio:seedShowcaseData must execute after dxosAutomations:runNow');
+  assert.ok(seedShowcaseIdx < paraReindexIdx, 'dxosStudio:seedShowcaseData must execute before latticePara:reindex');
+
+  // Gracefully skips on 404/501, surfaces 500
+  const skip404 = createMockShowcaseServer({
+    studioShowcaseError: { status: 404, code: 'ACTION_NOT_FOUND', message: 'Not found' },
+  });
+  const skippedRes = await runV100ChampionshipShowcaseSeed({
+    origin: 'http://localhost:13014',
+    organizationId: 'native-ui-lab',
+    token: 'tok-root',
+    seedSamples: true,
+  }, skip404.mockFetch);
+  assert.equal(skippedRes.studioShowcase?.seeded, false);
+
+  const err500 = createMockShowcaseServer({
+    studioShowcaseError: { status: 500, code: 'SEED_FAILED', message: 'Boom' },
+  });
+  await assert.rejects(
+    () => runV100ChampionshipShowcaseSeed({
+      origin: 'http://localhost:13014',
+      organizationId: 'native-ui-lab',
+      token: 'tok-root',
+      seedSamples: true,
+    }, err500.mockFetch),
+    /HTTP 500: SEED_FAILED/,
   );
 });

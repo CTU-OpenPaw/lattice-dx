@@ -61,8 +61,14 @@ function extractError(err, fallback) {
 
 function formatTs(value) {
   if (!value) return '-';
-  const s = String(value);
-  return s.length > 19 ? s.slice(0, 19).replace('T', ' ') : s;
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) {
+    const s = String(value);
+    return s.length > 19 ? s.slice(0, 19).replace('T', ' ') : s;
+  }
+  const vn = new Date(d.getTime() + 7 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${vn.getUTCFullYear()}-${p(vn.getUTCMonth() + 1)}-${p(vn.getUTCDate())} ${p(vn.getUTCHours())}:${p(vn.getUTCMinutes())}:${p(vn.getUTCSeconds())} (+07:00)`;
 }
 
 const BLOCKED_PROTO_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
@@ -987,7 +993,7 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
                   h('td', { style: S.td },
                     h('span', { style: S.badge(statusTone(sub.circuitState || 'closed')) }, `${sub.circuitState || 'closed'} (${sub.failureCount || 0})`),
                   ),
-                  h('td', { style: S.td }, h('span', { style: S.badge(sub.active ? 'ok' : 'neutral') }, sub.active ? 'active' : 'paused')),
+                  h('td', { style: S.td }, h('span', { style: S.badge(sub.active ? 'ok' : 'neutral') }, sub.active ? 'Hoạt động' : 'Tạm dừng')),
                   h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
                     h('button', {
                       'data-testid': `dxos-events-sub-reset-${sub.id}`,
@@ -995,7 +1001,7 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
                       disabled: busy,
                       onClick: () => handleResetCircuit(sub),
                       style: S.btn(sub.circuitState && sub.circuitState !== 'closed', false, busy),
-                    }, 'Reset Circuit'),
+                    }, 'Đặt lại ngắt mạch'),
                     h('button', {
                       'data-testid': `dxos-events-sub-toggle-${sub.id}`,
                       type: 'button',
@@ -1020,7 +1026,7 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
           h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Lịch sử Giao hàng Webhook & DLQ'),
           h('div', { style: S.tableWrap },
             h('table', { 'data-testid': 'dxos-events-deliveries-table', style: S.table },
-              h('thead', null, h('tr', null, ['ID', 'Event Type', 'Attempt', 'HTTP', 'Status', 'Error', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
+              h('thead', null, h('tr', null, ['ID', 'Loại sự kiện', 'Lần thử', 'HTTP', 'Trạng thái', 'Lỗi', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
               h('tbody', null,
                 !deliveries.length
                   ? h('tr', null, h('td', { colSpan: 7, style: { ...S.td, color: '#64748b' } }, 'Chưa có lượt gửi Webhook nào.'))
@@ -1039,7 +1045,7 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
                           disabled: busy,
                           onClick: () => handleReplayDlq([del.id]),
                           style: S.btn(false, false, busy),
-                        }, 'Replay DLQ')
+                        }, 'Chạy lại DLQ')
                         : h('span', { style: { fontSize: 11, color: '#94a3b8' } }, formatTs(del.deliveredAt || del.nextAttemptAt)),
                     ),
                   )),
@@ -1186,7 +1192,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
                   h('td', { style: S.td }, r.name || r.ruleKey),
                   h('td', { style: S.td }, h('code', null, r.triggerEventType || '*')),
                   h('td', { style: S.td }, h('span', { style: S.badge(Number(r.schemaVersion) === 2 || r.graphJson ? 'info' : 'neutral') }, Number(r.schemaVersion) === 2 || r.graphJson ? 'v2 DAG' : 'v1')),
-                  h('td', { style: S.td }, h('span', { style: S.badge(r.active !== false ? 'ok' : 'neutral') }, r.active !== false ? 'active' : 'paused')),
+                  h('td', { style: S.td }, h('span', { style: S.badge(r.active !== false ? 'ok' : 'neutral') }, r.active !== false ? 'Hoạt động' : 'Tạm dừng')),
                   h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
                     h('button', {
                       'data-testid': `dxos-automation-open-studio-${r.ruleKey}`,
@@ -1205,7 +1211,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
                         await loadAll();
                       }),
                       style: S.btn(true, false, busy),
-                    }, 'Run Now'),
+                    }, 'Chạy ngay'),
                     h('button', {
                       'data-testid': `dxos-automation-toggle-${r.ruleKey}`,
                       type: 'button',
@@ -1257,7 +1263,7 @@ function createVaultAndAutomationPanel(client, React, _antd, app) {
                           await loadAll();
                         }),
                         style: S.btn(false, false, busy),
-                      }, 'Replay'),
+                      }, 'Chạy lại'),
                     ),
                   );
                 }),

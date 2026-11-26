@@ -159,7 +159,7 @@ function createNativeWorkspace(client, React, antd, app, router) {
     } };
   }
 
-  function NativeTasks({ view }) {
+  function NativeTasks({ view, suppressEmpty }) {
     const { service } = typeof client.useListBlockContext === 'function' ? client.useListBlockContext() || {} : {};
     const retry = async () => { try { await (service.refreshAsync ? service.refreshAsync() : service.refresh()); } catch {} };
     if (service?.error && !service.loading) return h(Failure, { error: service.error, retry, busy: false });
@@ -168,7 +168,7 @@ function createNativeWorkspace(client, React, antd, app, router) {
     const nativeList = h(client.SchemaComponent, { schema, components: { WorkspaceTaskRow: TaskRow, WorkspaceTaskColumnHead: TaskColumnHead } });
     return h('div', { className: 'ldx-task-list', 'aria-busy': Boolean(service?.loading) },
       service?.loading ? h('p', { role: 'status' }, 'Đang tải công việc…') : null,
-      antd.ConfigProvider ? h(antd.ConfigProvider, { renderEmpty: () => (service?.loading ? null : h(antd.Empty, { description: view === 'completed' ? 'Chưa có công việc đã xử lý.' : 'Hiện không có công việc cần xử lý.' })) }, nativeList) : nativeList);
+      antd.ConfigProvider ? h(antd.ConfigProvider, { renderEmpty: () => ((service?.loading || suppressEmpty) ? null : h(antd.Empty, { description: view === 'completed' ? 'Chưa có công việc đã xử lý.' : 'Hiện không có công việc cần xử lý.' })) }, nativeList) : nativeList);
   }
 
   const pageCards = pages => h('div', { className: 'ldx-native-cards' }, pages.map(page =>
@@ -179,6 +179,9 @@ function createNativeWorkspace(client, React, antd, app, router) {
       h('div', { className: 'ldx-native-card-actions' },
         action && canQuickCreate(permissions, action.collection) ? h(router.Link, { to: action.path, className: 'ldx-native-create' }, '+ ' + action.label) : null,
         h(router.Link, { to: path, 'aria-label': 'Mở ' + title }, 'Mở')))));
+
+  const INBOX_SOURCE_LABELS = { business: 'Nghiệp vụ', ai_hitl: 'AI HITL', flow: 'Flow tự động', proposals: 'Đề xuất AI' };
+  const INBOX_STATUS_LABELS = { pending: ['Chờ duyệt', 'pending'], approved: ['Đã duyệt', 'resolved'], rejected: ['Từ chối', 'rejected'], reviewed: ['Đã xem xét', 'resolved'], executed: ['Đã thực thi', 'resolved'] };
 
   function Landing() {
     const { allAccessRoutes, refresh } = client.useAllAccessDesktopRoutes();
@@ -195,13 +198,38 @@ function createNativeWorkspace(client, React, antd, app, router) {
     const [updated, setUpdated] = React.useState('');
     const [term, setTerm] = React.useState(params.get('q') || '');
     const [permissionResult, setPermissionResult] = React.useState(null);
+    const [portalApps, setPortalApps] = React.useState([]);
+    const [inboxState, setInboxState] = React.useState({ loading: false, items: [], error: null, busyKey: null });
+    const [inboxVersion, setInboxVersion] = React.useState(0);
     const request = React.useRef({ busy: false, mounted: true });
     React.useEffect(() => { request.current.mounted = true; return () => { request.current.mounted = false; }; }, []);
     React.useEffect(() => {
       if (typeof document !== 'undefined') document.title = 'Không gian Làm việc — LatticeDX';
     }, []);
     React.useEffect(() => { setTerm(params.get('q') || ''); }, [search]);
-    const applications = workspaceApplications(allAccessRoutes);
+    React.useEffect(() => {
+      if (typeof api?.request !== 'function') return undefined;
+      let active = true;
+      api.request({ url: 'latticePortals:listAccessible', method: 'get', skipNotify: true }).then(res => {
+        if (!active) return;
+        const raw = res?.data?.data;
+        if (!Array.isArray(raw)) return;
+        const mapped = raw
+          .filter(p => p && p.enabled !== false && p.uid !== 'admin-layout-model' && typeof p.firstPagePath === 'string' && p.firstPagePath.startsWith('/p/'))
+          .map(p => {
+            const title = typeof p.title === 'string' && p.title.trim() ? p.title.trim() : p.routePath;
+            const id = String(p.uid || p.routePath);
+            return { id, title, pages: [{ id, title, path: p.firstPagePath }], path: p.firstPagePath, action: null };
+          });
+        setPortalApps(mapped);
+      }).catch(() => {});
+      return () => { active = false; };
+    }, [api, role, updated]);
+    const baseApps = workspaceApplications(allAccessRoutes);
+    const seenIds = new Set(baseApps.map(item => item.id));
+    const seenPaths = new Set(baseApps.map(item => item.path));
+    const mergedPortalApps = portalApps.filter(item => !seenIds.has(item.id) && !seenPaths.has(item.path));
+    const applications = [...baseApps, ...mergedPortalApps];
     const selectedApp = applications.find(item => item.id === appId);
     const matchingApps = applications.filter(item => item.title.toLocaleLowerCase('vi').includes(query) || item.pages.some(page => page.title.toLocaleLowerCase('vi').includes(query)));
     const pages = (appId ? selectedApp?.pages ?? [] : workspacePages(allAccessRoutes).filter(page => page.section === 'reports')).filter(page => page.title.toLocaleLowerCase('vi').includes(query));
@@ -216,6 +244,51 @@ function createNativeWorkspace(client, React, antd, app, router) {
       return () => { active = false; };
     }, [api, role, hasQuickCreate, updated]);
     const catalog = view === 'apps' || view === 'reports';
+    React.useEffect(() => {
+      if (catalog || typeof api?.request !== 'function') return undefined;
+      let active = true;
+      setInboxState(prev => ({ ...prev, loading: true, error: null }));
+      api.request({
+        url: 'dxosApprovals:listInbox',
+        method: 'get',
+        params: { status: taskView === 'pending' ? 'pending' : 'all', limit: 20 },
+        skipNotify: true,
+      }).then(res => {
+        if (!active) return;
+        const payload = res?.data?.data ?? res?.data;
+        if (!Array.isArray(payload?.items)) {
+          setInboxState(prev => ({ ...prev, loading: false, items: [] }));
+          return;
+        }
+        setInboxState(prev => ({ ...prev, loading: false, items: payload.items, error: null }));
+      }).catch(err => {
+        if (!active) return;
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được hộp thư phê duyệt DX-OS.';
+        setInboxState(prev => ({ ...prev, loading: false, error: msg }));
+      });
+      return () => { active = false; };
+    }, [api, role, taskView, updated, inboxVersion, catalog]);
+
+    async function decideInboxItem(item, decision) {
+      const key = String(item?.itemKey || `${item?.source || 'business'}:${item?.id || ''}`);
+      if (!key || inboxState.busyKey || typeof api?.request !== 'function') return;
+      setInboxState(prev => ({ ...prev, busyKey: key, error: null }));
+      const note = decision === 'reject' ? 'Từ chối từ Không gian việc của tôi' : 'Phê duyệt từ Không gian việc của tôi';
+      try {
+        await api.request({
+          url: 'dxosApprovals:decide',
+          method: 'post',
+          data: { itemKey: item.itemKey, source: item.source, id: item.id, decision, note },
+          skipNotify: true,
+        });
+        setInboxState(prev => ({ ...prev, busyKey: null }));
+        setInboxVersion(v => v + 1);
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không xử lý được quyết định phê duyệt.';
+        setInboxState(prev => ({ ...prev, busyKey: null, error: msg }));
+      }
+    }
+
     async function reload() {
       if (request.current.busy) return;
       request.current.busy = true; setBusy(true); setError(null); setUpdated('');
@@ -229,9 +302,55 @@ function createNativeWorkspace(client, React, antd, app, router) {
     const clearSearch = () => { setTerm(''); navigate(catalogPath); };
     const showPages = view === 'reports' || Boolean(appId), count = showPages ? pages.length : matchingApps.length;
     const cards = busy ? h('p', { role: 'status' }, 'Đang cập nhật danh sách trang…')
-      : error ? null : count ? (showPages ? pageCards(pages) : applicationCards(catalog ? matchingApps : matchingApps.slice(0, 3), permissionResult?.role === role ? permissionResult?.permissions : null))
+      : error ? null : count ? (showPages ? pageCards(pages) : applicationCards(catalog ? matchingApps : matchingApps.slice(0, 6), permissionResult?.role === role ? permissionResult?.permissions : null))
         : h(antd.Empty, { description: query ? 'Không tìm thấy trang phù hợp.' : view === 'reports' ? 'Chưa có trang báo cáo được cấp quyền.' : appId ? 'Ứng dụng này chưa có trang được cấp quyền.' : 'Chưa có ứng dụng được cấp quyền.' },
           query ? h(antd.Button, { onClick: clearSearch }, 'Xóa tìm kiếm') : null);
+    const inboxSection = (inboxState.items.length > 0 || inboxState.loading || inboxState.error) ? h('section', {
+      'data-testid': 'ldx-workspace-dxos-inbox',
+      style: { margin: '12px 0 20px', padding: 16, borderRadius: 10, border: '1px solid #dce3ed', background: '#ffffff' },
+    },
+      h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, marginBottom: 12, flexWrap: 'wrap' } },
+        h('h2', { style: { margin: 0, fontSize: 16, fontWeight: 650, color: '#142238' } }, 'Phê duyệt & Đề xuất cần xử lý (DX-OS Inbox)'),
+        inboxState.loading ? h('span', { role: 'status', style: { fontSize: 12, color: '#52657d' } }, 'Đang đồng bộ hộp thư…') : null),
+      inboxState.error ? h(antd.Alert, { type: 'error', message: inboxState.error, showIcon: true, style: { marginBottom: 12 } }) : null,
+      inboxState.items.length > 0 ? h('div', { style: { display: 'grid', gap: 10 } },
+        inboxState.items.map(item => {
+          const itemKey = String(item.itemKey || `${item.source || 'business'}:${item.id || ''}`);
+          const [statusLabel, statusTone] = INBOX_STATUS_LABELS[item.status] || [String(item.status || '—'), ''];
+          const sourceLabel = INBOX_SOURCE_LABELS[item.source] || String(item.source || 'DX-OS');
+          const itemBusy = inboxState.busyKey === itemKey;
+          return h('article', {
+            key: itemKey,
+            'data-testid': 'ldx-inbox-item-' + itemKey,
+            style: {
+              display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+              padding: '12px 14px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc',
+            },
+          },
+            h('div', { style: { display: 'grid', gap: 4, minWidth: 0, flex: 1 } },
+              h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                h('strong', { style: { fontSize: 14, color: '#0f172a' } }, item.title || itemKey),
+                h('span', { className: 'ldx-task-status' }, sourceLabel),
+                h('span', { className: 'ldx-task-status ' + statusTone }, statusLabel)),
+              item.summary ? h('span', { style: { fontSize: 13, color: '#475569' } }, item.summary) : null),
+            item.canAct ? h('div', { style: { display: 'flex', gap: 8, flexShrink: 0 } },
+              h(antd.Button, {
+                type: 'primary',
+                size: 'small',
+                'data-testid': 'ldx-inbox-approve-' + itemKey,
+                loading: itemBusy,
+                disabled: Boolean(inboxState.busyKey),
+                onClick: () => decideInboxItem(item, 'approve'),
+              }, 'Phê duyệt'),
+              h(antd.Button, {
+                danger: true,
+                size: 'small',
+                'data-testid': 'ldx-inbox-reject-' + itemKey,
+                loading: itemBusy,
+                disabled: Boolean(inboxState.busyKey),
+                onClick: () => decideInboxItem(item, 'reject'),
+              }, 'Từ chối')) : null);
+        })) : null) : null;
     return h('section', { className: 'ldx-native-page' },
       h('style', null, css),
       h('h1', null, view === 'reports' ? 'Báo cáo' : catalog ? selectedApp?.title ?? 'Ứng dụng' : 'Công việc của tôi'),
@@ -250,9 +369,10 @@ function createNativeWorkspace(client, React, antd, app, router) {
             h(router.Link, { to: allAppsPath }, 'Xem tất cả ứng dụng →')),
           cards,
           h(antd.Tabs, { activeKey: taskView, onChange: setTaskView, items: [{ key: 'pending', label: 'Cần xử lý' }, { key: 'completed', label: 'Đã xử lý' }] }),
+          inboxSection,
           h(client.SchemaComponent, { key: taskView, components: { WorkspaceNativeTasks: NativeTasks }, schema: { ...todoSchema, name: 'workspaceTasks_' + taskView, properties: { [taskView]: {
             ...todoSchema.properties.nativeTasks,
-            properties: { todos: { ...todoSchema.properties.nativeTasks.properties.todos, 'x-component-props': { view: taskView } } },
+            properties: { todos: { ...todoSchema.properties.nativeTasks.properties.todos, 'x-component-props': { view: taskView, suppressEmpty: inboxState.items.length > 0 } } },
             'x-decorator-props': { params: { filter: taskView === 'pending' ? { status: 0, 'execution.status': 0 } : { status: [1, -3, -5] } } },
           } } } })),
       h('p', { role: 'status', className: 'ldx-native-update' }, !busy && !error ? (catalog ? 'Có ' + count + (showPages ? ' trang' : ' ứng dụng') + ' phù hợp. ' : '') + (updated ? 'Đã cập nhật danh sách trang lúc ' + updated : '') : ''),

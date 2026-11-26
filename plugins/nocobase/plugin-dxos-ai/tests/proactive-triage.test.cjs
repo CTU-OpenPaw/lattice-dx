@@ -1330,7 +1330,7 @@ test('Fix Round 1 (Minor 2-5): entityId backfill, dispatched/ack skip, null-targ
     return acc;
   };
   let tree = render();
-  findAll(tree, (n) => n.type === 'button' && n.children?.includes('6. Duyệt AI (HITL)'))[0].props.onClick();
+  findAll(tree, (n) => n.type === 'button' && n.children?.includes('8. Duyệt AI (HITL)'))[0].props.onClick();
   tree = render();
   const statusSelect = findAll(tree, (n) => n.type === 'select' && n.props?.['data-testid'] === 'dxos-hitl-status-filter')[0];
   statusSelect.props.onChange({ target: { value: 'executed' } });

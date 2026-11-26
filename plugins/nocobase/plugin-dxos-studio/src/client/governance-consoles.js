@@ -64,8 +64,14 @@ function shortHash(hash) {
 
 function formatTs(value) {
   if (!value) return '-';
-  const s = String(value);
-  return s.length > 19 ? s.slice(0, 19).replace('T', ' ') : s;
+  const d = new Date(value);
+  if (!Number.isFinite(d.getTime())) {
+    const s = String(value);
+    return s.length > 19 ? s.slice(0, 19).replace('T', ' ') : s;
+  }
+  const vn = new Date(d.getTime() + 7 * 3600 * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${vn.getUTCFullYear()}-${p(vn.getUTCMonth() + 1)}-${p(vn.getUTCDate())} ${p(vn.getUTCHours())}:${p(vn.getUTCMinutes())}:${p(vn.getUTCSeconds())} (+07:00)`;
 }
 
 function parseSamplesInput(text) {
@@ -252,7 +258,7 @@ function renderApiKeysConsole(h, S, state, patchState, actions, employees, busy)
                 h('td', { style: S.td }, scopes.join(', ') || '-'),
                 h('td', { style: S.td }, formatTs(item.expiresAt)),
                 h('td', { style: S.td }, formatTs(item.lastUsedAt)),
-                h('td', { style: S.td }, h('span', { style: S.badge(isActive ? 'ok' : 'danger') }, isActive ? 'active' : 'revoked')),
+                h('td', { style: S.td }, h('span', { style: S.badge(isActive ? 'ok' : 'danger') }, isActive ? 'Hoạt động' : 'Đã thu hồi')),
                 h('td', { style: S.td },
                   isActive
                     ? h('button', { 'data-testid': `dxos-apikey-revoke-${item.id}`, type: 'button', disabled: busy, onClick: () => actions.revokeApiKey(item.id), style: S.btn(false, true, busy) }, 'Thu hồi')
@@ -336,7 +342,7 @@ function renderLedgerConsole(h, S, state, patchState, actions, busy) {
       h('table', { 'data-testid': 'dxos-ledger-entries-table', style: S.table },
         h('thead', null,
           h('tr', null,
-            ['Seq', 'Event Type', 'Collection', 'Record ID', 'Entry Hash', 'Merkle Root', 'Recorded At'].map((c) => h('th', { key: c, style: S.th }, c)),
+            ['STT', 'Loại sự kiện', 'Bảng dữ liệu', 'Mã bản ghi', 'Mã băm', 'Gốc Merkle', 'Thời điểm (+07:00)'].map((c) => h('th', { key: c, style: S.th }, c)),
           ),
         ),
         h('tbody', null,
@@ -496,9 +502,9 @@ function renderDataGovConsole(h, S, state, patchState, actions, busy) {
                 h('td', { style: S.td }, h('span', { style: S.badge(renderStatusTone(q.status)) }, q.status)),
                 h('td', { style: { ...S.td, display: 'flex', gap: 6 } },
                   q.status === 'quarantined' ? [
-                    h('button', { key: 'app', 'data-testid': `dxos-quarantine-approve-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'approved_release'), style: S.btn(true, false, busy) }, 'Approve / Release'),
-                    h('button', { key: 'rej', 'data-testid': `dxos-quarantine-reject-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'rejected'), style: S.btn(false, true, busy) }, 'Reject'),
-                  ] : h('span', { style: { fontSize: 11, color: '#64748b' } }, q.resolvedBy || 'Resolved'),
+                    h('button', { key: 'app', 'data-testid': `dxos-quarantine-approve-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'approved_release'), style: S.btn(true, false, busy) }, 'Phê duyệt / Phát hành'),
+                    h('button', { key: 'rej', 'data-testid': `dxos-quarantine-reject-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'rejected'), style: S.btn(false, true, busy) }, 'Từ chối'),
+                  ] : h('span', { style: { fontSize: 11, color: '#64748b' } }, q.resolvedBy || 'Đã xử lý'),
                 ),
               )),
           ),
@@ -523,7 +529,7 @@ function renderWmsEpodConsole(h, S, state, patchState, actions, busy) {
 
     h('div', { style: S.tableWrap },
       h('table', { 'data-testid': 'dxos-wms-lots-table', style: S.table },
-        h('thead', null, h('tr', null, ['Lot Code', 'SKU', 'Sản phẩm', 'Tồn kho', 'Đang giữ', 'Hạn dùng', 'MKT (°C)', 'Trạng thái'].map((c) => h('th', { key: c, style: S.th }, c)))),
+        h('thead', null, h('tr', null, ['Mã lô', 'SKU', 'Sản phẩm', 'Tồn kho', 'Đang giữ', 'Hạn dùng', 'MKT (°C)', 'Trạng thái'].map((c) => h('th', { key: c, style: S.th }, c)))),
         h('tbody', null,
           !lots.length
             ? h('tr', null, h('td', { colSpan: 8, style: { ...S.td, color: '#64748b' } }, 'Chưa có lô hàng nào trong kho.'))
@@ -663,13 +669,13 @@ function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEdito
 
   return h('div', { 'data-testid': 'dxos-governance-console-dmn', style: S.card },
     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-      h('h3', { style: { margin: 0, fontSize: 16 } }, 'Declarative DMN Decision Table Studio'),
+      h('h3', { style: { margin: 0, fontSize: 16 } }, 'Trình thiết kế Bảng Quyết định DMN'),
       h('button', { type: 'button', onClick: actions.loadDmnTables, disabled: loading, style: S.btn(false, false, loading) }, 'Làm mới Bảng DMN'),
     ),
 
     h('div', { style: S.tableWrap },
       h('table', { style: S.table },
-        h('thead', null, h('tr', null, ['Table Key', 'Tên bảng', 'Hit Policy', 'Phiên bản', 'Số luật', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
+        h('thead', null, h('tr', null, ['Mã bảng', 'Tên bảng', 'Chính sách khớp', 'Phiên bản', 'Số luật', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
         h('tbody', null,
           !tables.length
             ? h('tr', null, h('td', { colSpan: 6, style: { ...S.td, color: '#64748b' } }, 'Chưa có bảng DMN nào.'))
@@ -734,7 +740,7 @@ function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEdito
             ),
             h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Chạy Mô phỏng DMN'),
             simResult ? h('div', { 'data-testid': 'dxos-dmn-eval-result', style: { padding: 10, borderRadius: 6, background: '#ffffff', border: '1px solid #cbd5e1', fontSize: 12, display: 'grid', gap: 4 } },
-              h('div', null, h('strong', null, `Matched: ${simResult.matched ? 'YES' : 'NO'}`), ` · Hit Policy: ${simResult.hitPolicy} · Matched Rule Index: ${simResult.matchedRuleIndex ?? '-'}`),
+              h('div', null, h('strong', null, `Khớp: ${simResult.matched ? 'CÓ' : 'KHÔNG'}`), ` · Chính sách: ${simResult.hitPolicy} · Chỉ số luật khớp: ${simResult.matchedRuleIndex ?? '-'}`),
               h('pre', { style: { margin: 0, fontSize: 11, overflowX: 'auto' } }, JSON.stringify(simResult.hitPolicy === 'COLLECT' ? simResult.results : (simResult.outputs ?? simResult.result), null, 2)),
             ) : null,
           ),
@@ -819,7 +825,7 @@ function renderDelegationsConsole(h, S, state, patchState, actions, employees, b
 
     h('div', { style: S.tableWrap },
       h('table', { style: S.table },
-        h('thead', null, h('tr', null, ['UID', 'Delegate User', 'Vai trò', 'Scope', 'Hiệu lực', 'Trạng thái', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
+        h('thead', null, h('tr', null, ['UID', 'Người được ủy quyền', 'Vai trò', 'Phạm vi', 'Hiệu lực', 'Trạng thái', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
         h('tbody', null,
           !items.length
             ? h('tr', null, h('td', { colSpan: 7, style: { ...S.td, color: '#64748b' } }, 'Chưa có ủy quyền nào.'))
@@ -831,7 +837,7 @@ function renderDelegationsConsole(h, S, state, patchState, actions, employees, b
                 h('td', { style: S.td }, d.roleName),
                 h('td', { style: S.td }, d.scopeCollection || 'Tất cả'),
                 h('td', { style: S.td }, `${formatTs(d.startsAt)} -> ${formatTs(d.endsAt)}`),
-                h('td', { style: S.td }, h('span', { style: S.badge(renderStatusTone(d.status)) }, d.status)),
+                h('td', { style: S.td }, h('span', { style: S.badge(renderStatusTone(d.status)) }, active ? 'Hoạt động' : 'Đã thu hồi')),
                 h('td', { style: S.td },
                   active
                     ? h('button', { 'data-testid': `dxos-delegation-revoke-${d.delegationUid}`, type: 'button', disabled: busy, onClick: () => actions.revokeDelegation(d), style: S.btn(false, true, busy) }, 'Thu hồi')

@@ -854,7 +854,7 @@ test('ai-studio-page renders Tab 5 Quota, readable metric chips, model presets, 
   assert.equal(dump1.includes('Số vai trò: 5'), true);
   assert.equal(dump1.includes('rolesCount:'), false);
   assert.equal(dump1.includes('{"rolesCount":5}'), false);
-  assert.equal(dump1.includes('5. Hạn mức & Chi phí AI'), true);
+  assert.equal(dump1.includes('9. Hạn mức & Chi phí AI'), true);
   let readyPillStyle = null;
   walk(tab1.tree, (n) => {
     if (n.type === 'span' && n.children?.includes('Sẵn sàng')) readyPillStyle = n.props?.style;
@@ -1004,7 +1004,7 @@ test('ai-studio-page Tab 5 debounces/defers org input queries with stale-respons
   }, { defaultOrganizationId: 'native-ui-lab' });
 
   let tree5 = harness5.render();
-  const tab5Btn = findAll(tree5, (n) => n.type === 'button' && n.children?.includes('5. Hạn mức & Chi phí AI'))[0];
+  const tab5Btn = findAll(tree5, (n) => n.type === 'button' && n.children?.includes('9. Hạn mức & Chi phí AI'))[0];
   tab5Btn.props.onClick();
   tree5 = harness5.render();
   assert.deepEqual(quotaRequests, ['native-ui-lab']);
@@ -1170,8 +1170,8 @@ test('ai-studio-page renders Tab 6 HITL Approval Queue with diffPreview, risk ba
   };
 
   let tree = render();
-  const hitlTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('6. Duyệt AI (HITL)'))[0];
-  assert.ok(hitlTabBtn, 'Tab 6 Duyệt AI (HITL) button must exist');
+  const hitlTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('8. Duyệt AI (HITL)'))[0];
+  assert.ok(hitlTabBtn, 'Tab 8 Duyệt AI (HITL) button must exist');
   hitlTabBtn.props.onClick();
   tree = render();
   await new Promise((r) => setTimeout(r, 15));
@@ -1937,7 +1937,7 @@ test('Task 16: multi-tenant non-native-ui-lab org resolution works dynamically a
   let tree = render();
   await new Promise((r) => setTimeout(r, 15));
   tree = render();
-  const quotaTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('5. Hạn mức & Chi phí AI'))[0];
+  const quotaTabBtn = findAll(tree, (n) => n.type === 'button' && n.children?.includes('9. Hạn mức & Chi phí AI'))[0];
   quotaTabBtn.props.onClick();
   tree = render();
   await new Promise((r) => setTimeout(r, 15));
@@ -2750,10 +2750,15 @@ test('Task 11: ai-studio-page renders Tab 7 Built Apps Manager (dxos-tab-built-a
   assert.ok(bundleBox, 'Export must display bundle v3 preview');
   assert.equal(JSON.stringify(bundleBox).includes('latticedx.solution-bundle/v3'), true);
 
-  // Teardown (keepData: true default)
+  // Teardown (keepData: true default via confirmation modal)
   const teardownBtn = findByTestId(tree, 'dxos-built-app-teardown-cold-fleet-suite');
   assert.ok(teardownBtn, 'Teardown button must exist');
-  await teardownBtn.props.onClick();
+  teardownBtn.props.onClick();
+  tree = render();
+  assert.equal(apiCalls.some((c) => c.url === 'dxosAi:teardownBuiltApp' && c.method === 'post'), false, 'Must wait for modal confirm');
+  const confirmTeardownOk = findByTestId(tree, 'dxos-confirm-modal-ok');
+  assert.ok(confirmTeardownOk, 'Confirm modal OK button must render before teardown');
+  await confirmTeardownOk.props.onClick();
   tree = render();
   const tdReq = apiCalls.find((c) => c.url === 'dxosAi:teardownBuiltApp' && c.method === 'post');
   assert.ok(tdReq, 'Teardown must POST dxosAi:teardownBuiltApp');

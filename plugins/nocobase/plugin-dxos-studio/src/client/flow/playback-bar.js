@@ -115,9 +115,9 @@ function createPlaybackBar(React) {
       },
     },
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#78350f' } },
-        h('strong', null, 'HITL Approval Gate'),
-        h('span', null, `Run ${selectedRun.runUid || ''} đang tạm dừng tại node "${selectedRun.suspendedNodeId || 'approval'}"`),
-        suspendedState?.approverRole ? h('span', { style: statusBadgeStyle('suspended') }, `Role: ${suspendedState.approverRole}`) : null,
+        h('strong', null, 'Cổng Phê duyệt (HITL)'),
+        h('span', null, `Phiên ${selectedRun.runUid || ''} đang tạm dừng tại nút "${selectedRun.suspendedNodeId || 'approval'}"`),
+        suspendedState?.approverRole ? h('span', { style: statusBadgeStyle('suspended') }, `Vai trò: ${suspendedState.approverRole}`) : null,
         suspendedState?.title ? h('span', null, `· ${suspendedState.title}`) : null,
       ),
       h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
@@ -127,14 +127,14 @@ function createPlaybackBar(React) {
           disabled: Boolean(resumeBusy),
           onClick: () => { if (typeof onResumeApproval === 'function') onResumeApproval(selectedRun.runUid, 'approved'); },
           style: resumeBusy ? vcrButtonStyle(true) : { padding: '5px 12px', borderRadius: 6, border: '1px solid #16a34a', background: '#16a34a', color: '#ffffff', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
-        }, 'Approve'),
+        }, 'Phê duyệt'),
         h('button', {
           type: 'button',
           'data-testid': 'dxos-flow-hitl-reject-btn',
           disabled: Boolean(resumeBusy),
           onClick: () => { if (typeof onResumeApproval === 'function') onResumeApproval(selectedRun.runUid, 'rejected'); },
           style: resumeBusy ? vcrButtonStyle(true) : { padding: '5px 12px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 12, fontWeight: 700, cursor: 'pointer' },
-        }, 'Reject'),
+        }, 'Từ chối'),
       ),
     ) : null;
 
@@ -166,7 +166,7 @@ function createPlaybackBar(React) {
             'data-testid': 'dxos-flow-vcr-play-btn',
             onClick: () => { if (typeof onTogglePlay === 'function') onTogglePlay(); },
             style: vcrButtonStyle(false, Boolean(playing)),
-          }, playing ? 'Pause' : 'Play') : null,
+          }, playing ? 'Tạm dừng' : 'Phát') : null,
         )
         : h(React.Fragment, null,
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 10 } },
@@ -178,7 +178,7 @@ function createPlaybackBar(React) {
                 onChange: handleRunSelect,
                 style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#f8fafc', fontSize: 12, color: '#0f172a', minWidth: 210 },
               },
-                h('option', { value: '' }, '-- Chọn Run / Trace --'),
+                h('option', { value: '' }, '-- Chọn Phiên chạy / Trace --'),
                 runOptions.map((r) => {
                   const uid = String(r.runUid || r.id || '');
                   return h('option', { key: uid, value: uid }, `${uid} · ${r.status || 'completed'} (${r.durationMs ?? 0}ms)`);
@@ -188,14 +188,14 @@ function createPlaybackBar(React) {
             h('div', { style: { display: 'flex', alignItems: 'center', gap: 4 } },
               h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-first-btn', disabled: !canPrev, onClick: () => onStepChange?.(0), style: vcrButtonStyle(!canPrev) }, '|<'),
               h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-prev-btn', disabled: !canPrev, onClick: () => onStepChange?.(Math.max(0, activeIdx - 1)), style: vcrButtonStyle(!canPrev) }, '<'),
-              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-play-btn', disabled: !canPlay, onClick: () => onTogglePlay?.(), style: vcrButtonStyle(!canPlay, Boolean(playing)) }, playing ? 'Pause' : 'Play'),
+              h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-play-btn', disabled: !canPlay, onClick: () => onTogglePlay?.(), style: vcrButtonStyle(!canPlay, Boolean(playing)) }, playing ? 'Tạm dừng' : 'Phát'),
               h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-next-btn', disabled: !canNext, onClick: () => onStepChange?.(Math.min(traces.length - 1, activeIdx + 1)), style: vcrButtonStyle(!canNext) }, '>'),
               h('button', { type: 'button', 'data-testid': 'dxos-flow-vcr-last-btn', disabled: !canNext, onClick: () => onStepChange?.(traces.length - 1), style: vcrButtonStyle(!canNext) }, '>|'),
             ),
             h('div', { 'data-testid': 'dxos-flow-step-badge', style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#334155' } },
               currentTrace
                 ? h(React.Fragment, null,
-                  h('strong', null, `Step ${activeIdx + 1}/${traces.length}`),
+                  h('strong', null, `Bước ${activeIdx + 1}/${traces.length}`),
                   h('span', null, currentTrace.label || currentTrace.nodeId || currentTrace.type || '-'),
                   h('span', { style: statusBadgeStyle(currentTrace.status) }, currentTrace.status || 'completed'),
                   h('span', { style: { fontFamily: 'monospace', fontSize: 11, color: '#64748b' } }, `${currentTrace.durationMs ?? 0}ms`),

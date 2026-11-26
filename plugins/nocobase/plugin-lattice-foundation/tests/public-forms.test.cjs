@@ -1900,3 +1900,214 @@ test('public-form-html includes Vietnamese priority labels, 1-click copy token b
     assert.match(errHtml, /Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận\./);
   });
 });
+
+test('public-form-page places honeypot after all real inputs and validates empty/invalid fields in Vietnamese with 0 submit calls', async () => {
+  const { createPublicFormPage } = require('../src/client-v2/public-form-page');
+  const fakeReact = createFakeReact();
+  const requests = [];
+  const mockApi = {
+    async request(req) {
+      requests.push(req);
+      if (req.url === 'dxosForms:meta') {
+        return {
+          data: {
+            data: {
+              slug: 'service-intake',
+              title: 'Phiếu dịch vụ',
+              honeypotField: '_hp_website',
+              requireAccessToken: true,
+              active: true,
+              fields: [
+                { name: 'subject', label: 'Tiêu đề', type: 'string', required: true, maxLength: 50 },
+                { name: 'requesterEmail', label: 'Email liên hệ', type: 'email', required: true },
+                { name: 'qty', label: 'Số lượng', type: 'integer', min: 1, max: 5, required: true },
+              ],
+            },
+          },
+        };
+      }
+      return { data: { data: { ok: true } } };
+    },
+  };
+
+  const PublicFormPage = createPublicFormPage({ Plugin: class {} }, fakeReact, { apiClient: mockApi });
+  let tree = fakeReact._render(PublicFormPage, { apiClient: mockApi, slug: 'service-intake' });
+  await fakeReact._flushEffects();
+  tree = fakeReact._render(PublicFormPage, { apiClient: mockApi, slug: 'service-intake' });
+
+  const formEl = findNode(tree, (n) => n.type === 'form');
+  assert.ok(formEl);
+  assert.equal(formEl.props.noValidate, true);
+
+  // Honeypot must appear AFTER tokenInput and all real inputs, immediately before submit button
+  const orderedTestIds = [];
+  (function walk(node) {
+    if (!node || typeof node !== 'object') return;
+    const tid = node.props?.['data-testid'];
+    if (tid) orderedTestIds.push(tid);
+    if (node.type === 'input' || node.type === 'textarea' || node.type === 'select') {
+      if (node.props?.name) orderedTestIds.push(`field:${node.props.name}`);
+    }
+    const ch = node.children || (node.props?.children ? (Array.isArray(node.props.children) ? node.props.children : [node.props.children]) : []);
+    for (const c of ch) walk(c);
+  })(formEl);
+
+  const tokenIdx = orderedTestIds.indexOf('public-form-token-input');
+  const qtyIdx = orderedTestIds.indexOf('field:qty');
+  const hpIdx = orderedTestIds.indexOf('public-form-honeypot');
+  const submitIdx = orderedTestIds.indexOf('public-form-submit-btn');
+  assert.ok(tokenIdx >= 0 && qtyIdx > tokenIdx, 'Real fields must follow token input');
+  assert.ok(hpIdx > qtyIdx, `Honeypot (${hpIdx}) must appear after last real field (${qtyIdx})`);
+  assert.ok(submitIdx > hpIdx, 'Submit button must follow honeypot');
+
+  // Empty submit must show Vietnamese inline validation and make 0 dxosForms:submit calls
+  const beforeCount = requests.filter((r) => r.url === 'dxosForms:submit').length;
+  assert.equal(beforeCount, 0);
+  await formEl.props.onSubmit({ preventDefault() {} });
+  tree = fakeReact._render(PublicFormPage, { apiClient: mockApi, slug: 'service-intake' });
+  assert.equal(requests.filter((r) => r.url === 'dxosForms:submit').length, 0);
+  const errBox = findNode(tree, (n) => n.props?.['data-testid'] === 'public-form-error');
+  assert.ok(errBox && collectText(errBox).length > 0, 'Expected Vietnamese summary validation message');
+  const tokenErr = findNode(tree, (n) => n.props?.['data-testid'] === 'public-form-token-error');
+  const subjectErr = findNode(tree, (n) => n.props?.['data-testid'] === 'public-form-field-error-subject');
+  assert.ok(tokenErr && collectText(tokenErr).includes('Vui lòng'), 'Expected Vietnamese token inline error');
+  assert.ok(subjectErr && collectText(subjectErr).includes('Vui lòng'), 'Expected Vietnamese subject inline error');
+
+  // Invalid email + out-of-range integer also caught before API submit
+  findNode(tree, (n) => n.props?.['data-testid'] === 'public-form-token-input').props.onChange({ target: { value: 'tok123' } });
+  findNode(tree, (n) => n.props?.name === 'subject').props.onChange({ target: { value: 'Yêu cầu' } });
+  findNode(tree, (n) => n.props?.name === 'requesterEmail').props.onChange({ target: { value: 'invalid-email' } });
+  findNode(tree, (n) => n.props?.name === 'qty').props.onChange({ target: { value: '12' } });
+  tree = fakeReact._render(PublicFormPage, { apiClient: mockApi, slug: 'service-intake' });
+  await findNode(tree, (n) => n.type === 'form').props.onSubmit({ preventDefault() {} });
+  tree = fakeReact._render(PublicFormPage, { apiClient: mockApi, slug: 'service-intake' });
+  assert.equal(requests.filter((r) => r.url === 'dxosForms:submit').length, 0);
+  const emailErr = findNode(tree, (n) => n.props?.['data-testid'] === 'public-form-field-error-requesterEmail');
+  const qtyErr = findNode(tree, (n) => n.props?.['data-testid'] === 'public-form-field-error-qty');
+  assert.ok(emailErr && collectText(emailErr).includes('Email'), 'Expected Vietnamese email validation error');
+  assert.ok(qtyErr && collectText(qtyErr).includes('tối đa'), 'Expected Vietnamese max range validation error');
+});
+
+test('public-form-html places honeypot last before submit and enforces novalidate inline Vietnamese validation with 0 fetch calls', async () => {
+  await withMockedNocobase(async () => {
+    const vm = require('node:vm');
+    const { renderPublicFormHtml } = require('../src/server/public-form-html');
+    const html = renderPublicFormHtml({
+      slug: 'service-intake',
+      formMeta: {
+        slug: 'service-intake',
+        title: 'Phiếu tiếp nhận',
+        fields: [
+          { name: 'subject', label: 'Tiêu đề', type: 'string', required: true, maxLength: 40 },
+          { name: 'requesterEmail', label: 'Email', type: 'email', required: true },
+          { name: 'qty', label: 'Số lượng', type: 'integer', min: 1, max: 5, required: true },
+        ],
+        honeypotField: '_hp_website',
+        requireAccessToken: true,
+        active: true,
+      },
+      nonce: 'nonce-hp-val-1',
+    });
+
+    const scriptMatches = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
+    const bootstrapJson = scriptMatches[0][1];
+    const inlineJs = scriptMatches[1][1];
+
+    const fetchCalls = [];
+    const createdNodes = [];
+    const makeNode = (tag) => {
+      const node = {
+        tagName: String(tag || '').toUpperCase(),
+        attrs: {},
+        children: [],
+        listeners: {},
+        value: '',
+        checked: false,
+        disabled: false,
+        textContent: '',
+        className: '',
+        focused: false,
+        classList: {
+          add(c) { if (!node.className.split(/\s+/).includes(c)) node.className = `${node.className} ${c}`.trim(); },
+          remove(c) { node.className = node.className.split(/\s+/).filter((x) => x !== c).join(' '); },
+          contains(c) { return node.className.split(/\s+/).includes(c); },
+        },
+        setAttribute(k, v) { node.attrs[k] = v; if (k === 'value') node.value = v; },
+        getAttribute(k) { return node.attrs[k]; },
+        appendChild(c) { node.children.push(c); return c; },
+        removeChild(c) { const i = node.children.indexOf(c); if (i >= 0) node.children.splice(i, 1); },
+        get firstChild() { return node.children[0] || null; },
+        addEventListener(ev, fn) { (node.listeners[ev] ||= []).push(fn); },
+        focus() { node.focused = true; },
+      };
+      createdNodes.push(node);
+      return node;
+    };
+
+    const rootEl = makeNode('main');
+    const bootEl = { textContent: bootstrapJson };
+    vm.runInNewContext(inlineJs, {
+      URLSearchParams,
+      Date,
+      Promise,
+      Error,
+      Number,
+      RegExp,
+      Object,
+      Array,
+      String,
+      Boolean,
+      setTimeout,
+      window: { location: { search: '' } },
+      document: {
+        getElementById: (id) => (id === 'dxos-public-form-root' ? rootEl : (id === 'dxos-form-bootstrap' ? bootEl : null)),
+        createElement: makeNode,
+      },
+      fetch: async (u, opts) => { fetchCalls.push({ u, opts }); return { ok: true, json: async () => ({}) }; },
+    });
+
+    const formNode = createdNodes.find((n) => n.attrs['data-testid'] === 'public-form-element');
+    assert.ok(formNode);
+    assert.equal(Object.hasOwn(formNode.attrs, 'novalidate'), true, 'SSR form must set novalidate');
+
+    // Collect leaf inputs & submit button in DOM traversal order inside formNode
+    const domOrder = [];
+    (function walk(n) {
+      if (n.attrs['data-testid']) domOrder.push(n.attrs['data-testid']);
+      if (n.attrs.name && (n.tagName === 'INPUT' || n.tagName === 'TEXTAREA' || n.tagName === 'SELECT')) {
+        domOrder.push(`name:${n.attrs.name}`);
+      }
+      for (const c of n.children) walk(c);
+    })(formNode);
+
+    const tokenPos = domOrder.indexOf('public-form-token-input');
+    const qtyPos = domOrder.indexOf('name:qty');
+    const hpPos = domOrder.indexOf('public-form-honeypot');
+    const submitPos = domOrder.indexOf('public-form-submit-btn');
+    assert.ok(tokenPos >= 0 && qtyPos > tokenPos);
+    assert.ok(hpPos > qtyPos, `Expected honeypot (${hpPos}) after last real field (${qtyPos}) in ${JSON.stringify(domOrder)}`);
+    assert.ok(submitPos > hpPos, 'Submit button must come after honeypot');
+
+    // Empty submit shows inline Vietnamese errors with 0 fetch calls
+    let prevented = false;
+    for (const fn of formNode.listeners.submit || []) {
+      fn({ preventDefault() { prevented = true; } });
+    }
+    assert.equal(prevented, true);
+    assert.equal(fetchCalls.length, 0, 'Empty submit must trigger 0 fetch calls');
+
+    const formErr = createdNodes.find((n) => n.attrs['data-testid'] === 'public-form-error');
+    const tokErr = createdNodes.find((n) => n.attrs['data-testid'] === 'public-form-token-error');
+    const subjErr = createdNodes.find((n) => n.attrs['data-testid'] === 'public-form-field-error-subject');
+    assert.ok(formErr && !formErr.classList.contains('dxos-hidden') && formErr.textContent.length > 0);
+    assert.ok(tokErr && !tokErr.classList.contains('dxos-hidden') && tokErr.textContent.includes('Vui lòng'));
+    assert.ok(subjErr && !subjErr.classList.contains('dxos-hidden') && subjErr.textContent.includes('Vui lòng'));
+
+    // Typing into subject clears its inline error
+    const subjInput = createdNodes.find((n) => n.attrs.name === 'subject');
+    subjInput.value = 'Yêu cầu hợp lệ';
+    for (const fn of subjInput.listeners.input || []) fn();
+    assert.equal(subjErr.classList.contains('dxos-hidden'), true);
+    assert.equal(subjErr.textContent, '');
+  });
+});

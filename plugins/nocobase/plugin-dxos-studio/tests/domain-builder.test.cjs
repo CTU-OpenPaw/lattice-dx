@@ -1490,3 +1490,98 @@ test('sanitizeFields and createDomain reject own prototype-pollution keys and ex
   );
   assert.equal(({}).polluted, undefined);
 });
+
+test('mapFieldSpecToNocoBase stores rich validation in uiSchema[x-validation] without breaking NocoBase Joi options.validation and clears stale non-Joi validation on sync', async () => {
+  const { mapFieldSpecToNocoBase, createOrUpdateDomainCollection } = require('../src/server/domain-builder');
+  const mapped = mapFieldSpecToNocoBase({
+    name: 'priority',
+    type: 'string',
+    title: 'Độ ưu tiên',
+    required: true,
+    enumValues: ['low', 'high'],
+    validation: { required: true, enum: ['low', 'high'] },
+  });
+  assert.equal(mapped.validation, undefined);
+  assert.equal(mapped.options?.validation, undefined);
+  assert.deepEqual(mapped.uiSchema['x-validation'], { required: true, enum: ['low', 'high'] });
+  assert.equal(mapped.interface, 'select');
+
+  const fieldsStore = [
+    {
+      id: 10,
+      collectionName: 'latticeCustomLegacyVal',
+      name: 'code',
+      type: 'string',
+      options: { validation: { required: true }, allowNull: false },
+    },
+  ];
+  const updatedPayloads = [];
+  const inMemoryField = {
+    name: 'code',
+    type: 'string',
+    options: { validation: { required: true }, allowNull: false },
+  };
+  const db = {
+    getRepository(name) {
+      if (name === 'fields') {
+        return {
+          async findOne({ filter }) {
+            return fieldsStore.find((r) => r.collectionName === filter.collectionName && r.name === filter.name) || null;
+          },
+          async find({ filter = {} } = {}) {
+            return fieldsStore.filter((r) => !filter.collectionName || r.collectionName === filter.collectionName);
+          },
+          async create({ values }) {
+            const row = { id: fieldsStore.length + 1, ...structuredClone(values) };
+            fieldsStore.push(row);
+            return row;
+          },
+          async update({ filter, values }) {
+            updatedPayloads.push(structuredClone(values));
+            const row = fieldsStore.find((r) => r.collectionName === filter.collectionName && r.name === filter.name);
+            if (row) {
+              Object.assign(row, structuredClone(values));
+              if (values.validation === null && row.options) {
+                delete row.options.validation;
+              }
+            }
+            return [1];
+          },
+        };
+      }
+      return {
+        async findOne() { return null; },
+        async find() { return []; },
+        async create({ values }) { return { id: 1, ...values }; },
+        async update() { return [1]; },
+      };
+    },
+    collection(def) {
+      return {
+        ...def,
+        fields: new Map([['code', inMemoryField]]),
+        async sync() {},
+      };
+    },
+    getCollection() { return null; },
+    async attachLatticeRlsPolicy() {},
+    sequelize: {
+      getDialect: () => 'postgres',
+      async query(sql) {
+        if (String(sql).includes('FROM pg_class')) return [[{ rls_enabled: true, rls_forced: true }], []];
+        return [[], []];
+      },
+    },
+  };
+
+  await createOrUpdateDomainCollection(db, {
+    collectionName: 'latticeCustomLegacyVal',
+    title: 'Legacy Validation Fix',
+    fields: [{ name: 'code', type: 'string', title: 'Code', required: true }],
+  });
+
+  const codeUpdate = updatedPayloads.find((p) => p.name === 'code');
+  assert.ok(codeUpdate);
+  assert.equal(codeUpdate.validation, null);
+  assert.equal(inMemoryField.options.validation, undefined);
+});

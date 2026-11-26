@@ -489,7 +489,7 @@ function sanitizeCreativeBlueprintPayload(raw = {}) {
   };
 }
 
-async function capturePageSnapshot(db, { portalSlug, pageTitle = '', note = '', createdByUsername = 'admin' }, val) {
+async function capturePageSnapshot(db, { portalSlug, pageTitle = '', note = '', createdByUsername = 'admin', organizationId = null }, val) {
   await ensureUiSnapshotsReady(db);
   const { flowModelsRepo, pageRoute, tabSchemaUid, grid } = await resolvePageGrid(db, portalSlug, pageTitle, val);
   if (!grid || !flowModelsRepo) return null;
@@ -502,7 +502,9 @@ async function capturePageSnapshot(db, { portalSlug, pageTitle = '', note = '', 
     blocks.push({ uid: meta.uid, use: meta.use, props: meta.props, stepParams: meta.stepParams });
   }
   const snapshotUid = `snap-${portalSlug}-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`;
+  const cleanOrg = organizationId ? String(organizationId).trim() : null;
   const values = {
+    ...(cleanOrg ? { organizationId: cleanOrg } : {}),
     snapshotUid,
     portalSlug,
     pageTitle: val(pageRoute, 'title') || pageTitle || null,
@@ -518,19 +520,27 @@ async function capturePageSnapshot(db, { portalSlug, pageTitle = '', note = '', 
   return values;
 }
 
-async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid = '' }, val) {
+async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid = '', organizationId = null, allowCrossOrg = true }, val) {
   await ensureUiSnapshotsReady(db);
   const snapRepo = db?.getRepository?.('latticeUiSnapshots');
   if (!snapRepo) return { rolledBack: false, reason: 'latticeUiSnapshots repository unavailable' };
+  const cleanOrg = organizationId ? String(organizationId).trim() : '';
   let targetSnap = null;
   if (snapshotUid) {
     targetSnap = await snapRepo.findOne({ filter: { snapshotUid } });
+    if (targetSnap && !allowCrossOrg && cleanOrg) {
+      const snapOrg = String(val(targetSnap, 'organizationId') || '').trim();
+      if (snapOrg && snapOrg !== cleanOrg) {
+        return { rolledBack: false, code: 'DXOS_ORG_MISMATCH', reason: 'Không được phép hoàn tác snapshot của tổ chức khác.' };
+      }
+    }
   } else {
+    const orgFilter = !allowCrossOrg && cleanOrg ? { organizationId: cleanOrg } : {};
     if (pageTitle) {
-      targetSnap = (await snapRepo.find({ filter: { portalSlug, pageTitle }, sort: ['-id'], limit: 1 }))?.[0] || null;
+      targetSnap = (await snapRepo.find({ filter: { portalSlug, pageTitle, ...orgFilter }, sort: ['-id'], limit: 1 }))?.[0] || null;
     }
     if (!targetSnap) {
-      targetSnap = (await snapRepo.find({ filter: { portalSlug }, sort: ['-id'], limit: 1 }))?.[0] || null;
+      targetSnap = (await snapRepo.find({ filter: { portalSlug, ...orgFilter }, sort: ['-id'], limit: 1 }))?.[0] || null;
     }
   }
   if (!targetSnap) return { rolledBack: false, reason: `Không tìm thấy snapshot cho portal "${portalSlug}".` };
@@ -948,7 +958,7 @@ function createSurfaceAndCreativeTools(deps) {
         }
         if (!grid || !flowModelsRepo) throw failTool('PAGE_GRID_NOT_FOUND', 404, `Không tìm thấy trang/grid trên portal "${args.portalSlug}".`);
 
-        await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: `Before creative block: ${cleanBp.title}`, createdByUsername: actor.username }, val);
+        await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: val(pageRoute, 'title') || args.pageTitle, note: `Before creative block: ${cleanBp.title}`, createdByUsername: actor.username, organizationId: actor.organizationId }, val);
 
         const uid = args.blockUid || `dxos-cr-${args.portalSlug}-${Date.now().toString(36)}`;
         const cfg = { title: cleanBp.title, blueprintJson: JSON.stringify(cleanBp) };
@@ -1012,16 +1022,21 @@ function createSurfaceAndCreativeTools(deps) {
         if (!SLUG_RE.test(args.portalSlug)) throw failTool('PORTAL_SLUG_INVALID', 400, 'Slug portal không hợp lệ.');
         await ensureUiSnapshotsReady(db);
         if (args.action === 'snapshot') {
-          const snap = await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: args.note || 'Manual snapshot', createdByUsername: actor.username }, val);
+          const snap = await capturePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, note: args.note || 'Manual snapshot', createdByUsername: actor.username, organizationId: actor.organizationId }, val);
           return { saved: Boolean(snap), snapshot: snap };
         }
         if (args.action === 'listSnapshots') {
           const snapRepo = db?.getRepository?.('latticeUiSnapshots');
-          const rows = snapRepo ? (await snapRepo.find({ filter: { portalSlug: args.portalSlug }, sort: ['-id'], limit: 15 })) || [] : [];
+          const snapFilter = {
+            portalSlug: args.portalSlug,
+            ...(!actor.isRoot && actor.organizationId ? { organizationId: actor.organizationId } : {}),
+          };
+          const rows = snapRepo ? (await snapRepo.find({ filter: snapFilter, sort: ['-id'], limit: 15 })) || [] : [];
           return {
             portalSlug: args.portalSlug,
             snapshots: rows.map((r) => ({
               snapshotUid: val(r, 'snapshotUid'),
+              organizationId: val(r, 'organizationId') || null,
               pageTitle: val(r, 'pageTitle'),
               note: val(r, 'note'),
               blockCount: Array.isArray(val(r, 'blocks')) ? val(r, 'blocks').length : 0,
@@ -1029,7 +1044,7 @@ function createSurfaceAndCreativeTools(deps) {
             })),
           };
         }
-        return restorePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, snapshotUid: args.snapshotUid }, val);
+        return restorePageSnapshot(db, { portalSlug: args.portalSlug, pageTitle: args.pageTitle, snapshotUid: args.snapshotUid, organizationId: actor.organizationId, allowCrossOrg: Boolean(actor.isRoot) }, val);
       },
     }),
 

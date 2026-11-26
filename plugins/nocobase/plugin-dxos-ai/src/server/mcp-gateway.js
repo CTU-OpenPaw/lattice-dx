@@ -100,9 +100,9 @@ const MCP_PROMPT_CATALOG = [
 
 function resolveGatewayVersion() {
   try {
-    return String(require('../../package.json')?.version || '0.4.0');
+    return String(require('../../package.json')?.version || '0.4.1');
   } catch {
-    return '0.4.0';
+    return '0.4.1';
   }
 }
 
@@ -595,6 +595,7 @@ function createMcpGatewayMiddleware({ app, db, tools = [], itOtTools = [], env =
 
 module.exports = {
   SUPPORTED_PROTOCOL_VERSIONS,
+  MCP_PROMPT_CATALOG,
   extractBearerToken,
   normalizeMcpPath,
   createMcpGatewayMiddleware,

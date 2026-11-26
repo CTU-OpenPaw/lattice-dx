@@ -9,8 +9,11 @@
 'use strict';
 
 const { listWorkflowTemplates, buildWorkflowTemplate } = require('./workflow-templates');
+const { createDxosAutomationsActions } = require('./automation-engine');
+const { seedBusinessPackSamples } = require('./domain-packs');
 const { composePortals } = require('./portal-composer');
 const { resolveServiceActor } = require('./service-scope');
+const { ORG_ID_RE, runWithOptionalRls, runWithSystemRlsBypass } = require('./wms-dmn-shared');
 const {
   exportSolutionBundle,
   diffSolutionBundle,
@@ -193,7 +196,7 @@ function buildPluginStatusList(rows) {
       sdkProvidedByHost: true,
       installed: Boolean(row),
       enabled: val(row, 'enabled') === true,
-      version: val(row, 'version') || '0.4.0',
+      version: val(row, 'version') || '0.4.1',
     };
   });
 }
@@ -225,7 +228,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       return { isRoot: true, organizationId: resolved || null };
     }
 
-    const actor = await resolveServiceActor(db, ctx.state?.currentUser);
+    const actor = await runWithSystemRlsBypass(db, (transaction) => resolveServiceActor(db, ctx.state?.currentUser, { transaction }));
     if (requestedOrg && requestedOrg !== actor.organizationId) {
       throw fail(
         'DXOS_ORG_MISMATCH',
@@ -526,7 +529,7 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       await requireAdmin(ctx);
       const params = readParams(ctx);
       const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
-      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.4.0' });
+      ctx.body = await exportSolutionBundle(db, { organizationId, platformVersion: '0.4.1' });
       return next();
     },
 
@@ -566,6 +569,83 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
       const snapshotUid = params.snapshotUid ? String(params.snapshotUid).trim() : '';
       ctx.body = await rollbackLastSolutionBundle(db, { organizationId, snapshotUid });
+      return next();
+    },
+
+    listAutomationRules: async (ctx, next) => createDxosAutomationsActions(db).listRules(ctx, next),
+
+    seedShowcaseData: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const rawOrg = params.organizationId != null ? String(params.organizationId).trim() : '';
+      const isValidOrg = (org) => Boolean(org && ORG_ID_RE.test(org) && !['all', '__proto__', 'constructor', 'prototype'].includes(org.toLowerCase()));
+      if (rawOrg && !isValidOrg(rawOrg)) {
+        throw fail('DXOS_ORG_INVALID', 400, 'organizationId không hợp lệ.');
+      }
+      const scope = await resolveSolutionBundleScope(ctx, params, null);
+      const organizationId = scope.organizationId || (scope.isRoot ? 'org-a' : '');
+      if (!isValidOrg(organizationId)) {
+        throw fail('DXOS_ORG_INVALID', 400, 'organizationId không hợp lệ.');
+      }
+      let paraDocsSeeded = 0;
+      const packSeeds = await runWithOptionalRls(db, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const paraRepo = db.getRepository?.('latticeParaDocuments');
+        if (paraRepo && typeof paraRepo.findOne === 'function' && typeof paraRepo.create === 'function') {
+          const paraSamples = [
+            {
+              organizationId,
+              code: `PARA-${organizationId}-PROJ-01`,
+              title: 'Dự án Chuẩn hóa Kho lạnh GSP 2026',
+              paraSpace: 'projects',
+              tags: 'gsp,cold-chain,2026',
+              status: 'active',
+              summary: 'Kế hoạch nâng cấp cảm biến IoT và quy trình cảnh báo tự động toàn hệ thống.',
+              contentMarkdown: '# Dự án Kho lạnh GSP 2026\n- Tích hợp Orion-LD & LatticeFlow v2\n- Đáp ứng SLA phản hồi < 15 phút.',
+            },
+            {
+              organizationId,
+              code: `PARA-${organizationId}-AREA-01`,
+              title: 'Quy chuẩn Vận hành & Bảo trì Thiết bị (Areas)',
+              paraSpace: 'areas',
+              tags: 'cmms,sop,maintenance',
+              status: 'active',
+              summary: 'Trách nhiệm kiểm tra định kỳ máy nén, đầu dò nhiệt độ và nguồn dự phòng.',
+              contentMarkdown: '# Vùng Trách nhiệm CMMS\n- Kiểm tra hằng ngày lúc 08:00 (+07:00)\n- Phê duyệt HITL khi vượt ngưỡng chi phí.',
+            },
+            {
+              organizationId,
+              code: `PARA-${organizationId}-RES-01`,
+              title: 'Tài nguyên Hướng dẫn Đối soát Bồi thường & PKI (Resources)',
+              paraSpace: 'resources',
+              tags: 'settlement,pki,n8n',
+              status: 'active',
+              summary: 'Bảng tra cứu chính sách bồi thường đối tác và mẫu chữ ký số Ed25519.',
+              contentMarkdown: '# Tài nguyên Đối soát\n- Mức 85% áp dụng khi rủi ro >= 75 hoặc quá nhiệt nghiêm trọng.',
+            },
+            {
+              organizationId,
+              code: `PARA-${organizationId}-ARCH-01`,
+              title: 'Hồ sơ Lưu trữ Kiểm toán Chuỗi lạnh Q1-2026 (Archives)',
+              paraSpace: 'archives',
+              tags: 'audit,archive,q1',
+              status: 'archived',
+              summary: 'Biên bản kiểm toán định kỳ và nhật ký bằng chứng đã niêm phong Merkle.',
+              contentMarkdown: '# Lưu trữ Q1-2026\n- Đã đối chiếu sổ cái mật mã toàn vẹn 100%.',
+            },
+          ];
+          for (const doc of paraSamples) {
+            const exists = await paraRepo.findOne({ filter: { organizationId, code: doc.code }, ...txOpt });
+            if (!exists) {
+              await paraRepo.create({ values: doc, ...txOpt });
+              paraDocsSeeded += 1;
+            }
+          }
+        }
+        return seedBusinessPackSamples(db, { organizationId, packKey: 'all' });
+      });
+      ctx.body = { ok: true, organizationId, paraDocsSeeded, ...packSeeds };
       return next();
     },
   };

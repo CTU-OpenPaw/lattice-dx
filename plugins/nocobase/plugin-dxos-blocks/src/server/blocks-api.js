@@ -37,7 +37,36 @@ const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeIncidentCases',
   'latticeServiceTickets',
 ]);
-const PROPOSAL_STATES = new Set(['all', 'proposed', 'reviewed']);
+const PROPOSAL_STATES = new Set(['all', 'proposed', 'reviewed', 'approved', 'rejected']);
+
+function loadFoundationApprovalEngine() {
+  const path = require('node:path');
+  const inDist = __dirname.includes(`${path.sep}dist${path.sep}`);
+  const candidates = inDist
+    ? [
+        '@latticedx/plugin-lattice-foundation/dist/server/approval-engine',
+        '@latticedx/plugin-lattice-foundation/src/server/approval-engine',
+        '../../../plugin-lattice-foundation/dist/server/approval-engine',
+        '../../../plugin-lattice-foundation/src/server/approval-engine',
+      ]
+    : [
+        '@latticedx/plugin-lattice-foundation/src/server/approval-engine',
+        '../../../plugin-lattice-foundation/src/server/approval-engine',
+        '@latticedx/plugin-lattice-foundation/dist/server/approval-engine',
+        '../../../plugin-lattice-foundation/dist/server/approval-engine',
+      ];
+  for (const modPath of candidates) {
+    try {
+      const mod = require(modPath);
+      if (mod && typeof mod.decideUnifiedInboxItem === 'function') return mod;
+    } catch (err) {
+      const isDirectMissing = err?.code === 'MODULE_NOT_FOUND'
+        && (!Array.isArray(err.requireStack) || err.requireStack.length === 0 || err.requireStack[0] === __filename);
+      if (!isDirectMissing) throw err;
+    }
+  }
+  return null;
+}
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const URN_RE = /^urn:ngsi-ld:Asset:([a-zA-Z0-9_-]{1,80}):native:([1-9]\d{0,18})$/;
 const MIN_EDGE_TOKEN_LENGTH = 16;
@@ -494,6 +523,20 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         };
       });
       return next();
+    },
+
+    decideProposal: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      const input = readParams(ctx);
+      const engine = loadFoundationApprovalEngine();
+      if (!engine || typeof engine.decideUnifiedInboxItem !== 'function') {
+        throw fail('DXOS_APPROVAL_ENGINE_UNAVAILABLE', 503, 'Approval engine is unavailable.');
+      }
+      ctx.body = await engine.decideUnifiedInboxItem(db, ctx, {
+        ...input,
+        source: 'proposals',
+      });
+      if (next) return next();
     },
 
     contextTelemetry: async (ctx, next) => {

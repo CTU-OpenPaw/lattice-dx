@@ -8,7 +8,7 @@
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation } = require('../src/client/native-builder-navigation');
+const { pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation, resolvePortalRedirect } = require('../src/client/native-builder-navigation');
 const { createNativePortalManager } = require('../src/client/native-portal-manager');
 const { readFileSync } = require('node:fs');
 const { runInNewContext } = require('node:vm');
@@ -67,9 +67,9 @@ test('Config selects only an allowed settings leaf, never a denied or external s
   assert.equal(firstSettingsPath([{ path: 'https://example.com' }, { isAllow: false, children: [{ path: '/admin/settings/no' }] }]), null);
 });
 
-function harness({ allow = true, pathname = '/admin/demo', designable = false, runEffects = false, portals = [], layoutUid, roleCheck } = {}) {
-  let cursor = 0, nativeRenders = 0, v2Renders = 0, lastGate = null;
-  const state = [], registered = [], navigations = [], layouts = new Map(), registeredModels = {};
+function harness({ allow = true, pathname = '/admin/demo', designable = false, runEffects = false, portals = [], layoutUid, roleCheck, portalRequest } = {}) {
+  let cursor = 0, nativeRenders = 0, v2Renders = 0, lastGate = null, mobileSetCalls = 0;
+  const state = [], registered = [], navigations = [], layouts = new Map(), registeredModels = {}, requests = [];
   let effects = [], cleanups = [];
   const React = {
     Fragment: 'Fragment',
@@ -87,7 +87,7 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
     render() { nativeRenders++; return 'native runtime shell'; }
     addSubModel(subKey, opts) { return { subKey, ...opts }; }
     syncMenuRoutes(routes) { this.syncedRoutes = routes; }
-    setIsMobileLayout(value) { this.isMobileLayout = value; }
+    setIsMobileLayout(value) { mobileSetCalls++; this.isMobileLayout = value; }
   }
   class V2AdminModel {
     render() { v2Renders++; return 'v2 portal shell'; }
@@ -104,7 +104,12 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
     useDesignable: () => ({ designable }),
     useAPIClient: () => ({
       auth: { role: allow ? 'root' : 'ldx_employee' },
-      request: async req => (req?.url === 'roles:check' && roleCheck ? roleCheck() : { data: { data: portals } }),
+      request: async req => {
+        requests.push(req);
+        if (req?.url === 'roles:check' && roleCheck) return roleCheck();
+        if (req?.url === 'latticePortals:listAccessible' && portalRequest) return portalRequest(req);
+        return { data: { data: portals } };
+      },
     }),
   };
   const app = {
@@ -126,12 +131,14 @@ function harness({ allow = true, pathname = '/admin/demo', designable = false, r
   const root = Layout({});
   const gate = model.render();
   return {
-    root, gate, registered, model, registeredModels, layouts, navigations,
+    root, gate, registered, model, registeredModels, layouts, navigations, requests,
     flowSettings: app.flowEngine.flowSettings,
     setAllow(v) { allow = v; },
+    setPathname(v) { pathname = v; },
     get lastGate() { return lastGate; },
     get nativeRenders() { return nativeRenders; },
     get v2Renders() { return v2Renders; },
+    get mobileSetCalls() { return mobileSetCalls; },
     render() {
       cursor = 0;
       lastGate = gate.type(gate.props);
@@ -297,6 +304,46 @@ test('built AMD entry registers the replacement layout, portal manager, and buil
   assert.equal(hostModels.LatticeSignOutUserCenterItemModel, undefined);
 });
 
+test('127.0.0.1 origin is preserved without redirecting to localhost on /lattice, /lattice/console, and /lattice/studio', async () => {
+  for (const pathname of ['/lattice', '/lattice/console', '/lattice/studio']) {
+    let factory;
+    const define = (_name, _deps, value) => { factory = value; };
+    define.amd = {};
+    const replaceCalls = [];
+    const win = {
+      location: {
+        hostname: '127.0.0.1',
+        pathname,
+        href: `http://127.0.0.1:13015${pathname}`,
+        replace: (target) => replaceCalls.push(target),
+      },
+    };
+    runInNewContext(readFileSync(require.resolve('../dist/client/index.js'), 'utf8'), {
+      define,
+      URL,
+      window: win,
+      sessionStorage: { getItem: () => null, removeItem() {} },
+    });
+    class BlockModel { static define() {} static registerFlow() {} }
+    const client = { Plugin: class {}, AdminProvider() {}, useAllAccessDesktopRoutes() {}, useUIConfigurationPermissions() {}, useDesignable() {} };
+    const app = {
+      flowEngine: { getModelClass: () => undefined, registerModels() {} },
+      pluginSettingsManager: { add() {}, get: () => null },
+      router: { add() {} },
+      addComponents() {},
+      addScopes() {},
+      use() {},
+      schemaInitializerManager: { get: () => ({ add() {} }) },
+    };
+    const mod = factory(client, { createElement() {} }, {}, { BlockModel }, { Link() {}, Outlet() {}, useLocation() {} }, { FlowModelRenderer: {} });
+    const plugin = new mod.default();
+    plugin.app = app;
+    plugin.flowEngine = app.flowEngine;
+    await plugin.load();
+    assert.deepEqual(replaceCalls, [], `Expected zero redirects on 127.0.0.1 for ${pathname}`);
+  }
+});
+
 test('employees without custom portals fall back to Workspace without looping, and 401 roles:check mounts AdminProvider for /signin redirect', async () => {
   const empNoPortal = harness({
     allow: false, pathname: '/admin', runEffects: true,
@@ -351,4 +398,122 @@ test('non-admin visiting a /p/* portal with zero accessible pages renders friend
   const dump = JSON.stringify(out);
   assert.ok(dump.includes('ldx-empty-portal-fallback'), `Expected Vietnamese empty portal fallback, got ${dump}`);
   assert.ok(dump.includes('/p/services'));
+});
+
+test('resolvePortalRedirect routes non-admin to role-variant sibling portal and redirects bare portal roots', () => {
+  const portals = [
+    { uid: 'ldx-portal-services', title: 'Cổng Dịch vụ', routePath: '/p/services', firstPagePath: '/p/services/home', enabled: true },
+    { uid: 'ldx-portal-logistics-employee', title: 'Logistics · Đơn của tôi', routePath: '/p/logistics-employee', firstPagePath: '/p/logistics-employee/orders', enabled: true },
+  ];
+  assert.equal(resolvePortalRedirect(portals, '/p/logistics', false), '/p/logistics-employee/orders');
+  assert.equal(resolvePortalRedirect(portals, '/p/logistics/orders', false), '/p/logistics-employee/orders');
+  assert.equal(resolvePortalRedirect(portals, '/p/incidents', false), null);
+  assert.equal(resolvePortalRedirect(portals, '/p/services', false), '/p/services/home');
+  assert.equal(resolvePortalRedirect(portals, '/p/services/', true), '/p/services/home');
+  assert.equal(resolvePortalRedirect(portals, '/p/services/home', false), null);
+  assert.equal(resolvePortalRedirect(portals, '/p/logistics', true), null);
+});
+
+test('employee on /p/logistics auto-redirects to /p/logistics-employee without flashing ldx-empty-portal-fallback', async () => {
+  const portals = [
+    { uid: 'ldx-portal-services', title: 'Cổng Dịch vụ', routePath: '/p/services', firstPagePath: '/p/services/home', enabled: true },
+    { uid: 'ldx-portal-logistics-employee', title: 'Logistics · Đơn của tôi', routePath: '/p/logistics-employee', firstPagePath: '/p/logistics-employee/orders', enabled: true },
+  ];
+  const setup = harness({
+    allow: false,
+    pathname: '/p/logistics',
+    layoutUid: 'ldx-portal-logistics',
+    runEffects: true,
+    portals,
+  });
+  setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const out = setup.render();
+  const dump = JSON.stringify(out);
+  assert.ok(dump.includes('ldx-portal-redirecting'), `Expected redirect notice, got ${dump}`);
+  assert.equal(dump.includes('ldx-empty-portal-fallback'), false);
+  assert.deepEqual(setup.navigations.at(-1), { to: '/p/logistics-employee/orders', opts: { replace: true } });
+});
+
+test('BuilderShell caches portals across pathname changes, guards setIsMobileLayout, and falls back without wiping on error', async () => {
+  const portals = [
+    { uid: 'ldx-portal-services', title: 'Cổng Dịch vụ', routePath: '/p/services', firstPagePath: '/p/services/home', enabled: true },
+    { uid: 'ldx-portal-cmms', title: 'CMMS', routePath: '/p/cmms', firstPagePath: '/p/cmms/work-orders', enabled: true },
+  ];
+  let failNext = false;
+  const setup = harness({
+    allow: false,
+    pathname: '/p/services/home',
+    layoutUid: 'ldx-portal-services',
+    runEffects: true,
+    portals,
+    portalRequest: async () => {
+      if (failNext) throw new Error('Transient network abort');
+      return { data: { data: portals } };
+    },
+  });
+  setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const initialCalls = setup.requests.filter(r => r.url === 'latticePortals:listAccessible').length;
+  assert.equal(initialCalls, 1);
+  assert.equal(setup.requests.find(r => r.url === 'latticePortals:listAccessible')?.skipNotify, true);
+  assert.equal(setup.mobileSetCalls, 1);
+
+  failNext = true;
+  setup.setPathname('/p/cmms/work-orders');
+  const out = setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(setup.requests.filter(r => r.url === 'latticePortals:listAccessible').length, 1);
+  assert.equal(setup.mobileSetCalls, 1);
+  assert.equal(JSON.stringify(out).includes('ldx-empty-portal-fallback'), false);
+});
+
+test('PortalRenderRecoveryGuard triggers soft recovery and shows Vietnamese reload banner when portal stays blank', async (t) => {
+  const prevDoc = global.document;
+  const prevSetTimeout = global.setTimeout;
+  const prevClearTimeout = global.clearTimeout;
+  const scheduled = [];
+  global.document = {
+    querySelector: (sel) => (sel.includes('main') ? { innerText: '', textContent: '', querySelector: () => null } : null),
+  };
+  global.setTimeout = (fn, ms) => {
+    const id = scheduled.length + 1;
+    scheduled.push({ id, fn, ms, cleared: false });
+    return id;
+  };
+  global.clearTimeout = (id) => {
+    const entry = scheduled.find(s => s.id === id);
+    if (entry) entry.cleared = true;
+  };
+  t.after(() => {
+    global.document = prevDoc;
+    global.setTimeout = prevSetTimeout;
+    global.clearTimeout = prevClearTimeout;
+  });
+
+  const portals = [
+    { uid: 'ldx-portal-cmms', title: 'CMMS', routePath: '/p/cmms', firstPagePath: '/p/cmms/work-orders', enabled: true },
+  ];
+  const setup = harness({
+    allow: false,
+    pathname: '/p/cmms/work-orders',
+    layoutUid: 'ldx-portal-cmms',
+    runEffects: true,
+    portals,
+  });
+  setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  setup.render();
+
+  const initialTimer = scheduled.find(s => !s.cleared && s.ms >= 2000);
+  assert.ok(initialTimer, 'Expected bounded settle timer for PortalRenderRecoveryGuard');
+  initialTimer.fn();
+
+  const retryTimer = scheduled.find(s => !s.cleared && s.id !== initialTimer.id);
+  if (retryTimer) retryTimer.fn();
+
+  const recoveredUi = setup.render();
+  const dump = JSON.stringify(recoveredUi);
+  assert.ok(dump.includes('ldx-portal-load-fallback'), `Expected fallback banner, got ${dump}`);
+  assert.ok(dump.includes('Tải lại trang'));
 });

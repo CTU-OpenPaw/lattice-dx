@@ -37,7 +37,7 @@ function writeMinimalProject(dir, {
     name: '@latticedx/plugin-enterprise-auth',
     lockfileVersion: 3,
     packages: {
-      '': { name: '@latticedx/plugin-enterprise-auth', version: '0.4.0' },
+      '': { name: '@latticedx/plugin-enterprise-auth', version: '0.4.1' },
       'node_modules/jose': {
         version: '6.2.15',
         license: 'MIT',
@@ -48,19 +48,19 @@ function writeMinimalProject(dir, {
 } = {}) {
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: 'lattice-dx',
-    version: '0.4.0',
+    version: '0.4.1',
     license: rootLicense,
   }, null, 2));
   mkdirSync(join(dir, 'plugins', 'nocobase', 'plugin-lattice-foundation'), { recursive: true });
   writeFileSync(join(dir, 'plugins', 'nocobase', 'plugin-lattice-foundation', 'package.json'), JSON.stringify({
     name: '@latticedx/plugin-lattice-foundation',
-    version: '0.4.0',
+    version: '0.4.1',
     license: 'Apache-2.0',
   }, null, 2));
   mkdirSync(join(dir, 'plugins', 'nocobase', 'plugin-enterprise-auth'), { recursive: true });
   writeFileSync(join(dir, 'plugins', 'nocobase', 'plugin-enterprise-auth', 'package.json'), JSON.stringify({
     name: '@latticedx/plugin-enterprise-auth',
-    version: '0.4.0',
+    version: '0.4.1',
     license: 'Apache-2.0',
   }, null, 2));
   writeFileSync(
@@ -79,7 +79,7 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
   assert.equal(first.bom.bomFormat, 'CycloneDX');
   assert.equal(first.bom.specVersion, '1.5');
   assert.equal(first.bom.metadata.component.name, 'lattice-dx');
-  assert.equal(first.bom.metadata.component.version, '0.4.0');
+  assert.equal(first.bom.metadata.component.version, '0.4.1');
   assert.equal(formatSbomJson(first.bom), formatSbomJson(second.bom));
 
   assert.ok(first.counts.workspace >= 12, `Expected >= 12 workspace components, got ${first.counts.workspace}`);
@@ -114,13 +114,14 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
   );
   assert.equal(workspaceComps.length, 12);
   for (const wsComp of workspaceComps) {
-    assert.equal(wsComp.version, '0.4.0', `Expected workspace component ${wsComp.name} to be 0.4.0`);
+    assert.equal(wsComp.version, '0.4.1', `Expected workspace component ${wsComp.name} to be 0.4.1`);
     assert.equal(wsComp.licenses?.[0]?.license?.id, 'Apache-2.0');
   }
 
   const npmDeps = first.bom.components.filter((c) => c.properties?.some((p) => p.name === 'latticedx:category' && p.value === 'npm-dependency'));
   const npmWithLicenses = npmDeps.filter((c) => Array.isArray(c.licenses) && c.licenses.length > 0);
-  assert.ok(npmWithLicenses.length >= 176, `Expected >= 176 npm dependencies with resolved licenses, got ${npmWithLicenses.length}/${npmDeps.length}`);
+  assert.equal(npmWithLicenses.length, npmDeps.length, `Expected all npm dependencies to resolve licenses, got ${npmWithLicenses.length}/${npmDeps.length}`);
+  assert.equal(byName.get('fsevents@2.3.3')?.licenses?.[0]?.license?.id, 'MIT');
   assert.equal(byName.get('@esbuild/linux-x64@0.28.2')?.licenses?.[0]?.license?.id, 'MIT');
   assert.equal(byName.get('typescript@7.0.2')?.licenses?.[0]?.license?.id, 'Apache-2.0');
   assert.equal(byName.get('lightningcss@1.33.0')?.licenses?.[0]?.license?.id, 'MPL-2.0');
@@ -137,10 +138,28 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
 });
 
 test('generateSbom resolves npm licenses from node_modules / .pnpm, rejects BSL-1.1 in node_modules, and falls back gracefully when node_modules is absent', (t) => {
-  // 1. Without node_modules: falls back gracefully while preserving OCI & lockfile licenses
+  // 1. Without node_modules: falls back gracefully while preserving OCI, lockfile, and curated platform-optional licenses
   const noNmDir = makeTempProject(t);
-  writeMinimalProject(noNmDir);
+  writeMinimalProject(noNmDir, {
+    pnpmLockContent: [
+      "lockfileVersion: '9.0'",
+      'packages:',
+      '',
+      '  fsevents@2.3.3:',
+      '    resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}',
+      '    os: [darwin]',
+      '    optional: true',
+      '',
+      '  zod@3.24.2:',
+      '    resolution: {integrity: sha512-2kJm+q0S0vP9v4fK5v7z7Q==}',
+      '',
+      'snapshots:',
+      '',
+    ].join('\n'),
+  });
   const noNmBom = generateSbom({ rootDir: noNmDir }).bom;
+  const fseventsNoNm = noNmBom.components.find((c) => c.name === 'fsevents' && c.version === '2.3.3');
+  assert.equal(fseventsNoNm?.licenses?.[0]?.license?.id, 'MIT');
   const zodNoNm = noNmBom.components.find((c) => c.name === 'zod');
   assert.equal(zodNoNm?.licenses, undefined);
   const pgNoNm = noNmBom.components.find((c) => c.type === 'container');
@@ -271,7 +290,7 @@ test('runSbomCli supports --out, --check, drift detection, and --json', (t) => {
   assert.equal(checkResult.mode, 'check');
 
   // Simulate drift
-  const mutated = readFileSync(writtenPath, 'utf8').replace('"0.4.0"', '"0.9.9"');
+  const mutated = readFileSync(writtenPath, 'utf8').replace('"0.4.1"', '"0.9.9"');
   writeFileSync(writtenPath, mutated, 'utf8');
   assert.throws(() => runSbomCli(['--root=' + dir, '--out=' + outRel, '--check']), /SBOM drift detected/);
 

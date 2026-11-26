@@ -1,6 +1,6 @@
 # Bước 4 — Form và Danh sách dùng chung
 
-Plugin Foundation 0.4.0, runtime NocoBase 2.2.22. Form/list dựng từ manifest và gọi API của Duy qua bridge. Mua sắm/logistics dùng cùng component, không có UI hoặc thuật toán riêng cho logistics.
+Plugin Foundation 0.4.1, runtime NocoBase 2.2.22. Form/list dựng từ manifest và gọi API của Duy qua bridge. Mua sắm/logistics dùng cùng component, không có UI hoặc thuật toán riêng cho logistics.
 
 ## Thử trên Workspace
 

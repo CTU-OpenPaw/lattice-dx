@@ -364,7 +364,7 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
           ui.bpOpen ? renderBlueprintsGallery(h, { blueprints, onLoadBlueprint: loadBlueprint }) : null,
           h('div', { style: { flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden', position: 'relative' } },
             h(FlowCanvas, {
-              graph: doc.graph, nodeTypes, selectedNodeId: doc.selId, inspectorOpen: Boolean(selectedNode), onSelectNode: (id) => setDoc((d) => ({ ...d, selId: id })),
+              ruleKey: doc.rule?.ruleKey || '__draft__', graph: doc.graph, nodeTypes, selectedNodeId: doc.selId, inspectorOpen: Boolean(selectedNode), onSelectNode: (id) => setDoc((d) => ({ ...d, selId: id })),
               onInspectTraceNode: (id) => { setDoc((d) => ({ ...d, selId: id })); setUi((u) => ({ ...u, inspTab: 'output', inspTabSeq: (u.inspTabSeq || 0) + 1 })); },
               onConnectNodes: handleConnect, onNodesChangeGraph: (nextArg, meta) => commitGraph(Array.isArray(nextArg) ? (g) => ({ ...g, nodes: nextArg }) : nextArg, undefined, null, { skipUndo: Boolean(meta && !Array.isArray(meta) && meta.skipUndo === true) }),
               onInsertBetweenEdge: (e) => setUi((u) => ({ ...u, insertEdge: e, appendSource: null })), onAppendFromNode: (nodeId, sh) => { const n = doc.graph.nodes.find((x) => x.id === nodeId); setUi((u) => ({ ...u, appendSource: { nodeId, sourceHandle: sh || 'main', label: n?.label || nodeId }, insertEdge: null })); },

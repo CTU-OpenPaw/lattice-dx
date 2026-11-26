@@ -9,20 +9,20 @@
 'use strict';
 
 const CATEGORY_META = Object.freeze({
-  trigger: { color: '#2563EB', bg: '#EFF6FF', badge: 'Trigger', symbol: '⚡' },
-  control: { color: '#D97706', bg: '#FFFBEB', badge: 'Control', symbol: '⑂' },
-  data: { color: '#0891B2', bg: '#ECFEFF', badge: 'Data', symbol: '⛁' },
+  trigger: { color: '#2563EB', bg: '#EFF6FF', badge: 'Kích hoạt', symbol: '⚡' },
+  control: { color: '#D97706', bg: '#FFFBEB', badge: 'Điều khiển', symbol: '⑂' },
+  data: { color: '#0891B2', bg: '#ECFEFF', badge: 'Dữ liệu', symbol: '⛁' },
   logic: { color: '#16A34A', bg: '#F0FDF4', badge: 'Logic', symbol: 'ƒ' },
   ai: { color: '#7C3AED', bg: '#F5F3FF', badge: 'AI', symbol: '✦' },
-  integration: { color: '#DB2777', bg: '#FDF2F8', badge: 'Integration', symbol: '⇄' },
+  integration: { color: '#DB2777', bg: '#FDF2F8', badge: 'Tích hợp', symbol: '⇄' },
 });
 
 const TRACE_STYLES = Object.freeze({
-  completed: { label: '✓ completed', color: '#166534', bg: '#F0FDF4', border: '#22C55E' },
-  simulated: { label: '▶ simulated', color: '#0E7490', bg: '#ECFEFF', border: '#06B6D4' },
-  suspended: { label: '⏸ suspended', color: '#92400E', bg: '#FFFBEB', border: '#F59E0B' },
-  skipped: { label: '⊘ skipped', color: '#64748B', bg: '#F8FAFC', border: '#94A3B8' },
-  failed: { label: '✕ failed', color: '#991B1B', bg: '#FEF2F2', border: '#EF4444' },
+  completed: { label: '✓ Hoàn thành', color: '#166534', bg: '#F0FDF4', border: '#22C55E' },
+  simulated: { label: '▶ Mô phỏng', color: '#0E7490', bg: '#ECFEFF', border: '#06B6D4' },
+  suspended: { label: '⏸ Tạm dừng', color: '#92400E', bg: '#FFFBEB', border: '#F59E0B' },
+  skipped: { label: '⊘ Bỏ qua', color: '#64748B', bg: '#F8FAFC', border: '#94A3B8' },
+  failed: { label: '✕ Lỗi', color: '#991B1B', bg: '#FEF2F2', border: '#EF4444' },
 });
 
 const inferCategory = (t) => {
@@ -101,7 +101,7 @@ function createFlowCanvas(React, vendor = {}) {
 
   return function FlowCanvas(props = {}) {
     const {
-      graph, nodeTypes, selectedNodeId, inspectorOpen = false, onSelectNode, onInspectTraceNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
+      ruleKey = '__draft__', graph, nodeTypes, selectedNodeId, inspectorOpen = false, onSelectNode, onInspectTraceNode, onConnectNodes, onNodesChangeGraph, onInsertBetweenEdge,
       runOverlay, onAutoLayout, onDropNode, onAddNode, onQuickTestNode, onDuplicateNode, onDeleteNode,
       canUndo = false, canRedo = false, onUndo, onRedo, xyflowOverride,
       validationByNodeId = {}, onAppendFromNode, focusNodeId = null, focusSeq = 0,
@@ -109,7 +109,7 @@ function createFlowCanvas(React, vendor = {}) {
 
     const [rfInstance, setRfInstance] = React.useState(null);
     const [showMiniMap, setShowMiniMap] = React.useState(false);
-    const [containerEl, setContainerEl] = React.useState(null);
+    const [fitState] = React.useState(() => ({ key: null }));
     const [appendMenuNodeId, setAppendMenuNodeId] = React.useState(null);
     const [handlersRef] = React.useState(() => ({}));
     Object.assign(handlersRef, { onSelectNode, onInspectTraceNode, onInsertBetweenEdge, onQuickTestNode, onDuplicateNode, onDeleteNode, onAppendFromNode, setAppendMenuNodeId });
@@ -120,15 +120,13 @@ function createFlowCanvas(React, vendor = {}) {
     }, []);
 
     React.useEffect(() => {
-      if (!rfInstance || !containerEl || typeof ResizeObserver !== 'function') return undefined;
-      let timer = null;
-      const ro = new ResizeObserver(() => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(() => { rfInstance.fitView?.({ padding: 0.2, maxZoom: 1, duration: 180 }); }, 160);
-      });
-      ro.observe(containerEl);
-      return () => { if (timer) clearTimeout(timer); ro.disconnect(); };
-    }, [rfInstance, containerEl]);
+      if (!rfInstance) return;
+      const fitKey = String(ruleKey || '__draft__');
+      if (fitState.key !== fitKey) {
+        fitState.key = fitKey;
+        rfInstance.fitView?.({ padding: 0.24, maxZoom: 1, duration: 0 });
+      }
+    }, [rfInstance, ruleKey]);
 
     React.useEffect(() => {
       if (rfInstance && focusSeq && focusNodeId && typeof rfInstance.fitView === 'function') {
@@ -215,7 +213,7 @@ function createFlowCanvas(React, vendor = {}) {
             style: { textAlign: 'left', padding: '4px 8px', borderRadius: 6, border: `1px solid ${getEdgeColor(port)}44`, background: '#F8FAFC', color: getEdgeColor(port), fontSize: 11, fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' },
           }, `+ ${port}`))) : null,
           isSel ? h('div', { className: 'nodrag nopan', 'data-testid': `dxos-flow-node-mini-toolbar-${nodeId}`, style: { position: 'absolute', top: -36, left: '50%', transform: 'translateX(-50%)', zIndex: 25, display: 'inline-flex', alignItems: 'center', gap: 2, padding: '3px 6px', borderRadius: 8, border: '1px solid #CBD5E1', background: '#FFFFFF', boxShadow: '0 6px 16px rgba(15,23,42,0.12)', whiteSpace: 'nowrap' } },
-            h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-test-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onQuickTestNode?.(nodeId); }, style: miniBtn('#2563EB') }, '▶ Test'),
+            h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-test-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onQuickTestNode?.(nodeId); }, style: miniBtn('#2563EB') }, '▶ Thử'),
             h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-dup-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onDuplicateNode?.(nodeId); }, style: miniBtn('#334155') }, '⎘ Nhân bản'),
             h('button', { type: 'button', 'data-testid': `dxos-flow-node-quick-del-${nodeId}`, onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onDeleteNode?.(nodeId); }, style: miniBtn('#DC2626') }, '✕'),
           ) : null,
@@ -223,7 +221,7 @@ function createFlowCanvas(React, vendor = {}) {
           h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 } },
             h('span', { style: { fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 999, background: catMeta.bg, color: stripe } }, `${catMeta.symbol} ${d.nodeType || catMeta.badge}`),
             tStyle ? h('span', {
-              'data-testid': `dxos-flow-node-trace-badge-${nodeId}`, title: 'Click to inspect Input/Output trace',
+              'data-testid': `dxos-flow-node-trace-badge-${nodeId}`, title: 'Nhấn để xem chi tiết Input/Output trace',
               onClick: (evt) => { evt?.stopPropagation?.(); handlersRef.onInspectTraceNode?.(nodeId); },
               style: { fontSize: 10, fontWeight: 700, padding: '2px 6px', borderRadius: 999, background: '#FFFFFF', border: `1px solid ${tStyle.border}`, color: tStyle.color, cursor: 'pointer' },
             }, `${tStyle.label}${d.trace?.durationMs != null ? ` · ${d.trace.durationMs}ms` : ''}`) : null,
@@ -293,7 +291,6 @@ function createFlowCanvas(React, vendor = {}) {
 
     const sep = h('span', { style: { width: 1, height: 18, background: '#E2E8F0', margin: '0 2px' } });
     return h('div', {
-      ref: setContainerEl,
       'data-testid': 'dxos-flow-canvas',
       onDragOver: (evt) => { evt?.preventDefault?.(); if (evt?.dataTransfer) evt.dataTransfer.dropEffect = 'copy'; },
       onDrop: handleDrop,
@@ -304,7 +301,7 @@ function createFlowCanvas(React, vendor = {}) {
           nodes: rfNodes, edges: rfEdges, nodeTypes: customNodeTypes, edgeTypes: customEdgeTypes,
           onNodeClick: (_evt, node) => { setAppendMenuNodeId(null); onSelectNode?.(node?.id || null); }, onPaneClick: () => { setAppendMenuNodeId(null); onSelectNode?.(null); },
           onConnect: (params) => onConnectNodes?.(params), onNodesChange: handleRfNodesChange, onEdgesChange: handleRfEdgesChange,
-          onNodeDragStop: handleNodeDragStop, onInit: setRfInstance, fitView: true, fitViewOptions: { padding: 0.24, maxZoom: 1 }, proOptions: { hideAttribution: true },
+          onNodeDragStop: handleNodeDragStop, onInit: setRfInstance, fitViewOptions: { padding: 0.24, maxZoom: 1 }, proOptions: { hideAttribution: true },
         },
           BackgroundComp ? h(BackgroundComp, { gap: 18, size: 1, color: '#CBD5E1' }) : null,
           showMiniMap && MiniMapComp ? h(MiniMapComp, { pannable: true, zoomable: true }) : null,
@@ -327,13 +324,13 @@ function createFlowCanvas(React, vendor = {}) {
       h('div', { 'data-testid': 'dxos-flow-canvas-dock', style: { position: 'absolute', bottom: 14, left: inspectorOpen ? 'calc(50% - 184px)' : '50%', transform: 'translateX(-50%)', zIndex: 18, display: 'inline-flex', alignItems: 'center', gap: 3, padding: '4px 8px', borderRadius: 10, border: '1px solid #CBD5E1', background: 'rgba(255, 255, 255, 0.96)', boxShadow: '0 8px 24px rgba(15, 23, 42, 0.12)', whiteSpace: 'nowrap' } },
         h('button', { type: 'button', 'data-testid': 'dxos-flow-zoom-out-btn', onClick: () => rfInstance?.zoomOut?.(), style: dockBtn(false, false) }, '−'),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-zoom-in-btn', onClick: () => rfInstance?.zoomIn?.(), style: dockBtn(false, false) }, '+'),
-        h('button', { type: 'button', 'data-testid': 'dxos-flow-fitview-btn', onClick: () => rfInstance?.fitView?.({ padding: 0.24, duration: 200 }), style: dockBtn(false, false) }, '⊡ Fit'),
+        h('button', { type: 'button', 'data-testid': 'dxos-flow-fitview-btn', onClick: () => rfInstance?.fitView?.({ padding: 0.24, duration: 200 }), style: dockBtn(false, false) }, '⊡ Vừa màn hình'),
         sep,
         h('button', { type: 'button', 'data-testid': 'dxos-flow-autolayout-btn', onClick: () => { const l = typeof vendor?.autoLayoutGraph === 'function' ? vendor.autoLayoutGraph(safeGraph) : null; (onAutoLayout || onNodesChangeGraph)?.(l || safeGraph); }, style: dockBtn(false, false) }, '⊞ Dàn đều'),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-undo-btn', disabled: !canUndo, onClick: () => onUndo?.(), style: dockBtn(!canUndo, false) }, '↶'),
         h('button', { type: 'button', 'data-testid': 'dxos-flow-redo-btn', disabled: !canRedo, onClick: () => onRedo?.(), style: dockBtn(!canRedo, false) }, '↷'),
         sep,
-        h('button', { type: 'button', 'data-testid': 'dxos-flow-toggle-minimap-btn', 'aria-pressed': showMiniMap, onClick: () => setShowMiniMap((v) => !v), style: dockBtn(false, showMiniMap) }, '🗺 Map'),
+        h('button', { type: 'button', 'data-testid': 'dxos-flow-toggle-minimap-btn', 'aria-pressed': showMiniMap, onClick: () => setShowMiniMap((v) => !v), style: dockBtn(false, showMiniMap) }, '🗺 Bản đồ'),
       ),
     );
   };

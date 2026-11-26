@@ -94,7 +94,7 @@ const SYSTEM_PROTECTED_COLLECTIONS = new Set([
   'users', 'roles', 'rolesUsers', 'apiKeys', 'authenticators', 'migrations',
   'applicationPlugins', 'applicationTokens', 'sessions',
   'aiSettings', 'aiEmployees', 'aiMcpClients', 'rolesAiEmployees',
-  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeUiSnapshots',
+  'latticeAiAuditLogs', 'latticeAiProfiles', 'latticeAiQuotaUsage', 'latticeAiQuotaPolicies', 'latticeUiSnapshots',
   'dataSourcesRoles', 'dataSourcesRolesResources', 'dataSourcesRolesResourcesActions',
   'dataSourcesRolesResourcesScopes',
   'llmServices', 'rolesDesktopRoutes', 'desktopRoutes', 'uiLayouts',

@@ -225,10 +225,6 @@
         this.app.router.add('lattice-form-v2', { path: '/form/:slug', Component: FormV2Redirect, skipAuthCheck: true });
         this.app.router.add('lattice-form-v2-root', { path: '/form', Component: FormV2Redirect, skipAuthCheck: true });
       }
-      if (window.location.hostname === '127.0.0.1' && window.location.pathname.startsWith('/lattice')) {
-        const canonical = new URL(window.location.href);canonical.hostname='localhost';
-        window.location.replace(canonical.href);return;
-      }
       const returnTo = sessionStorage.getItem('lattice:return-to');
       if (returnTo && window.location.pathname.startsWith('/admin')) {
         sessionStorage.removeItem('lattice:return-to');

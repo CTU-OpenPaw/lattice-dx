@@ -48,8 +48,8 @@ const aiNodes = [
   {
     type: 'ai.llm',
     category: 'ai',
-    label: 'LLM Completion',
-    description: 'Calls the active configured OpenAI-compatible llmServices provider with PII redaction and SSRF protection.',
+    label: 'Xử lý LLM',
+    description: 'Gọi nhà cung cấp llmServices tương thích OpenAI đang cấu hình với ẩn danh PII và bảo vệ SSRF.',
     icon: 'RobotOutlined',
     color: '#722ed1',
     inputs: ['in'],
@@ -57,13 +57,13 @@ const aiNodes = [
     defaultConfig: { systemPrompt: '', userPrompt: '', responseFormat: 'json', temperature: 0.2, maxTokens: 1600, model: '', fallbackOutput: null },
     inputSchema: {
       fields: [
-        { name: 'systemPrompt', label: 'System Prompt', type: 'textarea' },
-        { name: 'userPrompt', label: 'User Prompt', type: 'textarea', required: true },
-        { name: 'responseFormat', label: 'Response Format', type: 'select', options: ['json', 'text'] },
-        { name: 'temperature', label: 'Temperature', type: 'number' },
-        { name: 'maxTokens', label: 'Max Tokens', type: 'number' },
-        { name: 'model', label: 'Model Override', type: 'string' },
-        { name: 'fallbackOutput', label: 'Offline Fallback Output (JSON)', type: 'json' },
+        { name: 'systemPrompt', label: 'Chỉ dẫn Hệ thống', type: 'textarea' },
+        { name: 'userPrompt', label: 'Lệnh Người dùng', type: 'textarea', required: true },
+        { name: 'responseFormat', label: 'Định dạng Phản hồi', type: 'select', options: ['json', 'text'] },
+        { name: 'temperature', label: 'Nhiệt độ (Temperature)', type: 'number' },
+        { name: 'maxTokens', label: 'Số Token Tối đa', type: 'number' },
+        { name: 'model', label: 'Ghi đè Model', type: 'string' },
+        { name: 'fallbackOutput', label: 'Đầu ra Dự phòng (JSON)', type: 'json' },
       ],
     },
     async execute({ node, config, input, context, db, options, helpers }) {
@@ -115,8 +115,8 @@ const aiNodes = [
   {
     type: 'ai.agent',
     category: 'ai',
-    label: 'AI Triage Proposal',
-    description: 'Creates a governed AI proposal or HITL triage item scoped to an allowlisted business collection.',
+    label: 'Đề xuất Phân loại AI',
+    description: 'Tạo đề xuất AI có kiểm soát hoặc mục phân loại HITL gắn với bảng dữ liệu được phép.',
     icon: 'AuditOutlined',
     color: '#722ed1',
     inputs: ['in'],

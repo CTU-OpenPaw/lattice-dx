@@ -953,7 +953,9 @@ test('M1.3 Tab 7 Visual ER Graph (er-graph-panel.js), Plan-Diff Preview & Versio
   await findByTestId(tree, 'dxos-built-app-versions-btn-er-app').props.onClick();
   tree = render();
   assert.equal(apiCalls.some((c) => c.url === 'dxosAi:listBuiltAppVersions'), true);
-  await findByTestId(tree, 'dxos-rollback-btn-er-app-v1').props.onClick();
+  findByTestId(tree, 'dxos-rollback-btn-er-app-v1').props.onClick();
+  tree = render();
+  await findByTestId(tree, 'dxos-confirm-modal-ok').props.onClick();
   tree = render();
   assert.equal(apiCalls.some((c) => c.url === 'dxosAi:rollbackBuiltApp' && c.data.targetVersion === 1), true);
 });

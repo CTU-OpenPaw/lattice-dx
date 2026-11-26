@@ -263,14 +263,15 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
     const bp = React.useMemo(() => parseCreativeBlueprint(mergedCfg.blueprintJson || mergedCfg), [mergedCfg.blueprintJson, mergedCfg.title, mergedCfg.theme]);
     const palette = CREATIVE_THEMES[bp.theme] || CREATIVE_THEMES['industrial-cockpit'];
 
-    const [queryState, setQueryState] = React.useState({ loading: false, results: {}, counts: {}, error: '' });
+    const [queryState, setQueryState] = React.useState({ loading: false, results: {}, counts: {}, errors: {}, error: '' });
     const [actionNote, setActionNote] = React.useState('');
 
     const runQueries = React.useCallback(async () => {
       if (!api?.request || !bp.queries.length) return;
-      setQueryState((prev) => ({ ...prev, loading: true, error: '' }));
+      setQueryState((prev) => ({ ...prev, loading: true, errors: {}, error: '' }));
       const results = {};
       const counts = {};
+      const errors = {};
       await Promise.all(bp.queries.map(async (q) => {
         try {
           if (q.kind === 'timeseries') {
@@ -306,11 +307,19 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
             const metaCount = Number(res?.data?.meta?.count);
             counts[q.id] = Number.isFinite(metaCount) ? metaCount : rows.length;
           }
-        } catch {
+        } catch (err) {
           results[q.id] = [];
+          errors[q.id] = err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message || err?.message || 'Không tải được dữ liệu.';
         }
       }));
-      setQueryState({ loading: false, results, counts, error: '' });
+      const failedKeys = Object.keys(errors);
+      setQueryState({
+        loading: false,
+        results,
+        counts,
+        errors,
+        error: failedKeys.length ? `Lỗi truy vấn nguồn dữ liệu: ${failedKeys.join(', ')}` : '',
+      });
     }, [api, bp.queries]);
 
     React.useEffect(() => { runQueries(); }, [runQueries]);
@@ -358,6 +367,28 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         border: `1px solid ${palette.cardBorder}`,
         color: palette.titleColor,
       };
+      const widgetQueryError = w.queryId && queryState.errors ? queryState.errors[w.queryId] : '';
+      if (widgetQueryError && ['timeseries-line', 'thermometer', 'gauge', 'rule-callout', 'distribution-bars'].includes(w.type)) {
+        return h('div', {
+          key: idx,
+          'data-testid': `dxos-creative-widget-error-${w.queryId}`,
+          style: {
+            ...cardStyle,
+            borderColor: '#fca5a5',
+            ...(w.type === 'timeseries-line' ? { gridColumn: '1 / -1' } : {}),
+            display: 'grid',
+            gap: 8,
+          },
+        },
+          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#991b1b' } }, `${w.title} — Lỗi nguồn "${w.queryId}"`),
+          h('div', { style: { fontSize: 12, color: '#b91c1c' } }, widgetQueryError),
+          h('div', null, h('button', {
+            type: 'button',
+            onClick: runQueries,
+            style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
+          }, 'Thử lại')),
+        );
+      }
       const handleAlarmTransition = async (alarmId, op) => {
         if (!api?.request || !alarmId) return;
         try {
@@ -590,6 +621,32 @@ function createCreativeStudioView(client, React, _antd, app, { subscribeModelCon
         }, queryState.loading ? 'Đang cập nhật…' : 'Làm mới số liệu') : null,
       ),
       actionNote ? h('div', { style: { fontSize: 12, color: palette.accent, marginBottom: 8 } }, actionNote) : null,
+      Object.keys(queryState.errors || {}).length > 0 ? h('div', {
+        'data-testid': 'dxos-creative-query-error',
+        role: 'alert',
+        style: {
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          gap: 8,
+          flexWrap: 'wrap',
+          padding: '8px 12px',
+          marginBottom: 10,
+          borderRadius: 8,
+          background: '#fef2f2',
+          border: '1px solid #fca5a5',
+          color: '#991b1b',
+          fontSize: 12,
+        },
+      },
+        h('span', null, queryState.error || 'Một số truy vấn dữ liệu gặp lỗi.'),
+        h('button', {
+          type: 'button',
+          'data-testid': 'dxos-creative-retry-btn',
+          onClick: runQueries,
+          style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 11, fontWeight: 700, cursor: 'pointer' },
+        }, 'Thử lại'),
+      ) : null,
       h('div', { style: { display: 'grid', gridTemplateColumns: `repeat(${bp.columns}, minmax(0, 1fr))`, gap: 10 } },
         bp.widgets.map(renderWidget)),
     );

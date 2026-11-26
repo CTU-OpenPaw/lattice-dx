@@ -98,9 +98,9 @@ function loadSiblingModule(pluginDir, serverSubpath) {
 
 function resolveGatewayVersion() {
   try {
-    return String(require('../../package.json')?.version || '0.4.0');
+    return String(require('../../package.json')?.version || '0.4.1');
   } catch {
-    return '0.4.0';
+    return '0.4.1';
   }
 }
 

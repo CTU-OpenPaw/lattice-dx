@@ -3116,16 +3116,25 @@ function createFlowBuilderTools(deps) {
           return { workflowId, title: val(wf, 'title'), key: val(wf, 'key'), nodeCount: 3 };
         });
 
+        let activationError = null;
         if (hasRes(ctx, 'workflows') && enabled) {
           try {
             await invokeResourceAction(ctx, 'workflows', 'update', { filterByTk: created.workflowId, values: { enabled: true } });
-          } catch {}
+          } catch (err) {
+            activationError = err?.message || 'Workflow activation failed';
+            try {
+              const wfRow = await wfRepo.findOne({ filterByTk: created.workflowId });
+              if (wfRow && typeof wfRow.update === 'function') await wfRow.update({ enabled: false });
+            } catch {}
+          }
         }
+        const finalEnabled = Boolean(enabled && !activationError);
         return {
           applied: true,
           created: true,
           ...created,
-          enabled,
+          enabled: finalEnabled,
+          ...(activationError ? { activationWarning: `Workflow đã tạo ở trạng thái chưa kích hoạt (${activationError})` } : {}),
           designerUrl: `/admin/settings/workflow/workflows/${created.workflowId}`,
         };
       },

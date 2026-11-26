@@ -178,7 +178,7 @@ function createApiMock(handlers) {
 test('approval-inbox-panel exports required symbols and obeys Studio security & SPDX header rules', async () => {
   const mod = require(SOURCE_PATH);
   assert.ok(Array.isArray(mod.APPROVAL_SOURCE_TABS));
-  assert.deepEqual(mod.APPROVAL_SOURCE_TABS.map((t) => t.id), ['all', 'business', 'ai_hitl', 'flow']);
+  assert.deepEqual(mod.APPROVAL_SOURCE_TABS.map((t) => t.id), ['all', 'business', 'ai_hitl', 'flow', 'proposals']);
   assert.equal(typeof mod.createApprovalInboxPanel, 'function');
   assert.equal(typeof mod.ApprovalInboxPanel, 'function');
 
@@ -484,4 +484,64 @@ test('formatDiffPreview handles old/new, before/after objects, and ApprovalInbox
   assert.ok(cardText.includes('Chờ duyệt'));
   assert.ok(cardText.includes('priority: "medium" -> "high"'));
   assert.ok(cardText.includes('threshold: 8 -> 4'));
+});
+
+test('proposals tab, evidence badges, reviewed status, and Asia/Ho_Chi_Minh (+07:00) SLA formatting', async () => {
+  const { createApprovalInboxPanel, statusLabel } = require(SOURCE_PATH);
+  assert.equal(statusLabel('reviewed'), 'Đã xem xét');
+
+  const harness = createReactHarness();
+  const proposalItem = {
+    itemKey: 'prop:77',
+    source: 'proposals',
+    id: 77,
+    title: 'Đề xuất AI: latticeIncidentCases #501',
+    summary: 'Kiểm tra van lạnh ngay.',
+    targetCollection: 'latticeIncidentCases',
+    targetRecordId: 501,
+    requesterUsername: 'ai_agent',
+    riskLevel: 'medium',
+    status: 'pending',
+    proposalState: 'proposed',
+    dueAt: '2026-11-26T10:00:00.000Z',
+    diffPreview: { summary: 'Kiểm tra van lạnh ngay.', changes: [] },
+    evidence: [
+      { kind: 'native-record', collection: 'latticeIncidentCases', recordId: 501, fingerprint: 'fp-abc' },
+      { kind: 'ngsi-ld', entityId: 'urn:ngsi-ld:Asset:org-a:native:9', fingerprint: 'ctx-xyz' },
+    ],
+    canAct: true,
+  };
+
+  const { client, requests } = createApiMock({
+    'get dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
+    'get dxosApprovals:listInbox': async (req) => ({
+      organizationId: 'org-a',
+      items: req.params?.source === 'business' ? [] : [proposalItem],
+      total: req.params?.source === 'business' ? 0 : 1,
+      counts: { all: 1, business: 0, ai_hitl: 0, flow: 0, proposals: 1 },
+    }),
+    'post dxosApprovals:decide': async (req) => ({ ok: true, state: 'approved', decision: req.data.decision }),
+  });
+
+  const Panel = createApprovalInboxPanel(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+
+  const tab = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-source-proposals')[0];
+  assert.ok(tab, 'Proposals tab must render');
+  assert.ok(textOf(tab).includes('Đề xuất AI (1)'));
+
+  tab.props.onClick();
+  tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:listInbox' && r.params?.source === 'proposals'));
+
+  const card = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-card-prop:77')[0];
+  assert.ok(card);
+  const txt = textOf(card);
+  assert.ok(txt.includes('Đề xuất AI'), 'Source badge must display Đề xuất AI');
+  assert.ok(txt.includes('17:00') && txt.includes('+07:00'), `Expected +07:00 SLA timestamp in ${txt}`);
+  assert.ok(txt.includes('native-record'), 'Evidence badge must display native-record');
+  assert.ok(txt.includes('ngsi-ld'), 'Evidence badge must display ngsi-ld');
+
+  await collectNodes(card, (n) => n.props?.['data-testid'] === 'dxos-approval-approve-prop:77')[0].props.onClick();
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:decide' && r.data.source === 'proposals' && r.data.decision === 'approve'));
 });

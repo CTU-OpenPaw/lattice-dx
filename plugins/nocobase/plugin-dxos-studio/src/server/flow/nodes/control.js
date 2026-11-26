@@ -97,11 +97,11 @@ const makeControlNode = ({ type, label, description, icon, outputs, defaultConfi
 
 const controlNodes = [
   makeControlNode({
-    type: 'control.if', label: 'Conditional Branch (IF)', icon: 'BranchesOutlined',
-    description: 'Routes execution to true or false branch using structured filter rules.',
+    type: 'control.if', label: 'Rẽ nhánh Điều kiện (IF)', icon: 'BranchesOutlined',
+    description: 'Điều hướng luồng theo nhánh true hoặc false dựa trên luật lọc có cấu trúc.',
     outputs: ['true', 'false', 'error'],
     defaultConfig: { condition: { field: '', op: 'eq', value: '' } },
-    fields: [{ name: 'condition', label: 'Condition (JSON)', type: 'json', required: true }],
+    fields: [{ name: 'condition', label: 'Điều kiện (JSON)', type: 'json', required: true }],
     async execute({ node, config, input, context, helpers }) {
       const cfg = config || node?.config || {};
       const evalCtx = buildEvalContext(context, input);
@@ -111,13 +111,13 @@ const controlNodes = [
     },
   }),
   makeControlNode({
-    type: 'control.switch', label: 'Multi-Way Switch', icon: 'ForkOutlined',
-    description: 'Evaluates ordered cases against an expression and routes to the matching port.',
+    type: 'control.switch', label: 'Phân nhánh Đa chiều (Switch)', icon: 'ForkOutlined',
+    description: 'Đánh giá lần lượt các nhánh theo biểu thức và chuyển tới cổng khớp đầu tiên.',
     outputs: ['case_0', 'case_1', 'case_2', 'default', 'error'],
     defaultConfig: { expression: '', cases: [{ port: 'case_0', operator: 'eq', equals: '' }] },
     fields: [
-      { name: 'expression', label: 'Expression or Path', type: 'string', required: true, placeholder: 'data.priority' },
-      { name: 'cases', label: 'Ordered Cases (JSON)', type: 'json', required: true },
+      { name: 'expression', label: 'Biểu thức hoặc Đường dẫn', type: 'string', required: true, placeholder: 'data.priority' },
+      { name: 'cases', label: 'Danh sách nhánh (JSON)', type: 'json', required: true },
     ],
     async execute({ node, config, input, context, helpers }) {
       const cfg = config || node?.config || {};
@@ -141,17 +141,17 @@ const controlNodes = [
     },
   }),
   makeControlNode({
-    type: 'control.parallel', label: 'Parallel Fan-Out', icon: 'ApartmentOutlined',
-    description: 'Broadcasts execution across all connected outgoing branches concurrently.',
+    type: 'control.parallel', label: 'Chạy Song song (Fan-Out)', icon: 'ApartmentOutlined',
+    description: 'Phát đồng thời luồng thực thi tới tất cả các nhánh đầu ra đang nối.',
     outputs: ['main', 'error'], defaultConfig: { mode: 'fan_out' },
-    fields: [{ name: 'mode', label: 'Fan-Out Mode', type: 'select', options: ['fan_out'] }],
+    fields: [{ name: 'mode', label: 'Chế độ Fan-Out', type: 'select', options: ['fan_out'] }],
     async execute({ input }) { return { output: { fannedOut: true, input: input ?? null }, nextPort: 'main' }; },
   }),
   makeControlNode({
-    type: 'control.merge', label: 'Merge Branches', icon: 'MergeCellsOutlined',
-    description: 'Combines payloads from parallel branches using wait_all or first_completed.',
+    type: 'control.merge', label: 'Hợp nhất Nhánh (Merge)', icon: 'MergeCellsOutlined',
+    description: 'Gộp dữ liệu từ các nhánh song song theo chế độ wait_all hoặc first_completed.',
     outputs: ['main', 'error'], defaultConfig: { mode: 'wait_all' },
-    fields: [{ name: 'mode', label: 'Merge Mode', type: 'select', required: true, options: ['wait_all', 'first_completed'] }],
+    fields: [{ name: 'mode', label: 'Chế độ Hợp nhất', type: 'select', required: true, options: ['wait_all', 'first_completed'] }],
     async execute({ node, config, input, context }) {
       const cfg = config || node?.config || {};
       const mode = cfg.mode === 'first_completed' ? 'first_completed' : 'wait_all';
@@ -168,14 +168,14 @@ const controlNodes = [
     },
   }),
   makeControlNode({
-    type: 'control.loop', label: 'Bounded Loop (For Each)', icon: 'RetweetOutlined',
-    description: 'Iterates an array up to 100 items safely and emits item and done branches.',
+    type: 'control.loop', label: 'Vòng lặp Giới hạn (For Each)', icon: 'RetweetOutlined',
+    description: 'Lặp an toàn qua mảng tối đa 100 phần tử và phát ra nhánh item và done.',
     outputs: ['item', 'done', 'error'],
     defaultConfig: { itemsPath: 'data.items', maxIterations: MAX_LOOP_CAP, strictLimit: false },
     fields: [
-      { name: 'itemsPath', label: 'Items Array Path', type: 'string', required: true, placeholder: 'data.items' },
-      { name: 'maxIterations', label: 'Max Iterations (1..100)', type: 'number', required: true },
-      { name: 'strictLimit', label: 'Error If Array Exceeds Cap', type: 'boolean' },
+      { name: 'itemsPath', label: 'Đường dẫn Mảng', type: 'string', required: true, placeholder: 'data.items' },
+      { name: 'maxIterations', label: 'Số lần lặp tối đa (1..100)', type: 'number', required: true },
+      { name: 'strictLimit', label: 'Báo lỗi nếu vượt giới hạn', type: 'boolean' },
     ],
     async execute({ node, config, input, context, helpers }) {
       const cfg = config || node?.config || {};
@@ -204,12 +204,12 @@ const controlNodes = [
     },
   }),
   makeControlNode({
-    type: 'control.delay', label: 'Durable Delay / Timer', icon: 'HourglassOutlined',
-    description: 'Suspends execution until a relative delay or explicit ISO timestamp.',
+    type: 'control.delay', label: 'Hẹn giờ / Tạm dừng (Delay)', icon: 'HourglassOutlined',
+    description: 'Tạm dừng luồng đến hết khoảng trễ hoặc mốc thời gian ISO xác định.',
     outputs: ['main', 'error'], defaultConfig: { durationSec: 60, untilIso: '' },
     fields: [
-      { name: 'durationSec', label: 'Duration (seconds)', type: 'number', placeholder: '60' },
-      { name: 'untilIso', label: 'Until Timestamp (ISO-8601)', type: 'string', placeholder: '2026-12-01T00:00:00Z' },
+      { name: 'durationSec', label: 'Thời lượng (giây)', type: 'number', placeholder: '60' },
+      { name: 'untilIso', label: 'Đến mốc thời gian (ISO-8601)', type: 'string', placeholder: '2026-12-01T00:00:00Z' },
     ],
     async execute({ node, config, input, context, options, helpers }) {
       const cfg = config || node?.config || {};
@@ -229,16 +229,16 @@ const controlNodes = [
     },
   }),
   makeControlNode({
-    type: 'control.approval', label: 'Human Approval (HITL)', icon: 'SafetyCertificateOutlined',
-    description: 'Creates a pending approval item and suspends until approved or rejected.',
+    type: 'control.approval', label: 'Phê duyệt Con người (HITL)', icon: 'SafetyCertificateOutlined',
+    description: 'Tạo yêu cầu phê duyệt chờ duyệt và tạm dừng luồng đến khi duyệt hoặc từ chối.',
     outputs: ['approved', 'rejected', 'error'],
-    defaultConfig: { approverRole: 'ldx_manager', title: 'Approval Required', summary: '', riskLevel: 'medium', ttlHours: 24 },
+    defaultConfig: { approverRole: 'ldx_manager', title: 'Cần phê duyệt', summary: '', riskLevel: 'medium', ttlHours: 24 },
     fields: [
-      { name: 'approverRole', label: 'Approver Role', type: 'string', required: true, placeholder: 'ldx_manager' },
-      { name: 'title', label: 'Approval Title', type: 'string', required: true },
-      { name: 'summary', label: 'Decision Summary', type: 'textarea' },
-      { name: 'riskLevel', label: 'Risk Level', type: 'select', options: ['low', 'medium', 'high', 'critical'] },
-      { name: 'ttlHours', label: 'Expiration (Hours)', type: 'number' },
+      { name: 'approverRole', label: 'Vai trò duyệt', type: 'string', required: true, placeholder: 'ldx_manager' },
+      { name: 'title', label: 'Tiêu đề phê duyệt', type: 'string', required: true },
+      { name: 'summary', label: 'Tóm tắt quyết định', type: 'textarea' },
+      { name: 'riskLevel', label: 'Mức độ rủi ro', type: 'select', options: ['low', 'medium', 'high', 'critical'] },
+      { name: 'ttlHours', label: 'Thời hạn (giờ)', type: 'number' },
     ],
     async execute({ node, config, input, context, db, options, helpers }) {
       const cfg = config || node?.config || {};
@@ -277,13 +277,13 @@ const controlNodes = [
     },
   }),
   makeControlNode({
-    type: 'control.subflow', label: 'Invoke Subflow', icon: 'SubnodeOutlined',
-    description: 'Calls another published flow rule with bounded recursion depth.',
+    type: 'control.subflow', label: 'Gọi Luồng con (Subflow)', icon: 'SubnodeOutlined',
+    description: 'Gọi một quy trình đã phát hành khác với giới hạn độ sâu đệ quy.',
     outputs: ['main', 'error'], defaultConfig: { ruleKey: '', payloadMapping: {}, maxDepth: MAX_SUBFLOW_DEPTH },
     fields: [
-      { name: 'ruleKey', label: 'Subflow Rule Key', type: 'string', required: true },
-      { name: 'payloadMapping', label: 'Payload Mapping (JSON)', type: 'json' },
-      { name: 'maxDepth', label: 'Max Recursion Depth (1..8)', type: 'number' },
+      { name: 'ruleKey', label: 'Mã Luồng con (Rule Key)', type: 'string', required: true },
+      { name: 'payloadMapping', label: 'Ánh xạ Payload (JSON)', type: 'json' },
+      { name: 'maxDepth', label: 'Độ sâu đệ quy tối đa (1..8)', type: 'number' },
     ],
     async execute({ node, config, input, context, db, app, options, helpers }) {
       const cfg = config || node?.config || {};

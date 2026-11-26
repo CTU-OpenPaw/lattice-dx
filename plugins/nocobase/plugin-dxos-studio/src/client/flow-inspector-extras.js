@@ -36,24 +36,24 @@ function renderTraceIoView(h, { displayOut, activeTrace, formatJson, statusTone,
   const resolvedOut = displayOut || null;
   if (!resolvedOut) {
     return h('div', { 'data-testid': 'dxos-flow-output-view', style: S.card },
-      h('span', { style: { fontSize: 12, color: '#64748b' } }, 'No test output or trace yet. Run "Test This Node" or Dry-Run.'),
+      h('span', { style: { fontSize: 12, color: '#64748b' } }, 'Chưa có kết quả thử nghiệm hoặc trace. Hãy chạy "Thử nút này" hoặc Chạy thử.'),
     );
   }
   const traceInput = resolvedOut.input !== undefined ? resolvedOut.input : (activeTrace?.input !== undefined ? activeTrace.input : null);
   return h('div', { 'data-testid': 'dxos-flow-output-view', style: S.card },
     h('div', { style: S.rowBetween },
       h('span', { 'data-testid': 'dxos-flow-output-status', style: S.badge(statusTone(resolvedOut.status)) }, resolvedOut.status || 'completed'),
-      h('span', { style: { fontSize: 11, color: '#475569' } }, `${resolvedOut.durationMs ?? 0} ms · nextPort: ${resolvedOut.nextPort || resolvedOut.nextPorts?.[0] || '-'}`),
+      h('span', { style: { fontSize: 11, color: '#475569' } }, `${resolvedOut.durationMs ?? 0} ms · nhánh: ${resolvedOut.nextPort || resolvedOut.nextPorts?.[0] || '-'}`),
     ),
     (resolvedOut.error || resolvedOut.reason)
       ? h('div', { style: { padding: 8, borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 11 } }, String(resolvedOut.error || resolvedOut.reason))
       : null,
     h('div', { style: S.grid(3) },
-      h('span', { style: { ...S.label, marginBottom: 0 } }, 'Input JSON'),
+      h('span', { style: { ...S.label, marginBottom: 0 } }, 'Dữ liệu đầu vào (Input JSON)'),
       h('pre', { 'data-testid': 'dxos-flow-trace-input-json', style: { margin: 0, padding: 8, borderRadius: 6, background: '#1e293b', color: '#cbd5e1', fontSize: 11, overflowX: 'auto', maxHeight: 160 } }, formatJson(traceInput, null)),
     ),
     h('div', { style: S.grid(3) },
-      h('span', { style: { ...S.label, marginBottom: 0 } }, 'Output JSON'),
+      h('span', { style: { ...S.label, marginBottom: 0 } }, 'Kết quả đầu ra (Output JSON)'),
       h('pre', { 'data-testid': 'dxos-flow-output-json', style: { margin: 0, padding: 8, borderRadius: 6, background: '#0f172a', color: '#e2e8f0', fontSize: 11, overflowX: 'auto', maxHeight: 240 } }, formatJson(resolvedOut.output !== undefined ? resolvedOut.output : resolvedOut, null)),
     ),
   );

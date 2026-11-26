@@ -55,6 +55,31 @@ function firstSettingsPath(items) {
   return null;
 }
 
+function resolvePortalRedirect(portalList, pathname, allowConfigUI) {
+  const portalMatch = /^\/p\/([^/?#]+)/.exec(String(pathname || ''));
+  if (!portalMatch) return null;
+  const list = Array.isArray(portalList)
+    ? portalList.filter(p => p && p.enabled !== false && p.uid !== 'admin-layout-model')
+    : [];
+  const slugPath = '/p/' + portalMatch[1];
+  const activeAccessiblePortal = list.find(p => p.routePath === slugPath && p.firstPagePath) || null;
+  if (!allowConfigUI && !activeAccessiblePortal) {
+    const sibling = list.find(
+      p => typeof p?.routePath === 'string' && p.routePath.startsWith(slugPath + '-') && p.firstPagePath,
+    );
+    if (sibling && sibling.firstPagePath !== pathname) return sibling.firstPagePath;
+    return null;
+  }
+  if (
+    activeAccessiblePortal
+    && (pathname === activeAccessiblePortal.routePath || pathname === activeAccessiblePortal.routePath + '/')
+    && activeAccessiblePortal.firstPagePath !== pathname
+  ) {
+    return activeAccessiblePortal.firstPagePath;
+  }
+  return null;
+}
+
 function createNativeBuilderNavigation(client, React, antd, app, { clientV2, router, flow, portalManager } = {}) {
   if (!clientV2 || !router || !flow || !app?.flowEngine ||
       ![client.useAllAccessDesktopRoutes, client.useUIConfigurationPermissions,
@@ -151,6 +176,13 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     const api = useApi();
     const navigate = useNav();
     const [portals, setPortals] = React.useState(null);
+    const [loadFallback, setLoadFallback] = React.useState(false);
+    const portalsRef = React.useRef(null);
+    const fetchedKeyRef = React.useRef(null);
+    const inFlightKeyRef = React.useRef(null);
+    const requestSeqRef = React.useRef(0);
+    const recoveryAttemptedRef = React.useRef('');
+    const lastCheckedPathRef = React.useRef('');
     const portalList = Array.isArray(portals) ? portals : [];
     const desiredSettings = React.useRef('keep');
     const syncing = React.useRef(Promise.resolve());
@@ -168,7 +200,9 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
       const apply = () => {
         if (!active) return;
         const isMobile = Boolean(media?.matches);
-        model.setIsMobileLayout?.(isMobile);
+        if (model && model.isMobileLayout !== isMobile) {
+          model.setIsMobileLayout?.(isMobile);
+        }
         if (!allowConfigUI) portalManager?.requestBuilderMode?.(false);
         const forceDisable = !allowConfigUI || configMode || workspaceMode || isMobile;
         const wantBuilder = !forceDisable && Boolean(portalManager?.consumeBuilderIntent?.());
@@ -190,35 +224,112 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
 
     React.useEffect(() => {
       portalManager?.setPermissions?.(Boolean(allowConfigUI));
+      const fetchKey = `${api?.auth?.role ?? ''}:${Boolean(allowConfigUI)}`;
       if (!api || typeof api.request !== 'function') {
-        setPortals([]);
-        if (!allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
-        return;
+        if (portalsRef.current === null) {
+          portalsRef.current = [];
+          setPortals([]);
+        }
+        return undefined;
       }
+      if (fetchedKeyRef.current === fetchKey && Array.isArray(portalsRef.current)) {
+        return undefined;
+      }
+      if (inFlightKeyRef.current === fetchKey) {
+        return undefined;
+      }
+      inFlightKeyRef.current = fetchKey;
+      const seq = ++requestSeqRef.current;
       let active = true;
-      api.request({ url: 'latticePortals:listAccessible', method: 'get' }).then(res => {
-        if (!active) return;
+      api.request({ url: 'latticePortals:listAccessible', method: 'get', skipNotify: true }).then(res => {
+        if (!active || seq !== requestSeqRef.current) return;
+        inFlightKeyRef.current = null;
         const items = Array.isArray(res?.data?.data) ? res.data.data : [];
+        fetchedKeyRef.current = fetchKey;
+        portalsRef.current = items;
         setPortals(items);
         portalManager?.setPortals?.(items);
         portalManager?.ensureDynamicLayoutsRegistered?.(items);
-        if (!allowConfigUI && isAdminRoot && navigate) {
-          const dest = landingPath(items);
-          if (dest !== pathname) goPortal(dest, navigate, { replace: true });
-        }
       }).catch(() => {
-        if (!active) return;
-        setPortals([]);
-        if (!allowConfigUI && isAdminRoot && navigate) navigate(WORKSPACE_PATH, { replace: true });
+        if (inFlightKeyRef.current === fetchKey) inFlightKeyRef.current = null;
+        if (!active || seq !== requestSeqRef.current) return;
+        if (portalsRef.current === null) {
+          portalsRef.current = [];
+          setPortals([]);
+        }
       });
       return () => { active = false; };
-    }, [api, api?.auth?.role, allowConfigUI, isAdminRoot, pathname, navigate]);
+    }, [api, api?.auth?.role, allowConfigUI]);
 
-    if (!allowConfigUI && isAdminRoot) return redirectNotice();
+    React.useEffect(() => {
+      if (allowConfigUI || !isAdminRoot || !navigate) return;
+      if (!api || typeof api.request !== 'function') {
+        navigate(WORKSPACE_PATH, { replace: true });
+        return;
+      }
+      if (portals === null) return;
+      const dest = landingPath(portalList);
+      if (dest !== pathname) goPortal(dest, navigate, { replace: true });
+    }, [isAdminRoot, allowConfigUI, portals, pathname, navigate, api]);
 
-    const ShellModel = isPortalModel(model) ? V2Model : NativeModel;
     const portalMatch = /^\/p\/([^/?#]+)/.exec(pathname);
     const activeAccessiblePortal = portalMatch ? portalList.find(p => p.routePath === '/p/' + portalMatch[1] && p.firstPagePath) : null;
+    const redirectTarget = portals !== null ? resolvePortalRedirect(portalList, pathname, allowConfigUI) : null;
+
+    React.useEffect(() => {
+      if (!redirectTarget || !navigate) return;
+      goPortal(redirectTarget, navigate, { replace: true });
+    }, [redirectTarget, navigate]);
+
+    React.useEffect(() => {
+      if (lastCheckedPathRef.current !== pathname) {
+        lastCheckedPathRef.current = pathname;
+        if (loadFallback) setLoadFallback(false);
+      }
+      if (typeof document === 'undefined' || !activeAccessiblePortal || redirectTarget || configMode || workspaceMode) {
+        return undefined;
+      }
+      let active = true;
+      let retryTimer = null;
+      const isContentBlank = () => {
+        const container = document.querySelector?.('main')
+          || document.querySelector?.('.ant-layout-content')
+          || document.querySelector?.('#nocobase-app-container');
+        if (!container) return false;
+        const text = String(container.innerText ?? container.textContent ?? '').trim();
+        if (text.length > 0) return false;
+        const hasBlocks = Boolean(container.querySelector?.('table, form, canvas, input, button, [role="grid"], .ant-card, .ant-empty, .ant-result, .ant-alert'));
+        return !hasBlocks;
+      };
+      const settleTimer = setTimeout(() => {
+        if (!active || !isContentBlank()) return;
+        if (recoveryAttemptedRef.current !== pathname) {
+          recoveryAttemptedRef.current = pathname;
+          try {
+            const layoutUid = model?.layout?.uid || activeAccessiblePortal?.uid;
+            if (layoutUid && typeof app?.flowEngine?.loadModel === 'function') {
+              Promise.resolve(app.flowEngine.loadModel(layoutUid)).catch(() => {});
+            }
+            model?.flowEngine?.loadModel?.(layoutUid)?.catch?.(() => {});
+          } catch {}
+          retryTimer = setTimeout(() => {
+            if (!active) return;
+            if (isContentBlank()) setLoadFallback(true);
+          }, 800);
+          return;
+        }
+        setLoadFallback(true);
+      }, 2500);
+      return () => {
+        active = false;
+        clearTimeout(settleTimer);
+        if (retryTimer) clearTimeout(retryTimer);
+      };
+    }, [pathname, activeAccessiblePortal, redirectTarget, configMode, workspaceMode, model, loadFallback]);
+
+    if ((!allowConfigUI && isAdminRoot) || redirectTarget) return redirectNotice();
+
+    const ShellModel = isPortalModel(model) ? V2Model : NativeModel;
     const isEmptyEmployeePortal = Boolean(portals !== null && !allowConfigUI && portalMatch && !activeAccessiblePortal);
     const emptyPortalCard = isEmptyEmployeePortal ? h('div', {
       'data-testid': 'ldx-empty-portal-fallback',
@@ -251,6 +362,35 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         }, 'Về Không gian việc của tôi'),
       ),
     ) : null;
+    const loadFallbackBanner = loadFallback && !isEmptyEmployeePortal ? h('div', {
+      'data-testid': 'ldx-portal-load-fallback',
+      role: 'alert',
+      style: {
+        position: 'fixed', top: 64, left: '50%', transform: 'translateX(-50%)', zIndex: 950,
+        maxWidth: 560, width: 'calc(100% - 32px)', padding: '16px 20px', borderRadius: 12,
+        background: '#ffffff', border: '1px solid #f59e0b', boxShadow: '0 8px 24px rgba(15,23,42,0.12)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, flexWrap: 'wrap',
+      },
+    },
+      h('div', { style: { display: 'grid', gap: 4 } },
+        h('strong', { style: { fontSize: 14, color: '#0f172a' } }, 'Không thể tải đầy đủ giao diện cổng làm việc'),
+        h('span', { style: { fontSize: 12, color: '#475569' } }, 'Kết nối tải trang bị gián đoạn. Nhấn tải lại để khôi phục ngay.')),
+      h('button', {
+        type: 'button',
+        onClick: () => {
+          setLoadFallback(false);
+          if (typeof window !== 'undefined' && typeof window.location?.reload === 'function') {
+            window.location.reload();
+          } else if (navigate) {
+            navigate(pathname, { replace: true });
+          }
+        },
+        style: {
+          padding: '7px 14px', borderRadius: 8, border: '1px solid #1677ff',
+          background: '#1677ff', color: '#ffffff', fontWeight: 600, fontSize: 13, cursor: 'pointer',
+        },
+      }, 'Tải lại trang'),
+    ) : null;
     const nativeShell = emptyPortalCard || ShellModel.prototype.render.call(model);
     const switcher = !portalManager?.hasTopbarSwitcher && !configMode && portalManager?.PortalBar
       ? h(portalManager.PortalBar, { portals: portalList, currentLayoutUid: model?.layout?.uid, pathname, allowConfigUI, onSwitch: dest => goPortal(dest, navigate) })
@@ -266,7 +406,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
       href: 'https://www.nocobase.com', target: '_blank', rel: 'noreferrer',
       style: { color: '#1677ff', textDecoration: 'none', fontWeight: 500 },
     }, 'NocoBase'));
-    return h(Fragment, null, nativeShell, switcher, attribution);
+    return h(Fragment, null, nativeShell, loadFallbackBanner, switcher, attribution);
   }
 
   function PortalAdminProvider({ children }) {
@@ -291,7 +431,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
           if (err?.response?.status === 401 || err?.status === 401) unauthorized = true;
           return null;
         }),
-        api.request({ url: 'latticePortals:listAccessible', method: 'get' }).catch(() => null),
+        api.request({ url: 'latticePortals:listAccessible', method: 'get', skipNotify: true }).catch(() => null),
       ]).then(([roleRes, portalRes]) => {
         if (!active) return;
         if (unauthorized) { setVerified(true); return; }
@@ -341,4 +481,4 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
   };
 }
 
-module.exports = { pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation, BUILDER_PATH };
+module.exports = { pageTree, hostPath, firstSettingsPath, resolvePortalRedirect, createNativeBuilderNavigation, BUILDER_PATH };

@@ -376,3 +376,68 @@ test('MultiPortalSettingsPage includes custom non-ldx enterprise roles while exc
   assert.ok(modal);
   assert.deepEqual(modal.props.roles.map(r => r.name), ['ldx_employee', 'custom_auditor']);
 });
+
+test('TopbarPortalSwitcher requires auth token, uses skipNotify, and syncPortals avoids redundant churn on identical metadata', async () => {
+  const React = createReactMock();
+  const requests = [];
+  let token = '';
+  let registerCount = 0;
+  let modelGetCount = 0;
+  const portals = [
+    { uid: 'ldx-portal-services', title: 'Cổng Dịch vụ', routeName: 'p_services', routePath: '/p/services', firstPagePath: '/p/services/home', enabled: true },
+  ];
+  const app = {
+    layoutManager: {
+      hasLayout: () => false,
+      registerLayout: () => { registerCount += 1; },
+      listLayouts: () => [{ uid: 'ldx-portal-services', layoutModelClass: 'AdminLayoutModel' }],
+    },
+    flowEngine: {
+      getModel: () => { modelGetCount += 1; return { uid: 'ldx-portal-services' }; },
+      createModel: () => {},
+    },
+    pluginSettingsManager: { add() {} },
+    apiClient: {
+      auth: { role: 'ldx_employee', getToken: () => token },
+      request: async req => {
+        requests.push(req);
+        return { data: { data: portals } };
+      },
+    },
+  };
+  const manager = createNativePortalManager(
+    { useAPIClient: () => app.apiClient, useUIConfigurationPermissions: () => ({ allowConfigUI: false }) },
+    React,
+    { Dropdown: 'Dropdown' },
+    app,
+    { Link: 'Link', useLocation: () => ({ pathname: '/p/services/home' }), useNavigate: () => () => {} },
+  );
+
+  // Without auth token: TopbarPortalSwitcher must NOT call latticePortals:listAccessible
+  React.reset();
+  manager.TopbarPortalSwitcher({});
+  React.flush();
+  await new Promise(r => setImmediate(r));
+  assert.equal(requests.filter(r => r.url === 'latticePortals:listAccessible').length, 0);
+
+  // With auth token: calls with skipNotify: true
+  token = 'jwt-emp';
+  React.reset();
+  manager.TopbarPortalSwitcher({});
+  React.flush();
+  await new Promise(r => setImmediate(r));
+  const req = requests.find(r => r.url === 'latticePortals:listAccessible');
+  assert.ok(req);
+  assert.equal(req.skipNotify, true);
+
+  // Identical syncPortals call does NOT trigger redundant ensureDynamicLayoutsRegistered/ensureLayoutModelsReady churn
+  const regsAfterFirst = registerCount;
+  const getsAfterFirst = modelGetCount;
+  manager.setPortals([{ ...portals[0] }]);
+  assert.equal(registerCount, regsAfterFirst);
+  assert.equal(modelGetCount, getsAfterFirst);
+
+  // Changed metadata DOES sync
+  manager.setPortals([{ ...portals[0], title: 'Cổng Dịch vụ v2' }]);
+  assert.ok(modelGetCount > getsAfterFirst);
+});

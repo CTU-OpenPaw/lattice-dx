@@ -71,13 +71,13 @@ function createMockHeadlessCaller({
     const [resourceAction, query = ''] = String(path).split('?');
 
     if (resourceAction === 'dxos:health') {
-      return { ok: true, status: 200, data: { status: 'ok', version: '0.4.0', dbHealthy: true } };
+      return { ok: true, status: 200, data: { status: 'ok', version: '0.4.1', dbHealthy: true } };
     }
     if (resourceAction === 'dxos:openapi') {
-      return { ok: true, status: 200, data: { openapi: '3.1.0', info: { version: '0.4.0' }, paths: { '/api/dxos:health': {} } } };
+      return { ok: true, status: 200, data: { openapi: '3.1.0', info: { version: '0.4.1' }, paths: { '/api/dxos:health': {} } } };
     }
     if (resourceAction === 'dxos:asyncapi') {
-      return { ok: true, status: 200, data: { asyncapi: '3.0.0', info: { version: '0.4.0' }, channels: { telemetry: {} } } };
+      return { ok: true, status: 200, data: { asyncapi: '3.0.0', info: { version: '0.4.1' }, channels: { telemetry: {} } } };
     }
     if (resourceAction === 'dxos:manifest') {
       return { ok: true, status: 200, data: { name: 'LatticeDX Field PWA', start_url: '/v/mobile' } };
@@ -337,7 +337,7 @@ function createMockHeadlessCaller({
         ok: true,
         status: 200,
         data: {
-          metadata: { schemaVersion: bundleSchemaVersion, platformVersion: '0.4.0', organizationId: 'native-ui-lab', contentSha256: 'a'.repeat(64) },
+          metadata: { schemaVersion: bundleSchemaVersion, platformVersion: '0.4.1', organizationId: 'native-ui-lab', contentSha256: 'a'.repeat(64) },
           roles: [{ name: 'ldx_employee' }],
           portals: [{ path: '/v/my-work' }],
         },
@@ -444,9 +444,9 @@ test('runHeadlessPaaSAcceptance runs cleanup even when an intermediate step fail
   const destroyed = [];
   const callActor = async (actorRole, path, opts = {}) => {
     const [resourceAction] = String(path).split('?');
-    if (resourceAction === 'dxos:health') return { ok: true, status: 200, data: { status: 'ok', version: '0.4.0' } };
-    if (resourceAction === 'dxos:openapi') return { ok: true, status: 200, data: { openapi: '3.1.0', info: { version: '0.4.0' }, paths: {} } };
-    if (resourceAction === 'dxos:asyncapi') return { ok: true, status: 200, data: { asyncapi: '3.0.0', info: { version: '0.4.0' }, channels: {} } };
+    if (resourceAction === 'dxos:health') return { ok: true, status: 200, data: { status: 'ok', version: '0.4.1' } };
+    if (resourceAction === 'dxos:openapi') return { ok: true, status: 200, data: { openapi: '3.1.0', info: { version: '0.4.1' }, paths: {} } };
+    if (resourceAction === 'dxos:asyncapi') return { ok: true, status: 200, data: { asyncapi: '3.0.0', info: { version: '0.4.1' }, channels: {} } };
     if (resourceAction === 'dxos:manifest') return { ok: true, status: 200, data: { name: 'PWA', start_url: '/v/mobile' } };
     if (resourceAction === 'dxos:sw.js') return { ok: true, status: 200, rawText: 'CACHE_NAME /api/dxos:manifest', data: {} };
     if (resourceAction === 'dxosApiKeys:issue') {

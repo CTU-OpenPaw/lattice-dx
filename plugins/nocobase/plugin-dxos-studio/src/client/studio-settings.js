@@ -36,7 +36,7 @@ const STUDIO_NAV_GROUPS = Object.freeze([
       ['portals', 'Portal Composer (Đa-Block)'],
       ['builder', 'Visual Domain Builder & Tenant'],
       ['forms', 'Biểu mẫu Công khai'],
-      ['gitops', 'GitOps Bundle v3'],
+      ['gitops', 'Gói cấu hình GitOps v3'],
     ],
   },
   {
@@ -105,6 +105,10 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
   return function DxosStudioSettingsPage() {
     const api = useApi();
+    const perm = typeof client?.useUIConfigurationPermissions === 'function'
+      ? client.useUIConfigurationPermissions()
+      : null;
+    const uiDenied = Boolean(perm && perm.allowConfigUI === false);
     const [tab, setTab] = React.useState(readInitialStudioTab);
     const [loading, setLoading] = React.useState(true);
     const [templates, setTemplates] = React.useState([]);
@@ -117,7 +121,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [bindings, setBindings] = React.useState({});
     const [enableOnCreate, setEnableOnCreate] = React.useState(true);
     const [busyAction, setBusyAction] = React.useState(false);
-    const [forbidden, setForbidden] = React.useState(false);
+    const [forbidden, setForbidden] = React.useState(uiDenied);
     const [feedback, setFeedback] = React.useState(null);
     const [outboxData, setOutboxData] = React.useState({ items: [], total: 0, summary: { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 } });
     const [bundleText, setBundleText] = React.useState('');
@@ -126,6 +130,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [govSection, setGovSection] = React.useState('api-keys');
 
     const loadAll = React.useCallback(async () => {
+      if (uiDenied) { setForbidden(true); setLoading(false); return; }
       if (!api?.request) { setLoading(false); return; }
       setLoading(true);
       try {
@@ -155,12 +160,12 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       } finally {
         setLoading(false);
       }
-    }, [api, selectedOrg]);
+    }, [api, selectedOrg, uiDenied]);
 
     React.useEffect(() => { loadAll(); }, [loadAll]);
 
     const loadOutbox = React.useCallback(async () => {
-      if (!api?.request) return;
+      if (uiDenied || !api?.request) return;
       try {
         const res = await api.request({ url: 'dxosStudio:outboxDlqList', method: 'get', skipNotify: true });
         const d = res?.data?.data || res?.data || {};
@@ -169,14 +174,15 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           total: Number(d.total || 0),
           summary: d.summary || { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 },
         });
-      } catch {
-        // Keep last state cleanly
+      } catch (err) {
+        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được hàng đợi Outbox / DLQ.';
+        setFeedback({ type: 'error', text: msg });
       }
-    }, [api]);
+    }, [api, uiDenied]);
 
     React.useEffect(() => {
-      if (tab === 'outbox') loadOutbox();
-    }, [tab, loadOutbox]);
+      if (!uiDenied && tab === 'outbox') loadOutbox();
+    }, [tab, loadOutbox, uiDenied]);
 
     async function handleReplayDlq(eventIds) {
       if (!api?.request || busyAction) return;
@@ -344,8 +350,8 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         setFeedback({
           type: 'success',
           text: d.dryRun
-            ? `Dry-Run hợp lệ (+${d.diff?.summary?.added || 0} thêm, ~${d.diff?.summary?.changed || 0} đổi).`
-            : `Đã áp dụng Bundle (${d.snapshotUid || 'snapshot'}): ${d.applied?.rolesUpserted || 0} roles, ${d.applied?.roleResourcesUpserted || 0} roleResources, ${d.applied?.portalsUpserted || 0} portals, ${d.applied?.workflowsUpserted || 0} workflows, ${d.applied?.customCollectionsUpserted || 0} customCollections, ${d.applied?.aiProfilesUpserted || 0} aiProfiles.`,
+            ? `Kiểm tra hợp lệ (Dry-Run) (+${d.diff?.summary?.added || 0} thêm, ~${d.diff?.summary?.changed || 0} đổi).`
+            : `Đã áp dụng Gói (${d.snapshotUid || 'snapshot'}): ${d.applied?.rolesUpserted || 0} vai trò, ${d.applied?.roleResourcesUpserted || 0} quyền bảng, ${d.applied?.portalsUpserted || 0} cổng, ${d.applied?.workflowsUpserted || 0} quy trình, ${d.applied?.customCollectionsUpserted || 0} bảng tùy biến, ${d.applied?.aiProfilesUpserted || 0} nhân sự AI.`,
         });
         if (!d.dryRun) await loadAll();
       } catch (err) {
@@ -432,7 +438,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       boxSizing: 'border-box',
     });
 
-    if (forbidden) {
+    if (forbidden || uiDenied) {
       return h('div', { 'data-testid': 'dxos-studio-forbidden', style: { padding: 24, maxWidth: 720, margin: '24px auto', borderRadius: 12, border: '1px solid #fecaca', background: '#fef2f2', color: '#991b1b' } },
         h('h2', { style: { margin: '0 0 8px', fontSize: 18 } }, '403 — Chỉ Quản trị viên mới truy cập được DX-OS Control Studio'),
         h('p', { style: { margin: '0 0 12px', fontSize: 13 } }, 'Tài khoản hiện tại không có quyền quản trị cấu hình plugin/workflow. Vui lòng quay lại cổng làm việc của bạn.'),
@@ -614,7 +620,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hệ sinh thái 7 Plugin Apache-2.0 Open-Core'),
           h('div', { style: { display: 'flex', gap: 8 } },
             h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở AI Workforce & 6-Plane Center'),
-            h('button', { type: 'button', onClick: () => openRoute('/admin/pm/list'), style: btnStyle(false) }, 'Mở Plugin Manager (bật/tắt live)'),
+            h('button', { type: 'button', onClick: () => openRoute('/admin/pm/list'), style: btnStyle(false) }, 'Mở Trình quản lý Plugin (bật/tắt trực tiếp)'),
           ),
         ),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 10 } },
@@ -647,7 +653,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
       tab === 'outbox' ? h('div', { 'data-testid': 'dxos-studio-outbox-dlq-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-          h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hàng đợi Outbox & Dead-Letter Queue (DLQ)'),
+          h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hàng đợi Outbox & Sự kiện lỗi (DLQ)'),
           h('div', { style: { display: 'flex', gap: 8 } },
             h('button', { type: 'button', onClick: () => loadOutbox(), style: btnStyle(false) }, 'Làm mới DLQ'),
             h('button', { type: 'button', disabled: busyAction || !(outboxData.items || []).length, onClick: () => handleReplayDlq(), style: btnStyle(true, false, busyAction || !(outboxData.items || []).length) }, 'Phát lại toàn bộ DLQ'),

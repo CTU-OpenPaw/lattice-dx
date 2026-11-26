@@ -23,7 +23,7 @@ const { runWithSystemRlsBypass } = require('./ai-rls');
 class DxosAiPlugin extends Plugin {
   async load() {
     if (typeof this.db?.collection === 'function') {
-      for (const colPath of ['./collections/ai-memory', './collections/a2a-tasks']) {
+      for (const colPath of ['./collections/ai-memory', './collections/a2a-tasks', './collections/ai-quota-policies']) {
         try {
           const colDef = require(colPath);
           if (colDef?.name && (!this.db.hasCollection || !this.db.hasCollection(colDef.name))) {

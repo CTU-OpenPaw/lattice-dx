@@ -72,6 +72,10 @@ const {
 const {registerPublicForms}=require('./public-forms');
 const {createPublicFormGatewayHandler}=require('./public-form-html');
 const {createPublicTrackGatewayHandler}=require('./public-track-html');
+const {
+  createPublicBrandingGatewayHandler,
+  createSystemSettingsBrandingMiddleware,
+}=require('./public-branding');
 const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
 class LatticeFoundationPlugin extends Plugin {
   async load() {
@@ -135,6 +139,12 @@ class LatticeFoundationPlugin extends Plugin {
     if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
       Gateway.registerRequestHandler(this._publicTrackGatewayHandler);
     }
+    this.unregisterPublicBrandingGatewayHandler();
+    this._publicBrandingGatewayHandler = createPublicBrandingGatewayHandler();
+    if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
+      Gateway.registerRequestHandler(this._publicBrandingGatewayHandler);
+    }
+    this.app.resourceManager.use(createSystemSettingsBrandingMiddleware(), { tag: 'latticePublicBrandingLogo', after: 'acl' });
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -186,9 +196,18 @@ class LatticeFoundationPlugin extends Plugin {
       this._publicTrackGatewayHandler = null;
     }
   }
+  unregisterPublicBrandingGatewayHandler() {
+    if (this._publicBrandingGatewayHandler) {
+      if (Gateway && typeof Gateway.unregisterRequestHandler === 'function') {
+        Gateway.unregisterRequestHandler(this._publicBrandingGatewayHandler);
+      }
+      this._publicBrandingGatewayHandler = null;
+    }
+  }
   async unload() {
     this.unregisterPublicFormGatewayHandler();
     this.unregisterPublicTrackGatewayHandler();
+    this.unregisterPublicBrandingGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.unload === 'function') await super.unload();
@@ -196,6 +215,7 @@ class LatticeFoundationPlugin extends Plugin {
   async remove() {
     this.unregisterPublicFormGatewayHandler();
     this.unregisterPublicTrackGatewayHandler();
+    this.unregisterPublicBrandingGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.remove === 'function') await super.remove();
@@ -203,6 +223,7 @@ class LatticeFoundationPlugin extends Plugin {
   async destroy() {
     this.unregisterPublicFormGatewayHandler();
     this.unregisterPublicTrackGatewayHandler();
+    this.unregisterPublicBrandingGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.destroy === 'function') await super.destroy();

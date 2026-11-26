@@ -117,16 +117,23 @@ function registerPortalSwitcherPlugin(client, React, antd, app, portalsRef, { ic
 function createNativePortalManager(client, React, antd, app, router, icons, { clientV2 } = {}) {
   if (!React?.createElement || !app) return null;
   const h = React.createElement;
-  const portalsRef = { current: [], allowConfigUI: false, role: null };
+  const portalsRef = { current: [], allowConfigUI: false, role: null, sig: null };
   const startupRouteNames = new Set();
   const listeners = new Set();
   const builderIntentRef = { current: false };
   let preloaded = false;
   const renderTile = (color, iconName, size, label) => renderPortalTile(React, icons, color, iconName, size, label);
+  const portalSignature = items => (Array.isArray(items) ? items : [])
+    .map(p => `${p?.uid || ''}|${p?.routePath || ''}|${p?.firstPagePath || ''}|${p?.title || ''}|${p?.enabled !== false}|${Boolean(p?.isDefault)}`)
+    .join('\n');
   const syncPortals = items => {
     if (!Array.isArray(items)) return;
+    const nextRole = app?.apiClient?.auth?.role ?? '';
+    const nextSig = portalSignature(items);
+    if (portalsRef.sig === nextSig && portalsRef.role === nextRole) return;
     portalsRef.current = items;
-    portalsRef.role = app?.apiClient?.auth?.role ?? '';
+    portalsRef.role = nextRole;
+    portalsRef.sig = nextSig;
     ensureDynamicLayoutsRegistered(app, items);
     ensureLayoutModelsReady();
     listeners.forEach(fn => { try { fn(); } catch {} });
@@ -253,12 +260,19 @@ function createNativePortalManager(client, React, antd, app, router, icons, { cl
     const currentRole = api?.auth?.role ?? '';
     const [, bump] = React.useState(0);
     React.useEffect(() => {
-      const fn = () => bump(n => n + 1);
+      let active = true;
+      const fn = () => { if (active) bump(n => n + 1); };
       listeners.add(fn);
-      if ((!portalsRef.current.length || portalsRef.role !== currentRole) && typeof api?.request === 'function') {
-        api.request({ url: 'latticePortals:listAccessible', method: 'get' }).then(res => syncPortals(res?.data?.data || [])).catch(() => {});
+      const hasToken = Boolean(api?.auth?.token || (typeof api?.auth?.getToken === 'function' && api.auth.getToken()));
+      if (hasToken && (!portalsRef.current.length || portalsRef.role !== currentRole) && typeof api?.request === 'function') {
+        api.request({ url: 'latticePortals:listAccessible', method: 'get', skipNotify: true })
+          .then(res => {
+            if (!active) return;
+            syncPortals(Array.isArray(res?.data?.data) ? res.data.data : []);
+          })
+          .catch(() => {});
       }
-      return () => { listeners.delete(fn); };
+      return () => { active = false; listeners.delete(fn); };
     }, [api, currentRole]);
     return h(PortalBar, {
       portals: portalsRef.current, currentLayoutUid: model?.parent?.layout?.uid, pathname: loc?.pathname || '',

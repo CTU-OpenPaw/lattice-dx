@@ -46,6 +46,7 @@ routes:
       - /api/dxos:manifest
       - /api/dxos:sw.js
       - /api/dxosWms:publicTrack
+      - /api/dxosWms:verifyTrackSignature
       - /api/dxosLedger:verifySignature
       - /api/dxosForms:meta
       - /api/dxosForms:submit

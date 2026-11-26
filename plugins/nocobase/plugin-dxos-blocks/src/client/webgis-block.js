@@ -774,6 +774,8 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
     const [filterMode, setFilterMode] = React.useState('all');
     const [selectedId, setSelectedId] = React.useState('');
     const [drawerOpen, setDrawerOpen] = React.useState(false);
+    const [twinFocusNonce, setTwinFocusNonce] = React.useState(0);
+    const [twinDrawerRef] = React.useState(() => ({ current: null }));
     const [offlineStyleMode, setOfflineStyleMode] = React.useState(
       () => Boolean(cfg.offlineOnly) || (typeof navigator !== 'undefined' && navigator.onLine === false) || !cfg.tileUrlTemplate,
     );
@@ -1161,6 +1163,21 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
         });
       }
     }, [classifiedMarkers, cfg.showTwinOverlay]);
+
+    const handleOpenTwinDrawer = React.useCallback((marker) => {
+      if (!marker || marker.assetId == null) return;
+      handleSelectMarker(marker);
+      setTwinFocusNonce((n) => n + 1);
+    }, [handleSelectMarker]);
+
+    React.useEffect(() => {
+      if (!drawerOpen || twinFocusNonce <= 0) return undefined;
+      const timer = setTimeout(() => {
+        twinDrawerRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+        twinDrawerRef.current?.focus?.({ preventScroll: true });
+      }, 15);
+      return () => clearTimeout(timer);
+    }, [drawerOpen, twinFocusNonce, twinDrawerRef]);
 
     mapHolder.onSelectMarker = handleSelectMarker;
     mapHolder.latestGeo = { markersGeoJson, corridorsGeoJson, selectedId: selectedMarker?.id || '' };
@@ -1559,7 +1576,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
             hasTwinControls ? h('button', {
               type: 'button',
               'data-testid': 'dxos-webgis-open-twin-drawer-btn',
-              onClick: () => handleSelectMarker(twinMarker),
+              onClick: () => handleOpenTwinDrawer(twinMarker),
               style: {
                 padding: '6px 10px',
                 borderRadius: 6,
@@ -1570,7 +1587,10 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                 fontWeight: 700,
                 cursor: 'pointer',
               },
-            }, 'Điều khiển Digital Twin') : null,
+            }, 'Điều khiển Digital Twin') : (cfg.showTwinOverlay !== false ? h('div', {
+              'data-testid': 'dxos-webgis-twin-guidance',
+              style: { fontSize: 11, color: '#64748b', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: 6, padding: '6px 8px' },
+            }, 'Chưa có tài sản IoT gắn Asset ID — chọn một điểm kho lạnh hoặc thiết bị có Asset ID để điều khiển Digital Twin.') : null),
             selectedMarker.alarmCount > 0 ? h('div', { style: { fontSize: 12, color: '#991b1b', background: '#fee2e2', padding: '6px 8px', borderRadius: 6 } },
               `Sự cố đang mở (${selectedMarker.alarmCount}): ${selectedMarker.latestAlarm || 'Cảnh báo ngưỡng nhiệt'}`,
             ) : null,
@@ -1620,7 +1640,7 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
               h('button', {
                 type: 'button',
                 'data-testid': 'dxos-webgis-open-twin-drawer-btn',
-                onClick: () => handleSelectMarker(twinMarker),
+                onClick: () => handleOpenTwinDrawer(twinMarker),
                 style: {
                   padding: '6px 10px',
                   borderRadius: 6,
@@ -1632,18 +1652,25 @@ function createWebGisBlockView(client, React, _antd, app, { subscribeModelConfig
                   cursor: 'pointer',
                 },
               }, 'Điều khiển Digital Twin'),
-            ) : null,
+            ) : (cfg.showTwinOverlay !== false ? h('div', {
+              'data-testid': 'dxos-webgis-twin-guidance',
+              style: { fontSize: 11, color: '#64748b', background: '#f8fafc', border: '1px dashed #cbd5e1', borderRadius: 6, padding: '6px 8px' },
+            }, 'Chưa có tài sản IoT gắn Asset ID — chọn một điểm kho lạnh hoặc thiết bị có Asset ID để điều khiển Digital Twin.') : null),
           ),
         ),
       ),
       drawerOpen && hasTwinControls ? h('div', {
         'data-testid': 'dxos-webgis-twin-drawer',
+        ref: (el) => { twinDrawerRef.current = el; },
+        tabIndex: -1,
         role: 'region',
         'aria-label': `Điều khiển Digital Twin ${twinMarker.code}`,
         style: {
           borderRadius: 10,
-          border: '1px solid #93c5fd',
+          border: '2px solid #0284c7',
           background: '#f8fafc',
+          boxShadow: '0 8px 24px rgba(2, 132, 199, 0.14)',
+          outline: 'none',
           padding: 14,
           display: 'grid',
           gap: 10,

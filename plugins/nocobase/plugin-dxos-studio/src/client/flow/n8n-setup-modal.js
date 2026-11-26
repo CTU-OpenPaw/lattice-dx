@@ -67,6 +67,7 @@ function createN8nSetupModal(React) {
     const c = {
       pri: ['#2563EB', '#FFFFFF', '#2563EB'],
       run: ['#0F766E', '#FFFFFF', '#0F766E'],
+      danger: ['#DC2626', '#FFFFFF', '#DC2626'],
       act: ['#EFF6FF', '#1D4ED8', '#93C5FD'],
       ghost: ['#FFFFFF', '#0F172A', '#CBD5E1'],
     }[tone] || ['#FFFFFF', '#0F172A', '#CBD5E1'];
@@ -77,6 +78,8 @@ function createN8nSetupModal(React) {
     const { open = false, api = null, organizationId = '', selectedNode = null, onClose, onConnectorsChanged, onApplyToSelectedNode, onOpenEnterpriseBlueprint } = props;
     const [connectors, setConnectors] = React.useState([]);
     const [liveWorkflows, setLiveWorkflows] = React.useState([]);
+    const [wfWarning, setWfWarning] = React.useState('');
+    const [confirmDeleteKey, setConfirmDeleteKey] = React.useState('');
     const [loading, setLoading] = React.useState(false);
     const [busy, setBusy] = React.useState(false);
     const [status, setStatus] = React.useState(null);
@@ -103,8 +106,10 @@ function createN8nSetupModal(React) {
         if (wfRes.status === 'fulfilled') {
           const wfs = wfRes.value?.data?.data?.data || wfRes.value?.data?.data || wfRes.value?.data?.items || [];
           setLiveWorkflows(Array.isArray(wfs) ? wfs : []);
+          setWfWarning('');
         } else {
           setLiveWorkflows([]);
+          setWfWarning(wfRes.reason?.response?.data?.errors?.[0]?.message || wfRes.reason?.message || 'Không kết nối được Stock n8n.');
         }
       } finally {
         setLoading(false);
@@ -169,6 +174,23 @@ function createN8nSetupModal(React) {
       }
     };
 
+    const handleDelete = async (connectorKey) => {
+      if (!api?.request || !organizationId) return;
+      setBusy(true);
+      setStatus(null);
+      try {
+        await api.request({ url: 'dxosVault:delete', method: 'post', data: { organizationId, connectorKey } });
+        setConfirmDeleteKey('');
+        setStatus({ type: 'ok', text: `Đã xóa kết nối n8n "${connectorKey}".` });
+        await loadConnectors();
+        onConnectorsChanged?.();
+      } catch (err) {
+        setStatus({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Xóa connector n8n thất bại.' });
+      } finally {
+        setBusy(false);
+      }
+    };
+
     return h('div', { 'data-testid': 'dxos-n8n-setup-modal', style: { position: 'fixed', inset: 0, background: 'rgba(15, 23, 42, 0.48)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 55, padding: 16 } },
       h('div', { style: { width: 760, maxWidth: '100%', maxHeight: '90vh', overflowY: 'auto', background: '#FFFFFF', borderRadius: 14, padding: 18, display: 'grid', gap: 14, boxShadow: '0 20px 44px rgba(15,23,42,0.24)' } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
@@ -208,9 +230,15 @@ function createN8nSetupModal(React) {
                 h('span', { style: { fontSize: 12, fontWeight: 700, color: '#0F172A' } }, `${c.name || c.connectorKey} (${c.connectorKey})`),
                 h('span', { style: { fontSize: 11, color: '#475569' } }, `${c.baseUrl || ''} · ${c.authType || 'none'} · secret=${c.hasSecrets ? 'encrypted' : 'none'} · ${c.lastTestStatus || 'untested'}`),
               ),
-              h('div', { style: { display: 'flex', gap: 6 } },
+              h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
                 h('button', { type: 'button', 'data-testid': `dxos-n8n-use-${c.connectorKey}`, onClick: () => setForm((f) => ({ ...f, connectorKey: c.connectorKey, name: c.name || f.name, baseUrl: c.baseUrl || f.baseUrl, authType: c.authType || f.authType })), style: BTN('ghost') }, 'Nạp vào form'),
                 h('button', { type: 'button', 'data-testid': `dxos-n8n-test-${c.connectorKey}`, disabled: busy, onClick: () => handleTest(c.connectorKey), style: BTN('run', busy) }, 'Test /healthz'),
+                confirmDeleteKey === c.connectorKey
+                  ? [
+                    h('button', { key: 'cf', type: 'button', 'data-testid': `dxos-n8n-delete-confirm-${c.connectorKey}`, disabled: busy, onClick: () => handleDelete(c.connectorKey), style: BTN('danger', busy) }, 'Xác nhận xóa'),
+                    h('button', { key: 'cc', type: 'button', onClick: () => setConfirmDeleteKey(''), style: BTN('ghost') }, 'Hủy'),
+                  ]
+                  : h('button', { type: 'button', 'data-testid': `dxos-n8n-delete-${c.connectorKey}`, disabled: busy, onClick: () => setConfirmDeleteKey(c.connectorKey), style: BTN('danger', busy) }, 'Xóa'),
               ),
             )),
         ),
@@ -232,10 +260,11 @@ function createN8nSetupModal(React) {
 
         h('div', { 'data-testid': 'dxos-n8n-modal-live-workflows', style: { display: 'grid', gap: 6 } },
           h('strong', { style: { fontSize: 12, color: '#0F172A' } }, `4. Stock n8n Workflows đang chạy (${liveWorkflows.length})`),
+          wfWarning ? h('div', { role: 'alert', style: { padding: '6px 10px', borderRadius: 6, background: '#FFFBEB', border: '1px solid #FDE68A', color: '#92400E', fontSize: 11 } }, `Cảnh báo tải workflow: ${wfWarning}`) : null,
           !liveWorkflows.length
-            ? h('span', { style: { fontSize: 11, color: '#64748B' } }, 'Chưa lấy được danh sách live workflows từ Stock n8n REST API v1 (kiểm tra connector n8n_api trong Connectors & n8n).')
+            ? h('span', { style: { fontSize: 11, color: '#64748B' } }, 'Chưa lấy được danh sách workflow trực tiếp từ Stock n8n REST API v1 (kiểm tra connector n8n_api trong Kết nối & n8n).')
             : liveWorkflows.slice(0, 8).map((wf) => h('div', { key: wf.id || wf.name, style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 8, border: '1px solid #E2E8F0', background: '#FFFFFF', fontSize: 12 } },
-              h('span', null, h('strong', null, wf.name || wf.id), ` (${wf.active ? 'active' : 'paused'})`),
+              h('span', null, h('strong', null, wf.name || wf.id), ` (${wf.active ? 'Hoạt động' : 'Tạm dừng'})`),
               h('a', { href: `${editorUrl}/workflow/${encodeURIComponent(String(wf.id || ''))}`, target: '_blank', rel: 'noopener noreferrer', style: { fontSize: 11, color: '#1D4ED8', fontWeight: 600, textDecoration: 'none' } }, 'Mở Editor ↗'),
             )),
         ),
