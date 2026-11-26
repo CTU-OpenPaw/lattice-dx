@@ -86,7 +86,7 @@ const BUSINESS_PACK_CATALOG = Object.freeze([
     packKey: 'cmms-maintenance',
     name: 'Bảo trì Thiết bị CMMS Chuỗi lạnh',
     description: 'Phiếu công việc bảo trì thiết bị, định tuyến ưu tiên DMN, tự động hóa cảnh báo chuỗi lạnh và cổng làm việc /p/cmms.',
-    version: '0.4.0',
+    version: '0.4.1',
     components: {
       collection: 'latticeCustomWorkOrders',
       dmnTableKey: 'cmms_priority_routing_v1',
@@ -98,7 +98,7 @@ const BUSINESS_PACK_CATALOG = Object.freeze([
     packKey: 'coldchain-partner-settlement',
     name: 'Đối soát Bồi thường Đối tác Chuỗi lạnh & n8n 2 chiều',
     description: 'Hồ sơ yêu cầu bồi thường đối tác (latticeCustomPartnerClaims), chính sách DMN, luồng điều phối n8n LatticeFlow v2 và cổng /p/partner-claims.',
-    version: '0.4.0',
+    version: '0.4.1',
     components: {
       collection: 'latticeCustomPartnerClaims',
       dmnTableKey: 'coldchain_settlement_policy_v1',

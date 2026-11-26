@@ -199,7 +199,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   }
 
   // 2. Service Worker Script syntax + runtime Cache Storage invariants
-  const swScript = buildServiceWorkerScript({ version: '0.4.0' });
+  const swScript = buildServiceWorkerScript({ version: '0.4.1' });
   assert.equal(typeof swScript, 'string');
   assert.doesNotThrow(() => new vm.Script(swScript), 'sw.js must be valid JavaScript');
 
@@ -363,7 +363,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   });
   assert.ok(noStorePromise);
   await noStorePromise;
-  const activeCache = openedCaches.get('latticedx-field-pwa-v0.4.0');
+  const activeCache = openedCaches.get('latticedx-field-pwa-v0.4.1');
   assert.equal(activeCache._entries.has('/v/assets/private-nostore.js'), false);
 
   let redirectedPromise = null;

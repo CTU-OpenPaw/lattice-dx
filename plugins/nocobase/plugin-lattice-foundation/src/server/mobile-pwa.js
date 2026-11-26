@@ -62,8 +62,8 @@ function buildPwaManifest() {
   };
 }
 
-function buildServiceWorkerScript({ version = '0.4.0' } = {}) {
-  const safeVersion = String(version || '0.4.0').replace(SAFE_VERSION_RE, '').slice(0, 32) || '0.4.0';
+function buildServiceWorkerScript({ version = '0.4.1' } = {}) {
+  const safeVersion = String(version || '0.4.1').replace(SAFE_VERSION_RE, '').slice(0, 32) || '0.4.1';
   const cacheName = `latticedx-field-pwa-v${safeVersion}`;
 
   return [
@@ -138,7 +138,7 @@ function buildServiceWorkerScript({ version = '0.4.0' } = {}) {
 function registerMobilePwaActions(targetOrOpts = {}, maybeOpts = {}) {
   const isAppTarget = Boolean(targetOrOpts && typeof targetOrOpts === 'object' && targetOrOpts.resourceManager);
   const opts = isAppTarget ? maybeOpts : targetOrOpts;
-  const version = typeof opts?.version === 'string' && opts.version.trim() ? opts.version.trim() : '0.4.0';
+  const version = typeof opts?.version === 'string' && opts.version.trim() ? opts.version.trim() : '0.4.1';
 
   const manifestHandler = async (ctx, next) => {
     if (ctx?.method && String(ctx.method).trim().toUpperCase() !== 'GET') {

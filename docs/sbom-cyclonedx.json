@@ -1,7 +1,7 @@
 {
   "bomFormat": "CycloneDX",
   "specVersion": "1.5",
-  "serialNumber": "urn:uuid:25aeb6e5-2b9a-4b89-8ca5-af2553c726a6",
+  "serialNumber": "urn:uuid:4eb09129-84e9-429b-8115-4d269a946f60",
   "version": 1,
   "metadata": {
     "tools": {
@@ -9,16 +9,16 @@
         {
           "type": "application",
           "name": "lattice-dx-sbom-generator",
-          "version": "0.4.0"
+          "version": "0.4.1"
         }
       ]
     },
     "component": {
       "type": "application",
-      "bom-ref": "pkg:npm/lattice-dx@0.4.0",
+      "bom-ref": "pkg:npm/lattice-dx@0.4.1",
       "name": "lattice-dx",
-      "version": "0.4.0",
-      "purl": "pkg:npm/lattice-dx@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/lattice-dx@0.4.1",
       "licenses": [
         {
           "license": {
@@ -91,10 +91,10 @@
     },
     {
       "type": "application",
-      "bom-ref": "pkg:npm/%40dx/agent-worker@0.4.0",
+      "bom-ref": "pkg:npm/%40dx/agent-worker@0.4.1",
       "name": "@dx/agent-worker",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40dx/agent-worker@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40dx/agent-worker@0.4.1",
       "licenses": [
         {
           "license": {
@@ -115,10 +115,10 @@
     },
     {
       "type": "application",
-      "bom-ref": "pkg:npm/%40dx/api@0.4.0",
+      "bom-ref": "pkg:npm/%40dx/api@0.4.1",
       "name": "@dx/api",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40dx/api@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40dx/api@0.4.1",
       "licenses": [
         {
           "license": {
@@ -139,10 +139,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40dx/contracts@0.4.0",
+      "bom-ref": "pkg:npm/%40dx/contracts@0.4.1",
       "name": "@dx/contracts",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40dx/contracts@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40dx/contracts@0.4.1",
       "licenses": [
         {
           "license": {
@@ -163,10 +163,10 @@
     },
     {
       "type": "application",
-      "bom-ref": "pkg:npm/%40dx/file-scanner@0.4.0",
+      "bom-ref": "pkg:npm/%40dx/file-scanner@0.4.1",
       "name": "@dx/file-scanner",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40dx/file-scanner@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40dx/file-scanner@0.4.1",
       "licenses": [
         {
           "license": {
@@ -1237,10 +1237,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-action-bridge@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-action-bridge@0.4.1",
       "name": "@latticedx/plugin-action-bridge",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-action-bridge@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-action-bridge@0.4.1",
       "description": "Server-side PKCE account linking and scoped LatticeDX action proxy.",
       "licenses": [
         {
@@ -1262,10 +1262,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.1",
       "name": "@latticedx/plugin-dxos-ai",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.1",
       "description": "Admin-configurable AI Employee workforce, NocoBase Admin Builder tools, cross-department workflow agent, 6-plane Enterprise OS topology, and two-way Streamable HTTP MCP gateway.",
       "licenses": [
         {
@@ -1287,10 +1287,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.1",
       "name": "@latticedx/plugin-dxos-blocks",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.1",
       "description": "Six configurable Native v2 FlowEngine BlockModels for NocoBase UI Editor covering H-P-D-I spaces plus org-scoped telemetry and proposal read endpoints.",
       "licenses": [
         {
@@ -1312,10 +1312,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-para@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-para@0.4.1",
       "name": "@latticedx/plugin-dxos-para",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-dxos-para@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-para@0.4.1",
       "description": "P.A.R.A. knowledge and document workspace collection ([H] Human Space) with strict organization isolation and NocoBase ACL grants.",
       "licenses": [
         {
@@ -1337,10 +1337,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.1",
       "name": "@latticedx/plugin-dxos-studio",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.1",
       "description": "Administrator control studio inside NocoBase Settings for 1-click Poka-yoke workflows, multi-block portal composition, plugin monitoring, and internal-service domain templates.",
       "licenses": [
         {
@@ -1362,10 +1362,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.1",
       "name": "@latticedx/plugin-enterprise-auth",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.1",
       "description": "Native NocoBase sessions backed by explicit Keycloak identity mappings.",
       "licenses": [
         {
@@ -1387,10 +1387,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.1",
       "name": "@latticedx/plugin-lattice-foundation",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.1",
       "description": "Department, Employee, Location and Asset registries.",
       "licenses": [
         {
@@ -1412,10 +1412,10 @@
     },
     {
       "type": "library",
-      "bom-ref": "pkg:npm/%40latticedx/uc1-procurement@0.4.0",
+      "bom-ref": "pkg:npm/%40latticedx/uc1-procurement@0.4.1",
       "name": "@latticedx/uc1-procurement",
-      "version": "0.4.0",
-      "purl": "pkg:npm/%40latticedx/uc1-procurement@0.4.0",
+      "version": "0.4.1",
+      "purl": "pkg:npm/%40latticedx/uc1-procurement@0.4.1",
       "description": "LatticeDX Use Case 1: Mua sắm & Bàn giao tài sản (Procurement & Asset Handover Package)",
       "licenses": [
         {
@@ -7750,14 +7750,14 @@
   ],
   "dependencies": [
     {
-      "ref": "pkg:npm/lattice-dx@0.4.0",
+      "ref": "pkg:npm/lattice-dx@0.4.1",
       "dependsOn": [
         "pkg:npm/%40dagrejs/dagre@3.1.3",
         "pkg:npm/%40dagrejs/graphlib@4.0.6",
-        "pkg:npm/%40dx/agent-worker@0.4.0",
-        "pkg:npm/%40dx/api@0.4.0",
-        "pkg:npm/%40dx/contracts@0.4.0",
-        "pkg:npm/%40dx/file-scanner@0.4.0",
+        "pkg:npm/%40dx/agent-worker@0.4.1",
+        "pkg:npm/%40dx/api@0.4.1",
+        "pkg:npm/%40dx/contracts@0.4.1",
+        "pkg:npm/%40dx/file-scanner@0.4.1",
         "pkg:npm/%40esbuild/aix-ppc64@0.28.2",
         "pkg:npm/%40esbuild/android-arm64@0.28.2",
         "pkg:npm/%40esbuild/android-arm@0.28.2",
@@ -7793,14 +7793,14 @@
         "pkg:npm/%40jridgewell/resolve-uri@3.1.2",
         "pkg:npm/%40jridgewell/sourcemap-codec@1.6.0",
         "pkg:npm/%40jridgewell/trace-mapping@0.3.31",
-        "pkg:npm/%40latticedx/plugin-action-bridge@0.4.0",
-        "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.0",
-        "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.0",
-        "pkg:npm/%40latticedx/plugin-dxos-para@0.4.0",
-        "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.0",
-        "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.0",
-        "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.0",
-        "pkg:npm/%40latticedx/uc1-procurement@0.4.0",
+        "pkg:npm/%40latticedx/plugin-action-bridge@0.4.1",
+        "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.1",
+        "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.1",
+        "pkg:npm/%40latticedx/plugin-dxos-para@0.4.1",
+        "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.1",
+        "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.1",
+        "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.1",
+        "pkg:npm/%40latticedx/uc1-procurement@0.4.1",
         "pkg:npm/%40mapbox/jsonlint-lines-primitives@2.0.3",
         "pkg:npm/%40mapbox/point-geometry@1.1.0",
         "pkg:npm/%40mapbox/tiny-sdf@2.3.0",
@@ -8020,19 +8020,19 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40dx/agent-worker@0.4.0",
+      "ref": "pkg:npm/%40dx/agent-worker@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40dx/api@0.4.0",
+      "ref": "pkg:npm/%40dx/api@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40dx/contracts@0.4.0",
+      "ref": "pkg:npm/%40dx/contracts@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40dx/file-scanner@0.4.0",
+      "ref": "pkg:npm/%40dx/file-scanner@0.4.1",
       "dependsOn": []
     },
     {
@@ -8176,35 +8176,35 @@
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-action-bridge@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-action-bridge@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-ai@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-blocks@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-dxos-para@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-para@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-dxos-studio@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-enterprise-auth@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.0",
+      "ref": "pkg:npm/%40latticedx/plugin-lattice-foundation@0.4.1",
       "dependsOn": []
     },
     {
-      "ref": "pkg:npm/%40latticedx/uc1-procurement@0.4.0",
+      "ref": "pkg:npm/%40latticedx/uc1-procurement@0.4.1",
       "dependsOn": []
     },
     {

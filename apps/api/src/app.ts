@@ -167,7 +167,7 @@ function pushOtlpSpan(tracesUrl: string, serviceName: string, span: {
         },
         scopeSpans: [
           {
-            scope: { name: '@dx/api', version: '0.4.0' },
+            scope: { name: '@dx/api', version: '0.4.1' },
             spans: [
               {
                 traceId: span.traceId,

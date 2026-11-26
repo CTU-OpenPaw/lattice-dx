@@ -22,7 +22,7 @@ per-plugin LICENSE files under plugins/nocobase/*/).
 ================================================================================
 2. Pure-OSI Repository Boundary & External Host Container Runtime (NocoBase)
 ================================================================================
-100% of the LatticeDX Git repository and latticedx-0.4.0-src.tar.gz release
+100% of the LatticeDX Git repository and latticedx-0.4.1-src.tar.gz release
 archive consists strictly of OSI-approved code (Apache-2.0 first-party code and
 OSI-compatible workspace dependencies). LatticeDX contains ZERO upstream/nocobase
 Git submodule, ZERO .gitmodules file, and neither copies, embeds, nor

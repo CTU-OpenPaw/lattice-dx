@@ -325,7 +325,7 @@ export function collectWorkspaceComponents(rootDir) {
     type: 'application',
     'bom-ref': encodeNpmPurl(rootPkg.name, rootPkg.version),
     name: rootPkg.name,
-    version: String(rootPkg.version || '0.4.0'),
+    version: String(rootPkg.version || '0.4.1'),
     purl: encodeNpmPurl(rootPkg.name, rootPkg.version),
     ...(buildCycloneDxLicense(rootPkg.license) ? { licenses: buildCycloneDxLicense(rootPkg.license) } : {}),
   };
@@ -656,7 +656,7 @@ export function generateSbom({ rootDir = REPO_ROOT } = {}) {
           {
             type: 'application',
             name: 'lattice-dx-sbom-generator',
-            version: String(rootComponent.version || '0.4.0'),
+            version: String(rootComponent.version || '0.4.1'),
           },
         ],
       },

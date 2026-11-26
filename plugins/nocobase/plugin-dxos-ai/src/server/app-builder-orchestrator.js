@@ -2371,7 +2371,7 @@ async function rebuildEnterpriseApp(ctx, db, actor, opts = {}, deps = {}) {
   };
 }
 
-async function exportAppBundle(db, actor, { appKey = null, organizationId = null, platformVersion = '0.4.0' } = {}) {
+async function exportAppBundle(db, actor, { appKey = null, organizationId = null, platformVersion = '0.4.1' } = {}) {
   if (!actor?.isAdmin && !actor?.isRoot) {
     throw failBuild('DXOS_ADMIN_REQUIRED', 403, 'Chỉ Quản trị viên mới được xuất gói giải pháp.');
   }

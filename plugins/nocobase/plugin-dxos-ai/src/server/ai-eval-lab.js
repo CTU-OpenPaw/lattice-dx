@@ -862,7 +862,7 @@ function listEvalSuites() {
     },
     {
       id: 'wave1-3-capabilities',
-      name: 'Wave 1–3 Capabilities (v0.4.0)',
+      name: 'Wave 1–3 Capabilities (v0.4.1)',
       description: 'Bộ kiểm thử tập trung các năng lực mới Wave 1–3: Plan/Patch/Rollback App, BI Chart, ReAct & Memory, A2A, Draft/Publish Workflow, Multi-level Approvals, Omnichannel Notify, Public Forms.',
       supportsLiveLlm: true,
       estimatedCaseCount: WAVE1_3_EVAL_CASES.length,

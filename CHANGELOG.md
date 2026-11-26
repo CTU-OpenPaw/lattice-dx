@@ -2,6 +2,32 @@
 
 Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0), phục vụ kỳ thi OLP PMNM 2026 (VFOSSA).
 
+## [0.4.1] — 2026-11-26 — Deep System Audit, End-to-End Feature Completion & Multi-Portal UX Upgrade
+
+- **M1 — Hạ tầng, Xác thực Công khai, Enterprise Auth & 257/257 SBOM License Resolution:**
+  - Chuẩn hóa license `fsevents@2.3.3 -> MIT` trong `scripts/generate-sbom.mjs` & `docs/sbom-cyclonedx.json` (**`257/257`** thành phần có giấy phép đã phân giải, **`0` `NONE`**, `0` lỗ hổng production).
+  - Bổ sung `infra/config/nginx/10-lattice-public-routes.sh` (`absolute_redirect off;` giữ nguyên port khi chuyển hướng `/form/*`, gắn vào Compose), thêm route `verifyTrackSignature` trong `infra/config/apisix/apisix.prod.yaml`, và bổ sung `plugins/nocobase/plugin-lattice-foundation/src/server/public-branding.js` (`/v/lattice-brand.svg`, `/v/favicon_no_exist.ico`) xóa sạch lỗi `1.png` HTTP `403`, favicon `404` và `roles:check` `401` trên `/signin`, `/v/form/*`, `/v/track/*`.
+  - Giữ nguyên `origin` trên `/lattice*`, sửa thứ tự DOM honeypot + bổ sung thông báo validate tiếng Việt trực tiếp trên `/v/form/*` & `/v/track/*`, và nâng cấp `MappingSettings` (`plugin-enterprise-auth`) với cảnh báo lỗi, `Popconfirm` xác nhận và nút reset form.
+
+- **M2 — Portals, BI/WMS/Kanban/Digital Twin, Mobile Field PWA (`/v/mobile`) & P.A.R.A. OCR:**
+  - Sửa triệt để lỗi cắt đỉnh modal `Cấu hình nội dung` của `DxosBiChartBlockModel` bằng `uiMode` gắn `getContainer: () => document.body` (`top: 24`, `maxHeight: 78vh`), bổ sung `limit`, định dạng `vi-VN` và drilldown.
+  - Hoàn thiện `WmsOpsBlock` (validate phía client `0` lỗi FEFO `400`, hiển thị `dryRunResult.errors`, gợi ý `lots` datalist), Kanban/Schedule (mốc `+07:00`, drawer chi tiết, CTA Phê duyệt), banner lỗi Chatter/Creative và drawer `Điều khiển Digital Twin` trên WebGIS.
+  - Gỡ bỏ toàn bộ stub `"sắp có"` / `"Dự kiến"`; định tuyến `/v/mobile` trực tiếp vào Field PWA tiếng Việt (`0` lỗi `403` với `ldx_employee`, auth banner, `markRead`/`markAllRead`, thao tác trực tiếp sự cố/ticket, `<form>` lịch sử AI, `twinBusy`, xác nhận đồng bộ outbox); và hoàn thiện P.A.R.A. CRUD + luồng `"Tạo bản ghi từ OCR"` (`organizations[0]` fallback cho `root`).
+
+- **M3 — DX-OS AI Studio, App Builder 2.0, MCP, Eval Lab & Multi-Provider LLM:**
+  - Triển khai adapter LLM đa nhà cung cấp thực thụ (`google-genai`, `anthropic`, `ollama`, `openai`, `deepseek`, `9router` + `verifyCompletion`) trong `flow/llm-client.js` & `ai-llm-health.js`, và nối `llmInvoker` cho Eval Lab `mode: 'llm'` kèm checkbox `refused` + validate tiếng Việt.
+  - Siết cô lập đa tenant cho admin (`organizationId` + `DXOS_ORG_MISMATCH`), ghi `organizationId` vào `recordAiAuditLog`, và thêm bảng `latticeAiQuotaPolicies` (`FORCE RLS`) cùng phân vùng tổ chức cho `latticeUiSnapshots` qua migration `20261205000100-ui-snapshots-org-and-quota-policies.js`.
+  - Đánh số lại thanh điều hướng AI Studio `1..9`, ghi nhớ trạng thái Quick-Start, liên kết `/p/*` bấm được, modal xác nhận (`keepData`), Tab 3 MCP danh mục thật + ping, Workforce đủ 6 trường, Audit `+07:00` + phân trang, chỉnh sửa Quota Policy và mở rộng parser lệnh tiếng Việt offline.
+
+- **M4 — Control Studio, Flow Studio, Hộp thư Đề xuất AI & Việt hóa 100%:**
+  - Hợp nhất `latticeAgentProposals` vào `approval-engine.js`, `blocks-api.js` (`decideProposal` + ACL + chống tự duyệt + khóa đồng thời 409) và thêm tab **`Đề xuất AI`** trong Unified Approval Inbox.
+  - Nâng cấp `ConnectedAppsPanel` (xác nhận xóa, hiển thị lỗi n8n, xử lý callback OAuth, cuộn gọn), `N8nSetupModal`, `DmnVisualEditor` (độ rộng bảng + validate đầu vào mô phỏng rỗng), và `FlowCanvas` (giữ nguyên pan/zoom khi bật/tắt panel + route `dxosStudio:listAutomationRules` `0` lỗi `404`).
+  - Hoàn thiện Việt hóa 100% + mốc `+07:00` cho Flow/Control/DMN/`/p/cmms`/`/p/partner-claims`, chặn `403` cho Manager tại `DX-OS Studio`, và bổ sung `dxosStudio:seedShowcaseData` cùng cờ `--seed-samples`.
+
+- **M5 — Điều hướng Đa vai trò, Chống Trắng Trang & Sửa Lỗi Runtime Live Pass 2:**
+  - Bổ sung tự động chuyển hướng Employee từ `/p/logistics` -> `/p/logistics-employee/...`, cơ chế tự phục hồi `PortalRenderRecoveryGuard` trong `native-builder-navigation.js`, và lối tắt Portal + DX-OS Inbox tại `/admin/lattice-workspace`.
+  - Khắc phục lỗi `buildJoiSchema()` của `@nocobase/database` trong `domain-schema-rls.js` bằng cách chuyển ràng buộc mở rộng vào `uiSchema['x-validation']` (bảo toàn hook kiểm tra `rich-schema.js`); xác minh Pass 2 trên trình duyệt thực tế (`1440x900`, `1280x800`, `390x844`), `acceptance-blank-slate` (`8/8`), `acceptance-live-llm` (`oc/big-pickle`), **`2,389/2,389`** unit/integration tests (`1,128` Vitest + `1,261` Node), và **`163/163` (100%)** bộ đánh giá NL tiếng Việt.
+
 ## [0.4.0] — 2026-11-26 — DX-OS Open-Core Championship Edition (OLP PMNM 2026)
 
 - **Wave 1 — Headless PaaS Core, Ed25519/Merkle PKI Ledger, RLS & Zero-Trust Observability Edge:**

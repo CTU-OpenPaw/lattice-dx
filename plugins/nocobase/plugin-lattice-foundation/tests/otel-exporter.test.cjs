@@ -172,11 +172,11 @@ test('createOtelExporter queues spans, redacts secrets, and flushes OTLP/HTTP JS
   assert.equal(serviceAttr.value.stringValue, 'latticedx-test-service');
   const serviceVersionAttr = resourceSpan.resource.attributes.find((a) => a.key === 'service.version');
   assert.ok(serviceVersionAttr, 'Missing service.version resource attribute');
-  assert.equal(serviceVersionAttr.value.stringValue, '0.4.0');
+  assert.equal(serviceVersionAttr.value.stringValue, '0.4.1');
   assert.notEqual(serviceVersionAttr.value.stringValue, '1.0.0');
   assert.notEqual(serviceVersionAttr.value.stringValue, '1.1.0');
   assert.equal(resourceSpan.scopeSpans[0].scope.name, '@latticedx/otel-exporter');
-  assert.equal(resourceSpan.scopeSpans[0].scope.version, '0.4.0');
+  assert.equal(resourceSpan.scopeSpans[0].scope.version, '0.4.1');
   assert.notEqual(resourceSpan.scopeSpans[0].scope.version, '1.0.0');
   assert.notEqual(resourceSpan.scopeSpans[0].scope.version, '1.1.0');
 

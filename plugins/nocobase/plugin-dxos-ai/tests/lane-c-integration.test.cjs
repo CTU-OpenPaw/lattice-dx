@@ -467,13 +467,13 @@ test('Lane C integration: ai-studio-page.js wires Trace Waterfall & Eval Lab tab
   assert.ok(evalComp.props.api);
 });
 
-test('Lane C remediation: 0.4.0 version lock across package.json, A2A Agent Card, MCP initialize, exportAppBundle, and Eval Lab', async () => {
+test('Lane C remediation: 0.4.1 version lock across package.json, A2A Agent Card, MCP initialize, exportAppBundle, and Eval Lab', async () => {
   const pkg = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.4.0');
+  assert.equal(pkg.version, '0.4.1');
 
   const { buildAgentCard } = require(path.join(PLUGIN_ROOT, 'src/server/a2a-gateway.js'));
   const card = buildAgentCard();
-  assert.equal(card.version, '0.4.0');
+  assert.equal(card.version, '0.4.1');
 
   const { createMcpGatewayMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/mcp-gateway.js'));
   const mcpMw = createMcpGatewayMiddleware({
@@ -488,25 +488,25 @@ test('Lane C remediation: 0.4.0 version lock across package.json, A2A Agent Card
     set() {},
   };
   await mcpMw(initCtx, async () => {});
-  assert.equal(initCtx.body.result.serverInfo.version, '0.4.0');
+  assert.equal(initCtx.body.result.serverInfo.version, '0.4.1');
 
   const { listEvalSuites } = require(path.join(PLUGIN_ROOT, 'src/server/ai-eval-lab.js'));
   const srvSuites = listEvalSuites();
   const srvWave = srvSuites.find((s) => s.id === 'wave1-3-capabilities');
   assert.ok(srvWave);
-  assert.match(srvWave.name, /0\.4\.0/);
+  assert.match(srvWave.name, /0\.4\.1/);
   assert.doesNotMatch(srvWave.name, /v1\.1|Flagship/i);
 
   const { DEFAULT_EVAL_SUITES } = require(path.join(PLUGIN_ROOT, 'src/client/ai-trace-eval-panel.js'));
   const uiFull = DEFAULT_EVAL_SUITES.find((s) => s.id === 'vietnamese-nl-agent');
   assert.equal(uiFull.estimatedCaseCount, 163);
   const uiWave = DEFAULT_EVAL_SUITES.find((s) => s.id === 'wave1-3-capabilities');
-  assert.match(uiWave.name, /0\.4\.0/);
+  assert.match(uiWave.name, /0\.4\.1/);
   assert.doesNotMatch(uiWave.name, /v1\.1|Flagship/i);
 
-  // exportAppBundle defaults platformVersion to 0.4.0
+  // exportAppBundle defaults platformVersion to 0.4.1
   const orchSrc = readFileSync(path.join(PLUGIN_ROOT, 'src/server/app-builder-orchestrator.js'), 'utf8');
-  assert.match(orchSrc, /platformVersion\s*=\s*'0\.4\.0'/);
+  assert.match(orchSrc, /platformVersion\s*=\s*'0\.4\.1'/);
   assert.doesNotMatch(orchSrc, /platformVersion\s*=\s*'1\.0\.0'/);
 });
 

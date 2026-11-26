@@ -37,7 +37,7 @@ function writeMinimalProject(dir, {
     name: '@latticedx/plugin-enterprise-auth',
     lockfileVersion: 3,
     packages: {
-      '': { name: '@latticedx/plugin-enterprise-auth', version: '0.4.0' },
+      '': { name: '@latticedx/plugin-enterprise-auth', version: '0.4.1' },
       'node_modules/jose': {
         version: '6.2.15',
         license: 'MIT',
@@ -48,19 +48,19 @@ function writeMinimalProject(dir, {
 } = {}) {
   writeFileSync(join(dir, 'package.json'), JSON.stringify({
     name: 'lattice-dx',
-    version: '0.4.0',
+    version: '0.4.1',
     license: rootLicense,
   }, null, 2));
   mkdirSync(join(dir, 'plugins', 'nocobase', 'plugin-lattice-foundation'), { recursive: true });
   writeFileSync(join(dir, 'plugins', 'nocobase', 'plugin-lattice-foundation', 'package.json'), JSON.stringify({
     name: '@latticedx/plugin-lattice-foundation',
-    version: '0.4.0',
+    version: '0.4.1',
     license: 'Apache-2.0',
   }, null, 2));
   mkdirSync(join(dir, 'plugins', 'nocobase', 'plugin-enterprise-auth'), { recursive: true });
   writeFileSync(join(dir, 'plugins', 'nocobase', 'plugin-enterprise-auth', 'package.json'), JSON.stringify({
     name: '@latticedx/plugin-enterprise-auth',
-    version: '0.4.0',
+    version: '0.4.1',
     license: 'Apache-2.0',
   }, null, 2));
   writeFileSync(
@@ -79,7 +79,7 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
   assert.equal(first.bom.bomFormat, 'CycloneDX');
   assert.equal(first.bom.specVersion, '1.5');
   assert.equal(first.bom.metadata.component.name, 'lattice-dx');
-  assert.equal(first.bom.metadata.component.version, '0.4.0');
+  assert.equal(first.bom.metadata.component.version, '0.4.1');
   assert.equal(formatSbomJson(first.bom), formatSbomJson(second.bom));
 
   assert.ok(first.counts.workspace >= 12, `Expected >= 12 workspace components, got ${first.counts.workspace}`);
@@ -114,7 +114,7 @@ test('generateSbom produces deterministic CycloneDX 1.5 BOM covering workspace p
   );
   assert.equal(workspaceComps.length, 12);
   for (const wsComp of workspaceComps) {
-    assert.equal(wsComp.version, '0.4.0', `Expected workspace component ${wsComp.name} to be 0.4.0`);
+    assert.equal(wsComp.version, '0.4.1', `Expected workspace component ${wsComp.name} to be 0.4.1`);
     assert.equal(wsComp.licenses?.[0]?.license?.id, 'Apache-2.0');
   }
 
@@ -290,7 +290,7 @@ test('runSbomCli supports --out, --check, drift detection, and --json', (t) => {
   assert.equal(checkResult.mode, 'check');
 
   // Simulate drift
-  const mutated = readFileSync(writtenPath, 'utf8').replace('"0.4.0"', '"0.9.9"');
+  const mutated = readFileSync(writtenPath, 'utf8').replace('"0.4.1"', '"0.9.9"');
   writeFileSync(writtenPath, mutated, 'utf8');
   assert.throws(() => runSbomCli(['--root=' + dir, '--out=' + outRel, '--check']), /SBOM drift detected/);
 
