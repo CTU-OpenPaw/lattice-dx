@@ -6,55 +6,293 @@
 @see https://github.com/CTU-OpenPaw/lattice-dx
 SPDX-License-Identifier: Apache-2.0
 -->
-# LatticeDX · Open-Core Digital Enterprise Platform (`v0.4.2`)
 
-**LatticeDX `v0.4.2` (DX-OS Open-Core Championship Edition)** là **Hệ điều hành Doanh nghiệp Số nguồn mở 6 Phân hệ** (phát hành theo giấy phép **Apache-2.0**) do **CTU-OpenPaw** phát triển cho kỳ thi **OLP PMNM 2026 (VFOSSA)**. Nền tảng hợp nhất **Con người (`[H]`) – Quy trình (`[P]`) – Dữ liệu (`[D]`) – Trí tuệ (`[I]`)** qua **6 phân hệ điều phối**:
-1. **Identity, Zero-Trust Edge & Security Guardrails:** Keycloak `26.8.2` OIDC + PKCE, **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause` thuần OSI, tương thích giao thức `PUBSUB_ADAPTER=redis`)** session cache & Backchannel Logout, Caddy `2.10` -> Apache APISIX `3.19.0` (`/api/*`), PaaS Scoped API Keys (`ldx_pat_*`), Sổ cái Ed25519/Merkle PKI, `apps/file-scanner` + ClamAV `1.5.5` + RustFS `1.0.6`, **Connector & Secrets Vault (`dxosVault`, AES-256-GCM, OAuth2 PKCE S256 + single-flight refresh cho 11 app connector, SSRF allowlist, live `testConnection`, rotation & masking)**, và **56 bảng tĩnh PostgreSQL `FORCE ROW LEVEL SECURITY`** (`54` camelCase + `2` snake_case `lattice_native_request_attachments` & `lattice_native_request_uploads`, + dynamic `latticeCustom*` RLS gồm bảng nối `belongsToMany` + role không đặc quyền superuser `nocobase_app` fail-closed, migrations `20261127000100`..`20261205000100`).
-2. **IT/OT Digital Twin, Mosquitto DynSec/LWT & Orion-LD 2-Way:** **FIWARE Orion-LD `1.12.0`** (entity diff + `/ngsi-ld/v1/subscriptions` đẩy ngược `/api/dxosBroker:orionNotify` -> `latticeTelemetryPoints` + `orion.notification` CloudEvent) + MongoDB `8.0`, **Eclipse Mosquitto `2.0.21` Dynamic Security** (`EPL-2.0 OR BSD-3-Clause`, `allow_anonymous false`, `$CONTROL/dynamic-security/v1` qua thuần `node:net` MQTT 3.1.1, ACL `latticedx/<orgId>/<deviceKey>/*`, `BIRTH`/`DEATH` LWT `device.offline`), **Node-RED `4.0.9`** (`Apache-2.0`) chuẩn hóa telemetry & downlink **2-Way Digital Twin Shadow** (IIoT time-series lưu trực tiếp trong **PostgreSQL `16`** `latticeTelemetryPoints`, không dùng container `timescaledb` tách rời), tính **Arrhenius MKT**, cách ly dữ liệu bất thường (Quarantine) và chuỗi khử trùng lặp cảnh báo.
-3. **Unified CloudEvents 1.0 Event Bus, LatticeFlow v2 Draft/Publish, Approvals, Omnichannel & Stock `n8n`:** **Event Bus CloudEvents 1.0 + Standard Webhooks (`dxosEvents`: PG Outbox `FOR UPDATE SKIP LOCKED`, HMAC-SHA256, backoff + jitter, Circuit Breaker, DLQ Replay)**, **LatticeFlow v2 DAG Engine & Workflow Automation Studio (`Workflow -> Workflow Automation`, `/admin/settings/workflow/automation`, `@xyflow/react@12.12.1` + `@dagrejs/dagre@3.1.3` MIT: 24 loại node / 6 nhóm, tách `draftGraphJson` vs `publishedGraphJson` + rollback `latticeAutomationRuleVersions`, Live Canvas Step Trace + Webhook Copy-cURL, `ai.agent` ReAct nhiều lượt & `latticeflow.approval` HITL, trigger cron/webhook, `dxosAutomations`)**, **Multi-Level Approval Engine (tuần tự & song song `M-of-N` + `latticeDelegations`) & Unified Approval Inbox (`dxosApprovals:*`)**, **Omnichannel Notifications (`email_smtp`, `telegram`, `slack`, `webhook`)**, **Stock `n8n` `2.48.1` Public REST API v1 (`dxosN8n`, 10 endpoint + orchestrator 26 node + callback 2 chiều)**, OMS/WMS/FEFO/ePOD + **QR ISO/IEC 18004 SVG + `/v/track/:code` Ed25519** & **Visual Interactive DMN**.
-4. **Multi-Portal, Mobile Field PWA (`/v/mobile`), Public Forms (`/v/form/:slug`), 12 BlockModels, WebGIS & GitOps v3:** Cổng đa vai trò `/p/*`, `/p/cmms`, `/p/partner-claims`, tuyến di động ngoại tuyến `/v/mobile`, **Public Form Builder (`/v/form/:slug` fail-closed zero-PII)**, **12 Native v2 `BlockModel`s** (gồm **`DxosBiChartBlockModel`** Bar/Line/Pie/KPI/Pivot + `dxosBlocks:aggregateQuery` + `dxosBlocks:collectionsMeta`, `DxosWebGisBlockModel` với **`maplibre-gl@6.19.0` (`BSD-3-Clause`)**, `DxosKanbanScheduleBlockModel` & `DxosWmsOpsBlockModel`), **Chuông Thông báo SSE Topbar**, **Rich Schema Engine (`dxosBuilder`: `hasOne`, `belongsToMany` + join table `FORCE RLS`, safe AST `formula`, `validation`)**, **1-Click Tenant Provisioning**, trích xuất PDF/DOCX/XLSX/PPTX + OCR Form Autofill, **pgvector `0.8.1` HNSW + RRF Hybrid RAG** và **GitOps Solution Bundle v3** (`latticedx.solution-bundle/v3`).
-5. **AI Workforce, App Builder 2.0 (Plan/Patch/ER), A2A Protocol, OTel GenAI & 2-Way MCP:** **20 Unified AI Tools** (`11` Admin Builder gồm **`dxos_provision_role_workspace` (`build_enterprise_app` / `plan_enterprise_app` / `patch_enterprise_app` / `rollback_enterprise_app` / `verify_app` + `latticeBuiltApps`)** & `dxos_configure_workflow` + `6` Operational + `3` Persistent Memory `dxos_memory_*` trên `latticeAiMemory`), **7 Starter AI Profiles** (`dxos-coordinator`, `dxos-architect`, `dxos-ops`, `dxos-logistics`, `dxos-workspace`, `dxos-operator`, `dxos-analyst`), **Google/LF A2A Protocol (`/.well-known/agent-card.json`, `/api/dxos-a2a`)**, **OTel GenAI Trace Waterfall (`latticeAiTraces`) & Eval Lab UI**, **Proactive Incident Triage LLM thật**, **HITL Approval Queue**, Hạn mức PG + che PII VN, **2-Way Streamable MCP**, **1 nút Agent nổi duy nhất (`PortalAgentLauncher`)**, và đánh giá **`163/163` (100%)** ca tiếng Việt tự nhiên.
-6. **Plane #6 — Application Data, OTel Tracing & PITR WAL Observability Substrate:** **NocoBase `2.2.50`** vận hành cùng bộ **7 plugin Apache-2.0 (`0.4.2`)** (`sdkProvidedByHost: true`), đặc tả **OpenAPI 3.1.0 / AsyncAPI 3.0.0**, **OTel Collector `0.123.0`** (nhận OTLP/HTTP JSON + W3C `traceparent` + GenAI semantic spans từ `otel-exporter.js`, `apps/api` & `apps/file-scanner`), **Prometheus `v3.3.0`** (`/api/dxos:metrics` + `alerts.yml`), **Grafana OSS `11.5.8` Dashboard 360°**, và sao lưu **PostgreSQL PITR WAL** tách volume (`postgres-wal-archive`, `nocobase-wal-archive`).
+<div align="center">
 
-> - **Ma trận Ánh xạ Kiến trúc 1-1 Đề thi OLP PMNM 2026 (50 PoF + 50 Chung kết):** [docs/olp-2026-architecture-matrix.md](docs/olp-2026-architecture-matrix.md)
-> - **Kịch bản Trình diễn Chung kết 15 phút (Live Demo + Q&A Defense + Fallback):** [docs/FINALS_15MIN_SCRIPT.md](docs/FINALS_15MIN_SCRIPT.md)
-> - **Hướng dẫn Tự kiểm chứng 15 phút từ Bản cài Sạch (`v0.4.2`):** [docs/DEMO_PACK.md](docs/DEMO_PACK.md)
-> - **Hướng dẫn Tự test End-to-End Toàn Hệ thống (8 Miền, 5 Vai trò — Dành cho Hưng):** [docs/E2E_TESTING_GUIDE_HUNG.md](docs/E2E_TESTING_GUIDE_HUNG.md)
-> - **Báo cáo kỹ thuật & Nghiệm thu chi tiết:** [docs/system-report-and-guide.md](docs/system-report-and-guide.md) · [docs/dxos-ai-and-mcp-acceptance.md](docs/dxos-ai-and-mcp-acceptance.md) · [docs/logistics-and-rbac-acceptance.md](docs/logistics-and-rbac-acceptance.md) · [docs/stack-backup-and-recovery.md](docs/stack-backup-and-recovery.md)
-> - **Hồ sơ bản quyền, SBOM CycloneDX 1.5 & Build từ Mã nguồn:** [`COPYRIGHT.txt`](COPYRIGHT.txt) · [`NOTICE`](NOTICE) · [`LICENSE`](LICENSE) · [`docs/sbom-cyclonedx.json`](docs/sbom-cyclonedx.json) · [docs/build-from-source.md](docs/build-from-source.md) · [docs/oss-pof-compliance.md](docs/oss-pof-compliance.md)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/hero-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="./docs/assets/hero-light.svg">
+  <img alt="LatticeDX v0.4.2 — Nền tảng Hệ điều hành Doanh nghiệp Mở" src="./docs/assets/hero-light.svg" width="100%">
+</picture>
+
+<h3>Nền tảng Hệ điều hành Doanh nghiệp Số Nguồn Mở (DX-OS Open-Core · <code>v0.4.2</code>)</h3>
+
+<p>
+  Hợp nhất <strong>Con người [H] – Quy trình [P] – Dữ liệu [D] – Trí tuệ [I]</strong> trên một nền tảng tự chủ 100% Pure-OSI <code>Apache-2.0</code>:<br>
+  <strong>Agentic App Builder 2.0</strong> · <strong>LatticeFlow v2 DAG &amp; Visual DMN</strong> · <strong>56 bảng PG16 FORCE RLS</strong> · <strong>IIoT Digital Twin 2 chiều</strong> · <strong>P.A.R.A. Hybrid RAG</strong>
+</p>
+
+<p>
+  <strong>Tiếng Việt</strong> | <a href="./README.en.md">English</a>
+</p>
+
+<p>
+  <a href="https://github.com/CTU-OpenPaw/lattice-dx/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/CTU-OpenPaw/lattice-dx/ci.yml?branch=main&style=flat-square&label=Check&logo=githubactions&logoColor=white" alt="CI Check"></a>
+  <a href="https://github.com/CTU-OpenPaw/lattice-dx/actions/workflows/codeql.yml"><img src="https://img.shields.io/github/actions/workflow/status/CTU-OpenPaw/lattice-dx/codeql.yml?branch=main&style=flat-square&label=CodeQL&logo=github&logoColor=white" alt="CodeQL"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-2563EB?style=flat-square&logo=apache&logoColor=white" alt="License Apache-2.0"></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/Version-0.4.2-0EA5E9?style=flat-square" alt="Version 0.4.2"></a>
+  <a href="https://github.com/CTU-OpenPaw/lattice-dx/releases/tag/v0.4.1"><img src="https://img.shields.io/badge/Release-v0.4.1-10B981?style=flat-square&logo=github" alt="Release v0.4.1"></a>
+  <a href="./package.json"><img src="https://img.shields.io/badge/Node-%3E%3D24%20%3C25-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node >=24 <25"></a>
+</p>
+
+<p>
+  <a href="./docs/oss-pof-compliance.md"><img src="https://img.shields.io/badge/Pure--OSI-0%20BSL--1.1-059669?style=flat-square&logo=opensourceinitiative&logoColor=white" alt="Pure-OSI 0 BSL-1.1"></a>
+  <a href="./docs/sbom-cyclonedx.json"><img src="https://img.shields.io/badge/SBOM-257%2F257-6366F1?style=flat-square" alt="SBOM 257/257"></a>
+  <a href="./CHANGELOG.md"><img src="https://img.shields.io/badge/Unit%2FInt-2%2C509%2F2%2C509-16A34A?style=flat-square" alt="Unit/Int 2,509/2,509"></a>
+  <a href="./docs/E2E_TESTING_GUIDE_HUNG.md"><img src="https://img.shields.io/badge/E2E-124%2F124-16A34A?style=flat-square" alt="E2E 124/124"></a>
+  <a href="./scripts/eval-vietnamese-nl-agent.mjs"><img src="https://img.shields.io/badge/NL%20Eval-163%2F163-16A34A?style=flat-square" alt="NL Eval 163/163"></a>
+</p>
+
+<p>
+  <a href="https://ctu-openpaw.github.io/lattice-docs/">Tài liệu</a> •
+  <a href="#-kiến-trúc-nền-tảng">Kiến trúc</a> •
+  <a href="#-trình-diễn-hệ-thống-thực-tế">Showcase Giao diện</a> •
+  <a href="#-khởi-chạy-nhanh-3-bước">Khởi chạy nhanh</a> •
+  <a href="#-7-plugin-apache-20-trên-nocobase-2250">7 Plugin Mở rộng</a> •
+  <a href="#-hệ-sinh-thái-ctu-openpaw">Hệ sinh thái</a> •
+  <a href="#-tuân-thủ-nguồn-mở-pure-osi--pof">Tuân thủ PoF</a>
+</p>
+
+</div>
 
 ---
 
-## 1. Kiến trúc Mô-đun 7 Plugin Open-Core (`0.4.2`) & 6 Phân hệ DX-OS (H–P–D–I)
+## 💡 Tại sao chọn LatticeDX?
 
-Toàn bộ phần mở rộng NocoBase đặt trong `plugins/nocobase/*`, khai báo `"version": "0.4.2"`, `"license": "Apache-2.0"` và `"sdkProvidedByHost": true` (build và kiểm thử trực tiếp trên NocoBase `2.2.50`). **100% kho Git và gói phát hành `latticedx-0.4.2-src.tar.gz` là mã nguồn thuần chuẩn OSI**: hoàn toàn không chứa Git submodule `upstream/nocobase` hay tệp `.gitmodules` (runtime host NocoBase `2.2.50` chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git), và giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`):
+Doanh nghiệp và tổ chức tại Việt Nam thường bị kẹt giữa hai thái cực: các công cụ Low-Code rời rạc thiếu năng lực điều phối IIoT/AI thực chiến, hoặc các nền tảng thương mại gắn giấy phép hạn chế (`BSL-1.1`) và khóa chặt hạ tầng đám mây. **LatticeDX `v0.4.2`** được đội ngũ **CTU-OpenPaw** xây dựng cho kỳ thi **OLP PMNM 2026 (VFOSSA)** nhằm giải quyết triệt để bài toán đó:
 
-| Package | Phiên bản | Trụ cột | Vai trò chính |
-| --- | :---: | :---: | --- |
-| [`@latticedx/plugin-lattice-foundation`](plugins/nocobase/plugin-lattice-foundation/README.md) | `0.4.2` | `[D][H][I]` | Collections lõi, 7 vai trò `ldx_*`, Multi-Portal + **Mobile Field PWA (`/v/mobile`)** + **Public Forms (`/v/form/:slug`)**, **Multi-Level Approval Engine & Unified Approval Inbox**, **Omnichannel Notifications (`email_smtp`/`telegram`/`slack`/`webhook`)**, **PaaS API Keys (`ldx_pat_*`)**, **Sổ cái Ed25519/Merkle PKI**, **Data Governance/Lineage/Quarantine/MKT**, **56 bảng tĩnh PostgreSQL `FORCE ROW LEVEL SECURITY` (`54` camelCase + `2` snake_case + dynamic `latticeCustom*` RLS + role `nocobase_app`)**, **OTel GenAI (`otel-exporter.js`, `latticeAiTraces`)**, **Connector Vault (`dxosVault`)**, **Unified Event Bus (`dxosEvents`)**, **OpenAPI 3.1.0 / AsyncAPI 3.0.0 / Prometheus `/api/dxos:metrics`**, Chatter, Chứng từ bất biến, Chuông SSE Topbar & SLA Engine. |
-| [`@latticedx/plugin-dxos-para`](plugins/nocobase/plugin-dxos-para/README.md) | `0.4.2` | `[H]` | Không gian tri thức P.A.R.A. (`latticeParaDocuments`) & cài đặt `/admin/settings/dxos-para`, ACL 7 vai trò, tách `organizationId`, trích xuất **PDF (kèm ToUnicode CMap tiếng Việt)/DOCX/XLSX/PPTX** (`latticeParaChunks`), **OCR Form Autofill (`latticePara:extractFormFields`)** và **Hybrid RAG `tsvector` + RRF + `pgvector` HNSW chiều vector linh hoạt (`20261127000200`)**. |
-| [`@latticedx/plugin-dxos-blocks`](plugins/nocobase/plugin-dxos-blocks/README.md) | `0.4.2` | `[H][P][D][I]` | **12 Native v2 `BlockModel`s** cấu hình trong `Add block` (gồm **`DxosBiChartBlockModel`**, **`DxosWebGisBlockModel` với `maplibre-gl@6.19.0` (`BSD-3-Clause`)**, `DxosKanbanScheduleBlockModel`, **`DxosWmsOpsBlockModel`**, `DxosCreativeStudioBlockModel`, `DxosRecordWorkbenchBlockModel`...), `dxosBlocks:aggregateQuery` & `collectionsMeta`, **2-Way Digital Twin Shadow**, **Mosquitto DynSec + LWT & Orion-LD 2-Way (`dxosBroker:*`)**, **2-Phase Bulk Import**, IIoT `telemetryIngest` + cảnh báo, xuất báo cáo RBAC CSV/XLSX/PDF Unicode và Command Palette `Ctrl+K`. |
-| [`@latticedx/plugin-dxos-studio`](plugins/nocobase/plugin-dxos-studio/README.md) | `0.4.2` | `[P][H][D]` | Bảng điều khiển `/admin/settings/dxos-studio` (**11 tab Studio** + **6 Governance Consoles** + Unified Approval Inbox + Public Form Builder + **Visual Interactive DMN**) & **Workflow Automation Studio (`/admin/settings/workflow/automation` + alias `/admin/settings/dxos-flow-studio`, `@xyflow/react@12.12.1` + `@dagrejs/dagre@3.1.3` MIT: 24 node types, Draft/Publish `latticeAutomationRuleVersions`, Live Canvas Trace, `ai.agent` ReAct nhiều lượt & HITL bền vững)**: cài 1-nhấp 4 quy trình Poka-yoke, dựng cổng đa-block + `/mobile`, **OMS/WMS/FEFO/ePOD + QR ISO + `/v/track/:code` Ed25519**, **Stock `n8n` Public REST API v1 (`dxosN8n`)**, **Rich Schema Domain Builder (`hasOne`, `belongsToMany` + `FORCE RLS`, AST `formula`, `validation`) + 1-Click Business Packs + 1-Click Tenant Provisioning**, Outbox/DLQ và **GitOps Bundle v3**. |
-| [`@latticedx/plugin-dxos-ai`](plugins/nocobase/plugin-dxos-ai/README.md) | `0.4.2` | `[I][P][D][H]` | Trung tâm `/admin/settings/dxos-ai` (gồm Tab 7 Built Apps + Visual ER/Plan-Diff/Rollback, Trace Waterfall & Eval Lab UI): **7 Starter AI Profiles**, **20 Unified Tools** (`11` Admin Builder gồm **`dxos_provision_role_workspace` (`build`/`plan`/`patch`/`rollback`/`verify`)** & `dxos_configure_workflow` + `6` Operational + `3` Persistent Memory `dxos_memory_*`), **Google/LF A2A Protocol (`/.well-known/agent-card.json`, `/api/dxos-a2a`)**, **Proactive Triage LLM thật**, **Hàng chờ Phê duyệt HITL**, `PortalAgentLauncher` SSE, hạn mức PG + che PII VN và **2-Way MCP Gateway**. |
-| [`@latticedx/plugin-enterprise-auth`](plugins/nocobase/plugin-enterprise-auth/README.md) | `0.4.2` | `[H]` | Đăng nhập Keycloak OIDC + PKCE ánh xạ về phiên NocoBase native, **Valkey `8.1`** (tương thích giao thức Redis) session cache, Backchannel Logout, đồng bộ nhóm→vai trò 2 chiều chống leo thang quyền và giao diện hủy liên kết. |
-| [`@latticedx/plugin-action-bridge`](plugins/nocobase/action-bridge/README.md) | `0.4.2` | `[P][I]` | Cầu nối hành động và tương thích quy trình giữa API/Studio cốt lõi và giao diện `/lattice/*`. |
+- **Agentic App Builder 2.0 (Plan → Diff → Patch → Rollback):** Thay vì sinh giao diện tĩnh một lần, tác tử AI tạo ứng dụng đa thực thể theo thứ tự topo (`hasOne`, `belongsToMany`, `FORCE RLS`, công thức AST an toàn), kết xuất sơ đồ ER, hỗ trợ chỉnh sửa lặp bằng ngôn ngữ tự nhiên (`patch_enterprise_app`), tự kiểm chứng và quay lui theo phiên bản (`rollback_enterprise_app`).
+- **Quy trình Xác định & AI ReAct Bền vững:** Kết hợp **LatticeFlow v2 DAG** (`24` loại node / `6` nhóm, tách biệt `Draft`/`Publish`, lưu vết `loopCursor` qua bước tạm dừng HITL), **Visual DMN Engine** (4 Hit Policies không dùng `eval`), **Hộp thư Phê duyệt Thống nhất (`M-of-N`)**, thông báo đa kênh và cầu nối **Stock `n8n` REST v1 (`2.48.1`)**.
+- **Bảo mật Đa Tenant Fail-Closed ở Tầng Lõi CSDL:** Cô lập chặt chẽ trên **56 bảng tĩnh PostgreSQL 16 `FORCE ROW LEVEL SECURITY`** (cùng các bảng động `latticeCustom*`) với vai trò không đặc quyền superuser `nocobase_app`, khóa API phạm vi (`ldx_pat_*`), sổ cái bất biến **Ed25519 + Merkle PKI**, và két bí mật **AES-256-GCM + OAuth2 PKCE**.
+- **IIoT Digital Twin 2 Chiều & Cổng Trường Ngoại tuyến:** Giao tiếp trực tiếp **Eclipse Mosquitto `2.0.21` DynSec/LWT**, **FIWARE Orion-LD `1.12.0`**, **Node-RED `4.0.9`**, tính toán nhiệt độ động học **Arrhenius MKT**, điều phối kho lạnh **OMS/WMS/FEFO/ePOD**, bản đồ **WebGIS MapLibre** và **Mobile Field PWA (`/v/mobile`)** có hàng đợi ngoại tuyến IndexedDB.
+- **100% Pure-OSI `Apache-2.0` — Không Khóa Vendor, Không `BSL-1.1`:** Kho Git và gói phát hành nguồn loại bỏ hoàn toàn `upstream/nocobase` và `.gitmodules`, nói không với `BSL-1.1` (`0` ThingsBoard, `0` EMQX), dùng **Valkey `8.1` (`BSD-3-Clause`)** và giữ nguyên nhận diện **Điều 5.2 NocoBase `2.2.50`**.
 
 ---
 
-## 2. Khởi tạo Nhanh & Thử nghiệm Trình duyệt Sạch (`pnpm native:clean`)
+## 📸 Trình diễn Hệ thống Thực tế
 
-Yêu cầu: **Node.js `24.x`** (`>=24 <25`), **pnpm `10.23.0`**, **Git**, **tar**, và **Docker Desktop / Docker Compose v2+** (khi chạy stack container).
+<div align="center">
+  <img src="./docs/assets/demo-walkthrough.webp" alt="LatticeDX v0.4.2 Live System Walkthrough" width="92%">
+  <p>
+    <em>Luồng trình diễn thực tế toàn hệ thống từ AI Studio 6 Mặt phẳng, App Builder ER, LatticeFlow v2 DAG đến WebGIS Digital Twin &amp; Mobile Field PWA.</em><br>
+    Xem kịch bản tự kiểm chứng 15 phút tại <a href="./docs/DEMO_PACK.md"><code>docs/DEMO_PACK.md</code></a> và kịch bản thuyết trình Chung kết tại <a href="./docs/FINALS_15MIN_SCRIPT.md"><code>docs/FINALS_15MIN_SCRIPT.md</code></a>.
+  </p>
+</div>
+
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-ai-studio-6plane.webp" alt="DX-OS AI Studio 6 Mặt phẳng" width="100%">
+      <br>
+      <strong>1. DX-OS AI Studio (6 Mặt phẳng &amp; 9 Phân hệ)</strong><br>
+      <sub>Trung tâm điều phối 7 Starter AI Profiles, 20 Unified Tools, thẻ Google/LF A2A, OTel GenAI Trace Waterfall và Eval Lab (<code>163/163</code> ca tiếng Việt).</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-app-builder-er.webp" alt="App Builder 2.0 và Visual ER Graph" width="100%">
+      <br>
+      <strong>2. App Builder 2.0 &amp; Sơ đồ ER Trực quan</strong><br>
+      <sub>Dựng ứng dụng đa thực thể tự động gắn PostgreSQL <code>FORCE RLS</code>, xem trước Plan-Diff, đồ thị quan hệ ER và Rollback tức thì.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-latticeflow-dag.webp" alt="LatticeFlow v2 24-Node DAG Studio" width="100%">
+      <br>
+      <strong>3. LatticeFlow v2 Studio (24 Node / 6 Nhóm)</strong><br>
+      <sub>Trình biên tập đồ thị Canvas-First (<code>@xyflow/react</code> + <code>@dagrejs/dagre</code> MIT), tách Draft/Publish, Live Step Trace và Agent <code>dxos-architect</code> đồng bộ SSE.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-dmn-hitl.webp" alt="Visual DMN và Hộp thư Phê duyệt HITL" width="100%">
+      <br>
+      <strong>4. Visual DMN &amp; Hộp thư Phê duyệt HITL</strong><br>
+      <sub>Bảng quyết định trực quan không <code>eval</code> (FIRST/UNIQUE/COLLECT/PRIORITY) cùng Hộp thư Phê duyệt Thống nhất hiển thị <code>diffPreview</code> trước/sau.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-logistics-bi-wms.webp" alt="Multi-Portal Logistics, BI và Kho lạnh FEFO" width="100%">
+      <br>
+      <strong>5. Multi-Portal Logistics, BI &amp; Kho lạnh FEFO</strong><br>
+      <sub>Cổng <code>/p/logistics</code> tích hợp <code>DxosWmsOpsBlockModel</code> (khóa hàng <code>FOR UPDATE</code>, giữ lô MKT), <code>DxosBiChartBlockModel</code>, Kanban 6 cột và xuất báo cáo Unicode RBAC.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-webgis-twin.webp" alt="WebGIS MapLibre và Digital Twin 2 Chiều" width="100%">
+      <br>
+      <strong>6. WebGIS MapLibre &amp; Digital Twin 2 Chiều</strong><br>
+      <sub>Bản đồ chuỗi lạnh Việt Nam (<code>maplibre-gl</code> BSD-3-Clause), điều khiển Shadow 2 chiều qua Mosquitto DynSec / Orion-LD / Node-RED và giám sát Arrhenius MKT.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-public-tracking.webp" alt="Tra cứu Công khai Zero-PII và Ed25519" width="100%">
+      <br>
+      <strong>7. Tra cứu Công khai Zero-PII &amp; Ed25519</strong><br>
+      <sub>Cổng công khai <code>/v/track/:code</code> &amp; <code>/v/form/:slug</code> fail-closed không lộ dữ liệu cá nhân, mã QR ISO/IEC 18004 SVG và xác thực chữ ký Ed25519 + Merkle PKI.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <img src="./docs/assets/showcase-mobile-cmms.webp" alt="Mobile Field PWA và CMMS" width="100%">
+      <br>
+      <strong>8. Mobile Field PWA (<code>/v/mobile</code>) &amp; CMMS</strong><br>
+      <sub>Ứng dụng hiện trường ngoại tuyến dùng IndexedDB Outbox với trạng thái <code>quarantined</code> bảo toàn ePOD, kết nối trực tiếp bảo trì CMMS <code>/p/cmms</code>.</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
+## 🏗️ Kiến trúc Nền tảng
+
+<div align="center">
+  <img src="./docs/assets/architecture-v042-vi.webp" alt="Kiến trúc Nền tảng LatticeDX v0.4.2" width="100%">
+  <p><em>Kiến trúc phân tầng LatticeDX v0.4.2: từ Cổng Đa vai trò &amp; Ứng dụng Nghiệp vụ (Tier 3–2) xuống Headless Runtime, 6 Mặt phẳng DX-OS &amp; 56 Bảng PG16 FORCE RLS (Tier 1 &amp; Data Layer).</em></p>
+</div>
+
+### 1. Ma trận 6 Mặt phẳng DX-OS (6-Plane Operating Matrix)
+
+```mermaid
+flowchart TB
+  subgraph P4["Plane 4 · Multi-Portal, Mobile Field PWA & Knowledge RAG"]
+    PORTALS["7 Cổng /p/* · 12 Native v2 BlockModels · /v/mobile · /v/form · /v/track"]
+    PARA["P.A.R.A. Vault · PDF/Office OCR · pgvector HNSW + RRF Hybrid Search"]
+    GITOPS["GitOps Solution Bundle v3 · Rollback & Diff"]
+  end
+
+  subgraph P5["Plane 5 · Agentic AI Workforce & App Builder 2.0"]
+    AI["7 Starter Profiles · 20 Unified Tools · 163/163 NL Eval"]
+    PROTO["2-Way Streamable MCP · Google/LF A2A · HITL & PII Redaction"]
+    BUILDER["App Builder 2.0 (Plan / Build / Patch / Rollback / ER Graph)"]
+  end
+
+  subgraph P3["Plane 3 · Orchestration, DMN & Event Bus"]
+    FLOW["LatticeFlow v2 DAG (24 Node / 6 Nhóm · Loop Cursor · ReAct ai.agent)"]
+    DMN["Visual DMN · Unified Approvals M-of-N · Omnichannel Notify"]
+    BUS["CloudEvents Bus & Standard Webhooks · Stock n8n 2.48.1 REST v1"]
+  end
+
+  subgraph P2["Plane 2 · IT/OT & 2-Way Digital Twin"]
+    MQTT["Mosquitto 2.0.21 DynSec + LWT · Node-RED 4.0.9 Downlink"]
+    ORION["FIWARE Orion-LD 1.12.0 2-Way · Arrhenius MKT & Quarantine"]
+  end
+
+  subgraph P1["Plane 1 · Zero-Trust Edge, Identity & Data Isolation"]
+    EDGE["Caddy 2.10 · APISIX 3.19.0 · Keycloak 26.8.2 OIDC/PKCE · Valkey 8.1"]
+    SEC["56 Bảng PG16 FORCE RLS · nocobase_app · ldx_pat_* · Ed25519/Merkle · dxosVault"]
+    SCAN["apps/file-scanner · ClamAV 1.5.5 · RustFS Object Store"]
+  end
+
+  subgraph P6["Plane 6 · App Data & Observability Substrate"]
+    NB["NocoBase 2.2.50 Host OCI + 7 Plugin Apache-2.0 (sdkProvidedByHost: true)"]
+    OBS["OpenAPI 3.1 / AsyncAPI 3.0 · OTel GenAI · Prometheus · Grafana 360° · PITR WAL"]
+  end
+
+  P4 --> P3
+  P5 --> P3
+  P5 --> P4
+  P3 --> P2
+  P4 --> P6
+  P3 --> P6
+  P2 --> P1
+  P6 --> P1
+```
+
+### 2. Mô-đun hóa 7 Plugin trên NocoBase `2.2.50` (`sdkProvidedByHost: true`)
+
+```mermaid
+flowchart LR
+  subgraph HOST["External OCI Host Runtime (Ngoài kho Git)"]
+    NBHOST["NocoBase 2.2.50 Host\nĐiều 5.2: Powered by NocoBase"]
+  end
+
+  subgraph PLUGINS["7 First-Party Plugins (plugins/nocobase/* · Apache-2.0 · v0.4.2)"]
+    FND["plugin-lattice-foundation\nRLS 56 bảng · Vault · EventBus · PKI · Approvals"]
+    AUTH["plugin-enterprise-auth\nKeycloak OIDC/PKCE · Valkey 8.1"]
+    PARA["plugin-dxos-para\nP.A.R.A. · OCR · pgvector RRF"]
+    BLK["plugin-dxos-blocks\n12 BlockModels · WebGIS · Twin/Broker"]
+    STD["plugin-dxos-studio\nControl Studio · Flow v2 · WMS/DMN · n8n"]
+    DXAI["plugin-dxos-ai\n20 Tools · App Builder 2.0 · MCP · A2A"]
+    BRG["action-bridge\nProxy hợp đồng /lattice/*"]
+  end
+
+  subgraph INFRA["Dịch vụ Hạ tầng Độc lập qua Giao thức Mạng (OCI)"]
+    PG["PostgreSQL 16 + pgvector 0.8.1\n(non-superuser nocobase_app)"]
+    VAL["Valkey 8.1 (BSD-3-Clause)\n& Keycloak 26.8.2"]
+    IIOT["Mosquitto 2.0.21 · Orion-LD\nNode-RED 4.0.9 · Stock n8n"]
+    SVC["@dx/api (Fastify) · @dx/agent-worker\n@dx/file-scanner (ClamAV)"]
+  end
+
+  NBHOST -- "Host SDK Runtime\n(sdkProvidedByHost: true)" --> PLUGINS
+  FND --> PG
+  AUTH --> VAL
+  PARA --> PG
+  BLK --> IIOT
+  STD --> IIOT
+  STD --> PG
+  DXAI --> PG
+  BRG --> SVC
+```
+
+---
+
+## 🧩 7 Plugin Apache-2.0 trên NocoBase `2.2.50`
+
+Năng lực cốt lõi đã kiểm chứng trên mã nguồn `v0.4.2`: **12** Native v2 BlockModels · **24** LatticeFlow v2 DAG nodes (6 nhóm) · **20** Unified AI Tools (`11` Admin Builder + `6` Operational + `3` Persistent Memory) · **7** Starter AI Profiles · **56** bảng tĩnh PostgreSQL `FORCE RLS` (+ bảng động `latticeCustom*`) · **2-Way Streamable MCP** & **Google/LF A2A** · **P.A.R.A. `pgvector` HNSW RRF** · **Ed25519 + Merkle PKI Ledger** · **Stock `n8n 2.48.1` REST v1** · **FIWARE Orion-LD + Mosquitto DynSec/LWT + Node-RED**.
+
+| Package | Phiên bản | Trụ cột | `sdkProvidedByHost` | Vai trò chính trong DX-OS |
+| --- | :---: | :---: | :---: | --- |
+| [`@latticedx/plugin-lattice-foundation`](plugins/nocobase/plugin-lattice-foundation/README.md) | `0.4.2` | `[D][H][I]` | `true` | Collections lõi, 7 vai trò `ldx_*`, Multi-Portal, Mobile PWA (`/v/mobile`), Public Forms (`/v/form/:slug`), Multi-Level Approvals (`M-of-N`), Omnichannel Notify (`dxosNotify`), PaaS API Keys (`ldx_pat_*`), Ed25519/Merkle PKI Ledger (`dxosLedger`), Data Governance/MKT, **56 bảng PG16 `FORCE RLS`** (`nocobase_app`), OTel GenAI (`latticeAiTraces`), Connector Vault (`dxosVault`), Event Bus (`dxosEvents`), OpenAPI 3.1/AsyncAPI 3.0 & Prometheus `/api/dxos:metrics`. |
+| [`@latticedx/plugin-enterprise-auth`](plugins/nocobase/plugin-enterprise-auth/README.md) | `0.4.2` | `[H]` | `true` | Đăng nhập Keycloak OIDC + PKCE S256 ánh xạ về phiên NocoBase native, **Valkey `8.1`** session cache, Backchannel Logout và đồng bộ nhóm→vai trò 2 chiều chống leo thang quyền. |
+| [`@latticedx/plugin-dxos-para`](plugins/nocobase/plugin-dxos-para/README.md) | `0.4.2` | `[H]` | `true` | Kho tri thức P.A.R.A. (`latticeParaDocuments`/`Chunks`), ACL 7 vai trò theo `organizationId`, trích xuất PDF (ToUnicode CMap tiếng Việt)/DOCX/XLSX/PPTX, OCR Form Autofill và **Hybrid RAG `tsvector` + RRF + `pgvector` HNSW**. |
+| [`@latticedx/plugin-dxos-blocks`](plugins/nocobase/plugin-dxos-blocks/README.md) | `0.4.2` | `[H][P][D][I]` | `true` | **12 Native v2 `BlockModel`s** (gồm `DxosBiChartBlockModel`, `DxosWebGisBlockModel` dùng `maplibre-gl`, `DxosKanbanScheduleBlockModel`, `DxosWmsOpsBlockModel`, `DxosRecordWorkbenchBlockModel`...), `aggregateQuery` & `collectionsMeta`, **2-Way Digital Twin Shadow**, **Mosquitto DynSec/LWT & Orion-LD 2-Way (`dxosBroker`)**, 2-Phase Bulk Import, cảnh báo IIoT, xuất báo cáo RBAC Unicode & `Ctrl+K`. |
+| [`@latticedx/plugin-dxos-studio`](plugins/nocobase/plugin-dxos-studio/README.md) | `0.4.2` | `[P][H][D]` | `true` | Control Studio (`/admin/settings/dxos-studio`, 11 tab Studio + 6 Governance Consoles + Unified Inbox + Form Builder + **Visual DMN**) & **LatticeFlow v2 DAG Studio** (`/admin/settings/workflow/automation`, `@xyflow/react` + `@dagrejs/dagre` MIT: 24 node, Draft/Publish, Live Trace, ReAct `ai.agent`, HITL bền vững), OMS/WMS/FEFO/ePOD + QR SVG + `/v/track/:code` Ed25519, **Stock `n8n` REST v1 (`dxosN8n`)**, **Rich Schema Domain Builder**, Business Packs & **GitOps Bundle v3**. |
+| [`@latticedx/plugin-dxos-ai`](plugins/nocobase/plugin-dxos-ai/README.md) | `0.4.2` | `[I][P][D][H]` | `true` | AI Studio (`/admin/settings/dxos-ai`, 9 phân hệ gồm Built Apps + Visual ER/Plan-Diff/Rollback, Trace Waterfall & Eval Lab UI): **7 Starter Profiles**, **20 Unified Tools**, **App Builder 2.0**, **Google/LF A2A Protocol**, Proactive Triage LLM, Hàng chờ HITL, hạn mức PG + che PII VN và **2-Way MCP Gateway**. |
+| [`@latticedx/plugin-action-bridge`](plugins/nocobase/action-bridge/README.md) | `0.4.2` | `[P][I]` | `true` | Cầu nối hành động và tương thích hợp đồng quy trình giữa Core API/Studio và giao diện `/lattice/*`. |
+
+---
+
+## 🚀 Khởi chạy Nhanh (3 Bước)
+
+Yêu cầu hệ thống: **Node.js `24.x`** (`>=24 <25`), **pnpm `10.23.0`**, **Git**, **tar** và **Docker Engine / Docker Compose v2+**.
+
+### Bước 1 — Clone & Dựng NocoBase sạch từ DB 0 bảng (`NocoBase 2.2.50`)
 
 ```sh
 git clone https://github.com/CTU-OpenPaw/lattice-dx.git
 cd lattice-dx
 pnpm install --frozen-lockfile
+pnpm native:clean --port=13014
 ```
 
-### A. Build & Kiểm thử Monorepo + 7 Plugin (Offline / CI)
+*(Lệnh `pnpm native:clean --port=13014` xuất mã nguồn từ `HEAD`, khởi tạo PostgreSQL trống 0 bảng, bật host `nocobase/nocobase:2.2.50`, cài đủ **7 plugin `0.4.2`**, xác minh migrations và in đường dẫn `<path-to-report.json>`.)*
+
+### Bước 2 — Nạp Multi-Portal, AI Workforce & Dữ liệu Mẫu
 
 ```sh
-# 1. Build cả 7 plugin NocoBase
+node scripts/setup-native-multi-portal-demo.mjs "<path-to-report.json>"
+node scripts/setup-native-workspace-demo.mjs "<path-to-report.json>"
+pnpm setup:dxos-ai -- --origin=http://localhost:13014
+NOCOBASE_ADMIN_PASSWORD="<admin-password>" node scripts/seed-v030-demo-showcase.mjs --origin=http://localhost:13014 --seed-samples
+```
+
+*(Để cài trắng không nạp dữ liệu mẫu, truyền cờ `--blank-slate` cho `pnpm native:clean`; để nạp đầy đủ dữ liệu trình diễn chuỗi lạnh & đối tác xem chi tiết tại [`docs/DEMO_PACK.md`](docs/DEMO_PACK.md).)*
+
+### Bước 3 — Truy cập Portals & Xác minh Hệ thống
+
+Mở `http://localhost:13014` và đăng nhập tài khoản fixture cục bộ `admin@nocobase.com` / `admin123` *(chỉ dùng trên loopback localhost)*:
+
+- **Quản trị & Điều phối:** `/admin/lattice-workspace` · `/admin/settings/dxos-ai` (AI Studio) · `/admin/settings/dxos-studio` (Control Studio & DMN) · `/admin/settings/workflow/automation` (LatticeFlow v2) · `/admin/settings/dxos-para` (P.A.R.A. RAG)
+- **Cổng Nghiệp vụ Đa vai trò:** `/p/procurement` · `/p/incidents` · `/p/logistics` · `/p/logistics-employee` · `/p/services` · `/p/cmms` · `/p/partner-claims`
+- **Tuyến Di động & Công khai Zero-PII:** `/v/mobile` (Field PWA) · `/v/form/:slug` · `/v/track/:code` (Ed25519)
+
+<details>
+<summary><b>📦 Build từ Mã nguồn (Offline / CI), Nghiệm thu Tự động & Cấu trúc Kho mã</b></summary>
+
+#### A. Build toàn bộ Monorepo & 7 Plugin (Offline / CI)
+
+```sh
+# 1. Cài đặt phụ thuộc khóa lockfile cho enterprise-auth (tắt lifecycle scripts)
+npm ci --prefix plugins/nocobase/plugin-enterprise-auth --ignore-scripts --no-audit --no-fund
+
+# 2. Build cả 7 plugin Apache-2.0 (sdkProvidedByHost: true)
 node plugins/nocobase/action-bridge/build.mjs
 node plugins/nocobase/plugin-lattice-foundation/scripts/build.mjs
 node plugins/nocobase/plugin-enterprise-auth/build.mjs
@@ -63,33 +301,15 @@ node plugins/nocobase/plugin-dxos-blocks/build.mjs
 node plugins/nocobase/plugin-dxos-studio/build.mjs
 node plugins/nocobase/plugin-dxos-ai/build.mjs
 
-# 2. Kiểm thử đơn vị 7 plugin + scripts PoF/demo + externals
-node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs tests/nocobase-externals.test.mjs
-
-# 3. Đánh giá AI tiếng Việt tự nhiên (163 ca kiểm thử bao gồm App Builder 2.0, A2A, GraphRAG, Alarm, DX-OS Flow Architect & Security Refusal)
-node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
-
-# 4. Typecheck, Vitest workspace (apps + packages + tests) & build Node.js/TypeScript services
+# 3. Chạy typecheck, Vitest workspace, build services & kiểm thử 7 plugin + scripts
 pnpm check
+node --test plugins/nocobase/*/tests/*.test.cjs scripts/tests/*.test.mjs tests/native-ui-fixture.test.mjs tests/nocobase-externals.test.mjs
+node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
 ```
 
-### B. Dựng môi trường NocoBase sạch từ DB 0 bảng (`NOCOBASE_VERSION=2.2.50`)
-
-Lệnh dưới đây xuất mã nguồn từ `HEAD`, dựng PostgreSQL trống và runtime NocoBase ở cổng cô lập (ví dụ `13014`), cài và kích hoạt đủ 7 plugin Apache-2.0 (`0.4.2`), kiểm tra migrations và xuất file `report.json` nghiệm thu (chi tiết tại [docs/native-clean-install.md](docs/native-clean-install.md)):
+#### B. Các lệnh Nghiệm thu & Diễn tập DR Toàn Stack
 
 ```sh
-pnpm native:clean --port=13014
-node scripts/setup-native-multi-portal-demo.mjs "<path-to-report.json>"
-node scripts/setup-native-workspace-demo.mjs "<path-to-report.json>"
-
-# Nạp 7 Starter AI Employees, Admin Builder, 2-Way IT/OT MCP Gateway & (khi có AGENT_API_KEY) local-9router
-pnpm setup:dxos-ai -- --origin=http://localhost:13014
-
-# Nạp dữ liệu trình diễn nền v0.3.0 & chuỗi lạnh/PaaS v0.4.2 idempotent (cung cấp NOCOBASE_TOKEN hoặc NOCOBASE_ADMIN_PASSWORD / --admin-password)
-NOCOBASE_ADMIN_PASSWORD="<admin-password>" node scripts/seed-v030-demo-showcase.mjs --origin=http://localhost:13014
-NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=http://localhost:13014
-
-# Nghiệm thu Headless PaaS v0.4.2 (QR SVG + Ed25519 + Delegation), AI Workforce (20 Tools + App Builder 2.0 + HITL), Broker + n8n REST v1 + OAuth2 PKCE + Partner Settlement, Logistics RBAC, và DR toàn stack
 pnpm acceptance:headless-paas -- --origin=http://localhost:13014
 pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
 pnpm acceptance:broker-automation-builder -- --origin=http://localhost:13014
@@ -98,37 +318,74 @@ pnpm backup:stack
 pnpm backup:rehearse-stack -- "output/backups/stack/<bundle-id>"
 ```
 
-Sau khi nạp demo, đăng nhập quản trị tại `http://localhost:13014` (`admin@nocobase.com` / `admin123`), mở **`/admin/settings/dxos-studio`** (11 tab Studio + 6 Governance Consoles kèm Visual DMN), **`/admin/settings/workflow/automation`** (**Workflow -> Workflow Automation**: LatticeFlow v2 Canvas-First Studio + nút mở nhanh **Connectors / n8n** & **Broker** + đồng bộ trực tiếp **Agent Chat gốc `dxos-architect`**; giữ route alias `/admin/settings/dxos-flow-studio`), **`/admin/settings/dxos-ai`** (AI Workforce, MCP, Tab 7 Built Apps + Visual ER/Plan-Diff/Rollback, Trace Waterfall & Eval Lab), **`/admin/settings/dxos-para`** (Vector RAG), hoặc các cổng nghiệp vụ **`/p/logistics`** (gồm `DxosWmsOpsBlockModel`), **`/p/incidents`**, **`/p/procurement`**, **`/p/services`**, **`/p/cmms`**, **`/p/partner-claims`** (`CLM-V100-001`), tra cứu không PII **`/v/track/:code`**, biểu mẫu công khai **`/v/form/:slug`** và tuyến di động **`/v/mobile`**.
+#### C. Biến môi trường & Cấu trúc Kho mã (`lattice-dx`)
 
----
-
-## 3. Cấu trúc Kho mã nguồn
+Tham khảo cấu hình mặc định tại [`.env.example`](.env.example) và [`infra/compose/prod.env.example`](infra/compose/prod.env.example). **Tuyệt đối không** dùng mật khẩu fixture cục bộ cho môi trường Internet.
 
 | Thư mục / Tệp | Trách nhiệm |
 | --- | --- |
 | `plugins/nocobase/*` | 7 plugin NocoBase độc lập (`0.4.2`, `Apache-2.0`, `sdkProvidedByHost: true`) và bộ kiểm thử `node --test`. |
-| `apps/api`, `apps/agent-worker`, `apps/file-scanner` | Fastify API tích hợp (`apps/api`), worker thuần `node:http` (`apps/agent-worker`) và sidecar quét tệp ClamAV/RustFS thuần `node:http` (`apps/file-scanner`) (`@dx/*`). |
-| `packages/contracts` | Hợp đồng schema và kiểm tra kiểu dùng chung (`@dx/contracts`). |
-| `infra/compose/*.yml` & `infra/config/*` | Cấu hình Docker Compose khóa digest `@sha256:` cho **`19` OCI images** (`core.yml`, `nocobase.yml`, `iiot.yml`, `integration.yml`, `native-rehearsal.yml`, `prod.yml`: Caddy, APISIX, Keycloak, `pgvector/pgvector:0.8.1-pg16`, **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause`)**, RustFS, ClamAV, Orion-LD, MongoDB, n8n kèm `dxos-coldchain-alert-orchestrator.json` & `dxos-epod-partner-sync.json`, Mosquitto `2.0.21` DynSec + Node-RED `4.0.9` trên `iiot.yml`, OTel Collector, Prometheus, Grafana OSS `11.5.8`, Gotenberg). |
-| `scripts/` | Công cụ clean-install (kèm `--blank-slate`), seed Multi-Portal/Showcase, nghiệm thu Headless PaaS / AI MCP / Blank-Slate & Live LLM App Builder / Logistics RBAC, kiểm toán PoF (`verify-pof-readiness.mjs`), sinh SBOM CycloneDX 1.5 (`generate-sbom.mjs`) và đóng gói nguồn (`build-oss-release-tarball.mjs`). |
-| `solutions/` | Hợp đồng mẫu Logistics (`solutions/logistics`) và định nghĩa quy trình/sự cố (`solutions/workflows`, `solutions/integration`). |
+| `apps/api`, `apps/agent-worker`, `apps/file-scanner` | Fastify API (`@dx/api`), worker thuần `node:http` (`@dx/agent-worker`) và sidecar quét ClamAV/RustFS (`@dx/file-scanner`). |
+| `packages/contracts`, `packages/uc1-procurement` | Hợp đồng schema/type dùng chung (`@dx/contracts`) và gói tham chiếu mua sắm. |
+| `infra/compose/*.yml` & `infra/config/*` | Cấu hình Docker Compose khóa digest `@sha256:` cho **`19` OCI images** (PostgreSQL 16 + `pgvector 0.8.1`, Valkey `8.1`, Keycloak `26.8.2`, Caddy `2.10`, APISIX `3.19.0`, RustFS, ClamAV `1.5.5`, Mosquitto `2.0.21`, Node-RED `4.0.9`, Orion-LD `1.12.0`, MongoDB `8.0`, Stock `n8n 2.48.1`, OTel, Prometheus, Grafana OSS `11.5.8`, Gotenberg `8.20.1`). |
+| `scripts/` | Bộ công cụ `native:clean`, seeders, nghiệm thu Headless PaaS / AI MCP / Broker / RBAC, kiểm toán PoF (`verify-pof-readiness.mjs`), sinh SBOM (`generate-sbom.mjs`) và đóng gói nguồn (`build-oss-release-tarball.mjs`). |
+| `solutions/` | Hợp đồng mẫu Logistics, định nghĩa quy trình và tích hợp. |
 
-> **Kho mã nguồn 100% thuần chuẩn OSI:** Submodule cũ `upstream/nocobase` và tệp `.gitmodules` đã được gỡ bỏ hoàn toàn khỏi cây Git và gói phát hành nguồn `latticedx-0.4.2-src.tar.gz`; runtime host `nocobase/nocobase:2.2.50` chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git (xem [docs/nocobase-source-review.md](docs/nocobase-source-review.md)).
-
-Các biến môi trường mặc định được mô tả trong [`.env.example`](.env.example) và [`infra/compose/prod.env.example`](infra/compose/prod.env.example). **Không** triển khai mật khẩu demo local lên Internet; chỉ dùng cho môi trường đánh giá và phát triển cục bộ.
+</details>
 
 ---
 
-## 4. Tuân thủ Nguồn mở (OLP PMNM 2026 PoF)
+## 🌐 Hệ sinh thái CTU-OpenPaw
 
-```sh
-node scripts/source-headers.mjs --check        # Xác minh 100% file nguồn gốc mang @copyright + SPDX Apache-2.0
-pnpm pof:check                                 # Audit PoF (tài liệu quản trị, COPYRIGHT.txt, cô lập 7 plugin, digest Compose, sạch upstream-clean, không secret)
-node --test scripts/tests/oss-pof-audit.test.mjs
-pnpm release:sbom                              # Sinh & kiểm tra docs/sbom-cyclonedx.json (CycloneDX 1.5: 257 components — workspace=12, npm=226, oci=19; 257/257 resolved, 0 NONE)
-pnpm release:sbom -- --check                   # Xác minh không trôi lệch SBOM & không BSL-1.1 / ThingsBoard / EMQX
-pnpm release:tarball                           # Xuất output/release/latticedx-0.4.2-src.tar.gz + .sha256
-```
+Hệ sinh thái **LatticeDX** được tổ chức thành **4 kho mã nguồn mở** tách bạch vai trò và liên kết đồng bộ:
 
-- Toàn bộ quy trình đóng góp, phát hành, SBOM và kiểm kê dependency xem tại [`COPYRIGHT.txt`](COPYRIGHT.txt), [`NOTICE`](NOTICE), [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md), [`SECURITY.md`](SECURITY.md), [`docs/sbom-cyclonedx.json`](docs/sbom-cyclonedx.json), [docs/third-party.md](docs/third-party.md), [docs/dependency-inventory.md](docs/dependency-inventory.md) và [docs/oss-pof-compliance.md](docs/oss-pof-compliance.md).
-- Báo lỗi hoặc đề xuất cải tiến tại **GitHub Issues**: <https://github.com/CTU-OpenPaw/lattice-dx/issues>.
+| Kho / Cổng | Liên kết | Vai trò trong Hệ sinh thái | Giấy phép |
+| --- | --- | --- | :---: |
+| **`CTU-OpenPaw/lattice-dx`** | [`github.com/CTU-OpenPaw/lattice-dx`](https://github.com/CTU-OpenPaw/lattice-dx) | Nền tảng lõi DX-OS (`v0.4.2`): 7 plugin NocoBase, Fastify API, file-scanner, hạ tầng Compose `@sha256:`, PoF & SBOM tooling. | `Apache-2.0` |
+| **`CTU-OpenPaw/lattice-docs`** | [`ctu-openpaw.github.io/lattice-docs`](https://ctu-openpaw.github.io/lattice-docs/) · [Repo](https://github.com/CTU-OpenPaw/lattice-docs) | Cổng tài liệu kỹ thuật & quản trị nguồn mở song ngữ (Tiếng Việt / English) dựng bằng VitePress. | `MIT` / `Apache-2.0` |
+| **`CTU-OpenPaw/lattice-templates`** | [`github.com/CTU-OpenPaw/lattice-templates`](https://github.com/CTU-OpenPaw/lattice-templates) | Thư viện mẫu cộng đồng đã làm sạch secret: LatticeFlow v2 blueprints, n8n workflows, DMN tables, Business Packs, Public Forms & Solution Bundle v3. | `Apache-2.0` |
+| **`CTU-OpenPaw/.github`** | [`github.com/CTU-OpenPaw`](https://github.com/CTU-OpenPaw) · [Repo](https://github.com/CTU-OpenPaw/.github) | Hồ sơ tổ chức CTU-OpenPaw, quy chuẩn cộng đồng và quản trị nguồn mở chung. | `Apache-2.0` |
+
+---
+
+## 🛡️ Tuân thủ Nguồn mở Pure-OSI & PoF
+
+### Chỉ số Kiểm chứng Tự động (trên nhánh `main` commit `42cdf3c`, `v0.4.2`)
+
+| Tiêu chí Kiểm chứng | Lệnh Xác minh | Kết quả Đã kiểm chứng |
+| --- | --- | --- |
+| **SPDX & Bản quyền Mã nguồn** | `node scripts/source-headers.mjs --check` | **`1,098`** tệp mã nguồn gốc mang `@copyright (C) 2026 CTU-OpenPaw` + `SPDX-License-Identifier: Apache-2.0` |
+| **Sẵn sàng Nguồn mở PoF** | `pnpm pof:check` (`scripts/verify-pof-readiness.mjs`) | **`6/6 PASS`** (`spdx-headers`, `governance-files`, `plugin-isolation`, `compose-digests`, `upstream-clean`, `no-secrets`) |
+| **CycloneDX 1.5 SBOM** | `pnpm release:sbom -- --check` | **`257/257`** thành phần (`workspace=12, npm=226, oci=19`), **`0` `NONE`**, **`0` `BSL-1.1`** |
+| **Kiểm toán Lỗ hổng Production** | `pnpm audit --prod --audit-level=low` | **`0`** lỗ hổng bảo mật ở cấp độ `low` trở lên |
+| **Kiểm thử Đơn vị & Tích hợp** | `pnpm check` & `node --test ...` | **`2,509/2,509 PASS`** (`1,128` Vitest + `1,381` Node tests trên `174` tệp) |
+| **Kiểm thử Hệ thống E2E** | Live Docker Playwright + API E2E | **`124/124 PASS`** toàn 8 miền, 5 vai trò |
+| **Đánh giá AI Tiếng Việt** | `node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95` | **`163/163` (`100%`)** qua 23 nhóm ý định & từ chối bảo mật |
+
+### Cam kết Điều 5.2 NocoBase & Ranh giới Pure-OSI
+
+- **Kho mã Git 100% thuần chuẩn OSI:** Kho Git chính thức và gói phát hành `latticedx-0.4.2-src.tar.gz` (`pnpm release:tarball`) hoàn toàn **không chứa** submodule `upstream/nocobase` hay `.gitmodules`, và không chứa bất kỳ phần mềm `BSL-1.1` nào (loại bỏ ThingsBoard & EMQX).
+- **Ranh giới NocoBase `2.2.50` & Điều 5.2:** Runtime host `nocobase/nocobase:2.2.50` (`sha256:04b75164936e7314ef74d82844bc56c9f34ed7ff1ca976ca53ffac2d3c88d777`) chỉ được nạp độc lập lúc chạy dưới dạng OCI container bên ngoài kho Git. Toàn bộ 7 plugin khai báo `"sdkProvidedByHost": true` và bảo toàn nguyên vẹn nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`).
+
+### Tài liệu Kỹ thuật & Tuân thủ Cốt lõi (Trong kho `docs/`)
+
+- **Build & PoF:** [`docs/build-from-source.md`](docs/build-from-source.md) · [`docs/oss-pof-compliance.md`](docs/oss-pof-compliance.md) · [`docs/third-party.md`](docs/third-party.md) · [`docs/dependency-inventory.md`](docs/dependency-inventory.md) · [`docs/nocobase-source-review.md`](docs/nocobase-source-review.md) · [`docs/sbom-cyclonedx.json`](docs/sbom-cyclonedx.json)
+- **Kiến trúc & Vận hành:** [`docs/olp-2026-architecture-matrix.md`](docs/olp-2026-architecture-matrix.md) · [`docs/system-report-and-guide.md`](docs/system-report-and-guide.md) · [`docs/stack-backup-and-recovery.md`](docs/stack-backup-and-recovery.md) · [`docs/disaster-recovery-and-pitr.md`](docs/disaster-recovery-and-pitr.md)
+- **Demo & Kiểm thử E2E:** [`docs/DEMO_PACK.md`](docs/DEMO_PACK.md) · [`docs/FINALS_15MIN_SCRIPT.md`](docs/FINALS_15MIN_SCRIPT.md) · [`docs/E2E_TESTING_GUIDE_HUNG.md`](docs/E2E_TESTING_GUIDE_HUNG.md)
+
+---
+
+## 🗺️ Lộ trình Phát triển (Nhánh `0.4.x`)
+
+LatticeDX duy trì lộ trình phát triển thận trọng trên nhánh **`0.4.x`** (bản phát hành gần nhất [`v0.4.1`](https://github.com/CTU-OpenPaw/lattice-dx/releases/tag/v0.4.1), nhánh `main` hiện tại `0.4.2`, chưa mở khóa lên nhánh `1.x`):
+
+- **Đã hoàn thành (`v0.4.0` → `v0.4.2`):** 7 plugin Apache-2.0 độc lập, 56 bảng PG16 `FORCE RLS`, App Builder 2.0 (Plan/Patch/Rollback/ER Graph), LatticeFlow v2 (24 node + ReAct + HITL bền vững), Visual DMN, WebGIS MapLibre + Digital Twin 2 chiều, Mobile Field PWA, 12 Native v2 BlockModels, CycloneDX 1.5 SBOM `257/257`, `163/163` NL Eval, `124/124` Live E2E.
+- **Đang tiếp tục trong nhánh `v0.4.x`:** Mở rộng bộ template cộng đồng tại `CTU-OpenPaw/lattice-templates`, tối ưu hóa trải nghiệm cấu hình biên IIoT và diễn tập phục hồi PITR đa vùng.
+
+---
+
+## 🤝 Đóng góp, Bảo mật & Giấy phép
+
+- **Đóng góp mã nguồn:** Xem hướng dẫn tại [`CONTRIBUTING.md`](CONTRIBUTING.md) và quy tắc ứng xử [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md). Thảo luận và báo lỗi tại [GitHub Issues](https://github.com/CTU-OpenPaw/lattice-dx/issues) hoặc [GitHub Discussions](https://github.com/CTU-OpenPaw/lattice-dx/discussions).
+- **Báo cáo bảo mật:** Không công khai lỗ hổng hoặc secret trên Issues/PR; xem quy trình tại [`SECURITY.md`](SECURITY.md) và gửi riêng tư qua [GitHub Security Advisories](https://github.com/CTU-OpenPaw/lattice-dx/security/advisories/new).
+- **Giấy phép & Bản quyền:** Mã nguồn gốc do **CTU-OpenPaw** phát triển được cấp phép theo [`Apache-2.0`](LICENSE). Xem chi tiết quyền tác giả và thành phần bên thứ ba tại [`NOTICE`](NOTICE), [`COPYRIGHT.txt`](COPYRIGHT.txt) và lịch sử thay đổi tại [`CHANGELOG.md`](CHANGELOG.md).
