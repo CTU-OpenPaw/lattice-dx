@@ -120,6 +120,35 @@ async function findScopedParaDocument(db, documentId, organizationId = null, opt
   return doc;
 }
 
+function redactBankAccounts(text) {
+  return text.replace(
+    /(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)([A-Za-z]{2}\d{2}(?:[A-Za-z0-9]{6,30}|(?:[ -][A-Za-z0-9]{1,8}){1,8})|\d(?:[ -]?\d){7,19})(?![0-9A-Za-z-])/gi,
+    (full, prefix, rawAcct) => {
+      if (/^[A-Za-z]{2}\d{2}[ -]/.test(rawAcct)) {
+        const parts = rawAcct.split(/([ -])/);
+        const kept = [parts[0]];
+        let i = 1;
+        while (i + 1 < parts.length) {
+          const sep = parts[i];
+          const tok = parts[i + 1];
+          if (/\d/.test(tok) || /^[A-Z]{2,4}$/.test(tok)) {
+            kept.push(sep, tok);
+            i += 2;
+          } else {
+            break;
+          }
+        }
+        const acctOnly = kept.join('');
+        const compactLen = acctOnly.replace(/[ -]/g, '').length;
+        if (compactLen < 10) return full;
+        const trailing = rawAcct.slice(acctOnly.length);
+        return `${prefix}[REDACTED_BANK]${trailing}`;
+      }
+      return `${prefix}[REDACTED_BANK]`;
+    },
+  );
+}
+
 /**
  * Build a bounded, control-char-stripped, secret-redacted text preview in linear time.
  *
@@ -130,12 +159,18 @@ async function findScopedParaDocument(db, documentId, organizationId = null, opt
 function buildSafeTextPreview(text, maxLen = 500) {
   const safeMaxLen = Math.max(1, Number(maxLen) || 500);
   const bounded = String(text || '').slice(0, Math.max(safeMaxLen * 4, 2000));
-  return bounded
+  const redacted = bounded
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
     .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
     .replace(/(Bearer[ \t]+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
-    .replace(/(\b[a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)[ \t]*[:=][ \t]*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]')
     .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]')
+    .replace(/(\b[a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)[ \t]*[:=][ \t]*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]')
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]')
+    .replace(/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]');
+  return redactBankAccounts(redacted)
+    .replace(/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]')
+    .replace(/(?<![0-9A-Za-z-])0\d{11}(?![0-9A-Za-z-])/g, '[REDACTED_CCCD]')
+    .replace(/(?<![0-9A-Za-z-])(?:\+?84[\s.-]?|0)(?:3|5|7|8|9)(?:[\s.-]?\d){8}(?![0-9A-Za-z-])/g, '[REDACTED_PHONE]')
     .trim()
     .slice(0, safeMaxLen);
 }
@@ -293,7 +328,11 @@ async function syncDocumentChunks(db, docRow, {
     return { documentId, organizationId, chunksCreated: 0, neuralChunks: 0, fallbackChunks: 0, embeddingEngine: 'deterministic-fallback', skipped: true };
   }
 
-  const active = val(docRow, 'active') !== false;
+  const rawStatus = val(docRow, 'status');
+  const status = rawStatus == null || String(rawStatus).trim() === ''
+    ? 'active'
+    : String(rawStatus).trim().toLowerCase();
+  const active = val(docRow, 'active') !== false && status === 'active';
   if (!active) {
     await runParaDbWithOptionalTx(db, organizationId, async (transaction) => {
       if (typeof chunkRepo.destroy === 'function') {
@@ -670,9 +709,24 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       const mimeType = String(params.mimeType || '').trim().slice(0, 120);
       const extracted = extractTextFromBuffer(buffer, { filename, mimeType });
       if (!extracted.text || !extracted.text.trim()) {
+        if (extracted.hasImageStreams) {
+          throw failAction(
+            'PDF_SCANNED_OCR_REQUIRED',
+            400,
+            'Tệp PDF chỉ chứa hình ảnh scan và chưa có lớp văn bản. Vui lòng bật Remote OCR (DX_OCR_ENDPOINT) hoặc dùng tính năng OCR biểu mẫu.',
+          );
+        }
+        if (extracted.hasObjStm) {
+          throw failAction(
+            'PDF_OBJSTM_NO_TEXT',
+            400,
+            'Tệp PDF sử dụng nén Object Stream (/ObjStm) và chưa trích xuất được văn bản.',
+          );
+        }
         throw failAction('ATTACHMENT_NO_TEXT', 400, 'Không trích xuất được nội dung văn bản từ tệp đính kèm.');
       }
 
+      const safePreview = buildSafeTextPreview(extracted.text, 300);
       const syncResult = await syncDocumentChunks(db, doc, {
         attachmentText: extracted.text,
         attachmentFilename: filename,
@@ -682,7 +736,7 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
       if (!val(doc, 'summary') && typeof doc?.update === 'function') {
         try {
           await runParaRlsOp(db, val(doc, 'organizationId'), (transaction) => doc.update(
-            { summary: extracted.text.slice(0, 300) },
+            { summary: safePreview },
             { context: { skipParaChunkSync: true }, ...(transaction ? { transaction } : {}) },
           ));
         } catch {
@@ -697,7 +751,7 @@ function createParaActions(db, { env = process.env, fetchImpl = globalThis.fetch
         format: extracted.format,
         pageCount: extracted.pageCount,
         extractedChars: extracted.text.length,
-        preview: extracted.text.slice(0, 300),
+        preview: safePreview,
         chunksIndexed: syncResult.chunksCreated,
         embeddingEngine: syncResult.embeddingEngine,
       };

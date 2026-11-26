@@ -418,3 +418,43 @@ test('dxosStudio:seedShowcaseData enforces PG16 FORCE RLS context and blocks non
     else process.env.DX_PG_RLS_SESSION = prevRls;
   }
 });
+
+test('M5 P1-14: composePortals assigns lower sort to cockpit overview pages and domain-portal-composer attaches cockpit blocks to /p/cmms & /p/partner-claims', async () => {
+  const { composePortals } = require(path.join(PLUGIN_ROOT, 'src/server/portal-composer.js'));
+  const { upsertPortalPageForDomain } = require(path.join(PLUGIN_ROOT, 'src/server/domain-portal-composer.js'));
+
+  const db = makeDomainDb(['latticeCustomWorkOrders', 'latticeCustomPartnerClaims', 'latticeRequests', 'latticeIncidentCases', 'latticeOrders', 'latticeServiceTickets', 'latticeParaDocuments']);
+  const createdOrder = [];
+  await composePortals(db, {
+    applyBlueprint: async (doc) => {
+      createdOrder.push(doc.page?.title);
+      const r = await db.getRepository('desktopRoutes').create({
+        values: { type: 'flowPage', title: doc.page?.title, schemaUid: `pg-${createdOrder.length}`, sort: 0 },
+      });
+      await db.getRepository('desktopRoutesUiLayouts').create({ values: { uiLayoutUid: doc.navigation.layoutUid, desktopRouteId: r.id } });
+      return { target: { routeId: r.id, tabSchemaUid: `tab-${createdOrder.length}` } };
+    },
+  });
+
+  const ovServices = db.store.desktopRoutes.find((r) => r.title === 'Không gian P.A.R.A. & Dịch vụ');
+  const extraTickets = db.store.desktopRoutes.find((r) => r.title === 'Phiếu Dịch vụ Nội bộ');
+  assert.ok(ovServices && extraTickets);
+  assert.ok(ovServices.sort < extraTickets.sort, `Expected cockpit sort (${ovServices.sort}) < extra CRUD sort (${extraTickets.sort})`);
+
+  await upsertPortalPageForDomain(db, {
+    slug: 'cmms',
+    title: 'Bảo trì CMMS',
+    collectionName: 'latticeCustomWorkOrders',
+    fields: [{ name: 'workOrderCode', type: 'string' }],
+  });
+  await upsertPortalPageForDomain(db, {
+    slug: 'partner-claims',
+    title: 'Đối soát Đối tác',
+    collectionName: 'latticeCustomPartnerClaims',
+    fields: [{ name: 'claimCode', type: 'string' }],
+  });
+  assert.ok(db.store.flowModels.some((m) => m.uid === 'dxos-ov-cmms-hero' && m.use === 'DxosPortalHeroBlockModel'));
+  assert.ok(db.store.flowModels.some((m) => m.uid === 'dxos-ov-cmms-kpi' && m.use === 'DxosKpiMetricBlockModel'));
+  assert.ok(db.store.flowModels.some((m) => m.uid === 'dxos-ov-partner-claims-hero' && m.use === 'DxosPortalHeroBlockModel'));
+  assert.ok(db.store.flowModels.some((m) => m.uid === 'dxos-ov-partner-claims-bi-chart' && m.use === 'DxosBiChartBlockModel'));
+});

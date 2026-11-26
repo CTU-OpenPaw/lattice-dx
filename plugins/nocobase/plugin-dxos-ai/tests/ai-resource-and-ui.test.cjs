@@ -3150,3 +3150,114 @@ test('UI & SSE remediation: left-rail sidebar, Vietnamese plane metrics, Audit f
     global.localStorage = origStorage;
   }
 });
+
+test('T4-RW-01: portal-agent-launcher skips surfaceEvents SSE for inaccessible /p/<slug> while server assertPortalSseAcl keeps strict 403', async () => {
+  const { createPortalAgentLauncher } = require(path.join(PLUGIN_ROOT, 'src/client/portal-agent-launcher.js'));
+  const { createSurfaceEventsHandler } = require(path.join(PLUGIN_ROOT, 'src/server/surface-events.js'));
+
+  const origWin = global.window;
+  const origDoc = global.document;
+  const origFetch = global.fetch;
+  const origStorage = global.localStorage;
+  try {
+    const fetchUrls = [];
+    const depsChanged = (p, n) => !p || !n || p.length !== n.length || n.some((d, i) => d !== p[i]);
+    const makeHarness = () => {
+      const slots = []; const effects = []; let si = 0; let ei = 0; const cleanups = [];
+      const R = {
+        Fragment: 'Fragment',
+        createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+        useState: (init) => { const i = si++; if (!(i in slots)) slots[i] = typeof init === 'function' ? init() : init; return [slots[i], (v) => { slots[i] = typeof v === 'function' ? v(slots[i]) : v; }]; },
+        useEffect: (fn, deps) => { const i = ei++; effects[i] = { fn, deps, changed: !effects[i] || depsChanged(effects[i].deps, deps) }; },
+      };
+      const r = (Comp) => { si = 0; ei = 0; const t = Comp({ children: 'b' }); for (const ef of effects) if (ef.changed) { ef.changed = false; const c = ef.fn(); if (typeof c === 'function') cleanups.push(c); } return t; };
+      return { R, r, clean: () => cleanups.forEach((f) => f()) };
+    };
+
+    global.localStorage = { getItem: () => '' };
+    global.window = { location: { pathname: '/p/logistics-employee' }, addEventListener() {}, removeEventListener() {}, dispatchEvent() {} };
+    global.document = { visibilityState: 'visible', title: 'Logistics Employee', querySelector: () => null, addEventListener() {}, removeEventListener() {} };
+    global.fetch = async (url) => {
+      fetchUrls.push(String(url));
+      return {
+        ok: true,
+        body: { getReader: () => ({ read: async () => ({ done: true }), cancel: async () => {} }) },
+      };
+    };
+
+    // 1. ldx_manager on /p/logistics-employee: listAccessible excludes 'logistics-employee' -> NO SSE request
+    const mgrH = makeHarness();
+    const MgrLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-manager' },
+        getBaseURL: () => '/api/',
+        request: async (req) => {
+          if (req.url === 'latticePortals:listAccessible') {
+            return {
+              data: {
+                data: [
+                  { slug: 'operations', routePath: '/p/operations' },
+                  { slug: 'executive', routePath: '/p/executive' },
+                ],
+              },
+            };
+          }
+          return { data: { data: { isAdmin: false, employees: [{ username: 'dxos-ops' }] } } };
+        },
+      }),
+    }, mgrH.R, {}, {});
+    mgrH.r(MgrLauncher);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fetchUrls.some((u) => u.includes('dxosAi:surfaceEvents')), false, 'Inaccessible portal must NOT open dxosAi:surfaceEvents SSE');
+    mgrH.clean();
+
+    // 2. ldx_employee on /p/logistics-employee: listAccessible includes 'logistics-employee' -> opens SSE
+    global.window.__LATTICEDX_SSE_HUB__ = undefined;
+    const empH = makeHarness();
+    const EmpLauncher = createPortalAgentLauncher({
+      useAPIClient: () => ({
+        auth: { getToken: () => 'tok-employee' },
+        getBaseURL: () => '/api/',
+        request: async (req) => {
+          if (req.url === 'latticePortals:listAccessible') {
+            return {
+              data: {
+                data: [
+                  { slug: 'logistics-employee', routePath: '/p/logistics-employee' },
+                  { slug: 'services', routePath: '/p/services' },
+                ],
+              },
+            };
+          }
+          return { data: { data: { isAdmin: false, employees: [{ username: 'dxos-ops' }] } } };
+        },
+      }),
+    }, empH.R, {}, {});
+    empH.r(EmpLauncher);
+    await new Promise((r) => setTimeout(r, 30));
+    assert.equal(fetchUrls.some((u) => u.includes('dxosAi:surfaceEvents?portalSlug=logistics-employee')), true, 'Accessible portal MUST open dxosAi:surfaceEvents SSE');
+    empH.clean();
+
+    // 3. Server assertPortalSseAcl remains strict 403 PORTAL_ACL_FORBIDDEN for ldx_manager on logistics-employee
+    const db = makeMockDb();
+    db.stores.rolesUsers = [{ userId: 42, roleName: 'ldx_manager' }];
+    db.stores.latticeEmployees = [{ id: 42, userId: 42, organizationId: 'native-ui-lab', active: true }];
+    db.stores.uiLayouts = [{ uid: 'ldx-portal-logistics-employee', enabled: true }];
+    db.stores.desktopRoutesUiLayouts = [{ desktopRouteId: 901, uiLayoutUid: 'ldx-portal-logistics-employee' }];
+    db.stores.rolesDesktopRoutes = [{ desktopRouteId: 901, roleName: 'ldx_employee' }];
+    const handler = createSurfaceEventsHandler({ db });
+    await assert.rejects(
+      () => handler({
+        state: { currentUser: { id: 42 }, currentRoles: ['ldx_manager'] },
+        action: { params: { portalSlug: 'logistics-employee' } },
+        query: {},
+      }),
+      (err) => err.status === 403 && err.code === 'PORTAL_ACL_FORBIDDEN',
+    );
+  } finally {
+    global.window = origWin;
+    global.document = origDoc;
+    global.fetch = origFetch;
+    global.localStorage = origStorage;
+  }
+});

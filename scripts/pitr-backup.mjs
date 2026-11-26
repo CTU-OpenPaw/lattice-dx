@@ -13,10 +13,19 @@ import { fileURLToPath } from 'node:url';
 const ISO_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/;
 const STANZA_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const S3_PREFIX_RE = /^s3:\/\/[a-z0-9][a-z0-9._-]{1,62}(?:\/[A-Za-z0-9._-]+)*\/?$/;
+const POSIX_PATH_RE = /^\/[A-Za-z0-9._/-]+$/;
+
+function assertSafePosixPath(value, label) {
+  const clean = typeof value === 'string' ? value.trim() : '';
+  if (!clean || !POSIX_PATH_RE.test(clean) || clean.split('/').includes('..')) {
+    throw new Error(`Invalid ${label} path`);
+  }
+  return clean.replace(/\/+$/, '') || '/';
+}
 
 export function parsePitrArgs(argv) {
   if (!Array.isArray(argv) || argv.length === 0) {
-    throw new Error('Usage: node scripts/pitr-backup.mjs check-config | base-backup | list | restore-plan --target-time=<ISO8601> [--backend=wal-g|pgbackrest] [--allow-unencrypted-local] [--execute]');
+    throw new Error('Usage: node scripts/pitr-backup.mjs check-config | base-backup | list | restore-plan --target-time=<ISO8601> [--backend=wal-g|pgbackrest|local-gz] [--allow-unencrypted-local] [--execute]');
   }
   const [action, ...rest] = argv;
   if (!['check-config', 'base-backup', 'list', 'restore-plan'].includes(action)) {
@@ -30,7 +39,7 @@ export function parsePitrArgs(argv) {
   for (const arg of rest) {
     if (arg.startsWith('--backend=')) {
       const value = arg.slice('--backend='.length);
-      if (!['wal-g', 'pgbackrest'].includes(value)) {
+      if (!['wal-g', 'pgbackrest', 'local-gz'].includes(value)) {
         throw new Error(`Unsupported PITR backend: ${value}`);
       }
       backend = value;
@@ -106,6 +115,31 @@ export function checkPitrConfig({ backend = 'wal-g', allowUnencryptedLocal = fal
     };
   }
 
+  if (backend === 'local-gz') {
+    if (!allowUnencryptedLocal) {
+      throw new Error('Local .gz WAL PITR requires --allow-unencrypted-local when using unencrypted local disk archives');
+    }
+    const walDir = assertSafePosixPath(
+      typeof env?.PITR_WAL_DIR === 'string' && env.PITR_WAL_DIR.trim()
+        ? env.PITR_WAL_DIR
+        : '/var/lib/postgresql/wal-archive',
+      'PITR_WAL_DIR',
+    );
+    const baseBackupDir = assertSafePosixPath(
+      typeof env?.PITR_BASEBACKUP_DIR === 'string' && env.PITR_BASEBACKUP_DIR.trim()
+        ? env.PITR_BASEBACKUP_DIR
+        : '/var/lib/postgresql/basebackups',
+      'PITR_BASEBACKUP_DIR',
+    );
+    return {
+      ok: true,
+      backend: 'local-gz',
+      walDir,
+      baseBackupDir,
+      encrypted: false,
+    };
+  }
+
   throw new Error(`Unsupported PITR backend: ${backend}`);
 }
 
@@ -117,7 +151,10 @@ export function buildPitrPlan({
   env = process.env,
 } = {}) {
   const status = checkPitrConfig({ backend, allowUnencryptedLocal, env });
-  const pgData = typeof env?.PGDATA === 'string' && env.PGDATA.trim() ? env.PGDATA.trim() : '/var/lib/postgresql/data';
+  const pgData = assertSafePosixPath(
+    typeof env?.PGDATA === 'string' && env.PGDATA.trim() ? env.PGDATA.trim() : '/var/lib/postgresql/data',
+    'PGDATA',
+  );
 
   if (action === 'check-config') {
     return { ...status, action };
@@ -165,6 +202,42 @@ export function buildPitrPlan({
         action,
         command: 'pgbackrest',
         args: [`--stanza=${stanza}`, '--type=time', `--target=${targetTime}`, 'restore'],
+      };
+    }
+  }
+
+  if (backend === 'local-gz') {
+    const latestArchive = `${status.baseBackupDir}/latest/base.tar.gz`;
+    if (action === 'base-backup') {
+      return {
+        ...status,
+        action,
+        command: 'pg_basebackup',
+        args: ['-D', `${status.baseBackupDir}/latest`, '-Ft', '-z', '-X', 'stream', '-c', 'fast'],
+      };
+    }
+    if (action === 'list') {
+      return {
+        ...status,
+        action,
+        command: 'find',
+        args: [status.baseBackupDir, status.walDir, '-maxdepth', '2', '-type', 'f'],
+      };
+    }
+    if (action === 'restore-plan') {
+      if (!targetTime || !ISO_TIMESTAMP_RE.test(targetTime)) {
+        throw new Error('Valid --target-time is required');
+      }
+      return {
+        ...status,
+        action,
+        command: 'tar',
+        args: ['-xzf', latestArchive, '-C', pgData],
+        recoveryConfig: {
+          restore_command: `gzip -dc "${status.walDir}/%f.gz" > "%p"`,
+          recovery_target_time: targetTime,
+          recovery_target_action: 'promote',
+        },
       };
     }
   }

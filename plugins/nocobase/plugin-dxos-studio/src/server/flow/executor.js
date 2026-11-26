@@ -15,6 +15,7 @@ const { validateFlowGraph } = require('./validator');
 const { claimSuspendedRun, createRunRecord, generateResumeToken, hashResumeToken, suspendRun } = require('./durable-store');
 const { getOrmTriggerDepth, resolveTrustedOrgId, runAutomationWithRls, runNodeInRlsSavepoint, runRlsAwareBatch, runWithOrmDepth } = require('./security-helpers');
 const { sanitizeTraceData } = require('./trace-sanitizer');
+const { collectSubgraph, collectPreSettledNodes, buildResumeInitInputs, executeLoopBody, resumeLoopStack } = require('./loop-resume');
 const registry = require('./registry');
 
 const getEngine = () => require('../automation-engine');
@@ -40,7 +41,6 @@ function recordNodeOutput(execState, node, output, status, error = null) {
   execState.steps[node.id] = stepObj;
   if (Number.isInteger(node.config?.stepIndex)) execState.steps[node.config.stepIndex] = stepObj;
 }
-function collectSubgraph(startIds, edges, allowedSet) { const [v, q] = [new Set(), [...startIds]]; for (let i = 0; i < q.length; i += 1) if (!v.has(q[i]) && (!allowedSet || allowedSet.has(q[i]))) { v.add(q[i]); edges.forEach((e) => { if (e.source === q[i] && !v.has(e.target)) q.push(e.target); }); } return v; }
 const RESERVED_CTX = new Set(['event', 'data', 'dmn', 'dmnResult', 'steps', 'nodes', 'loop', 'actor', 'organizationId']);
 const resolveFlowContext = (node, nodeInput, execState) => { const k = node.type === 'control.loop' && isPlainObject(nodeInput) ? String(node.config?.itemsPath || 'items').trim().split('.')[0] : ''; return (k && !RESERVED_CTX.has(k) && execState[k] === undefined && execState.data?.[k] === undefined && nodeInput[k] !== undefined) ? { ...execState, [k]: nodeInput[k] } : execState; };
 const computeRunStatus = (traces, halted) => !traces.some((t) => t.status === 'failed') ? (halted ? 'failed' : 'completed') : traces.some((t) => t.status === 'completed' && !String(t.type || '').startsWith('trigger.')) ? 'partial' : 'failed';
@@ -59,15 +59,17 @@ async function runSingleNode({ node, nodeInput, reg, execState, db, app, options
     return { ok: true, node, input: safeIn, output: res?.output ?? null, nextPort: ports[0], nextPorts: ports, durationMs, loopMeta };
   } catch (err) { recordNodeOutput(execState, node, null, 'failed', err?.message || String(err)); return { ok: false, node, input: safeIn, output: null, error: err?.message || String(err), durationMs: Math.max(0, Date.now() - t0), loopMeta }; }
 }
-async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, execState, nodeStatesJson, stepTracesJson, reg, db, app, options, helpers, loopMeta = null }) {
+async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, preSettled = null, execState, nodeStatesJson, stepTracesJson, reg, db, app, options, helpers, loopMeta = null }) {
   const subSet = new Set(subTopo);
   const [inEdges, outEdges, activeInputs] = [new Map(subTopo.map((id) => [id, edges.filter((e) => e.target === id && subSet.has(e.source))])), new Map(subTopo.map((id) => [id, edges.filter((e) => e.source === id && subSet.has(e.target))])), new Map(subTopo.map((id) => [id, [...(initialInputs.get(id) || [])]]))];
-  const [settled, loopOwned, localStatuses] = [new Set(), new Set(), new Map()];
+  const [settled, loopOwned, localStatuses] = [new Set(preSettled || []), new Set(), new Map()];
+  settled.forEach((id) => localStatuses.set(id, 'completed'));
   subTopo.filter((id) => nodeMap.get(id)?.type === 'control.loop').forEach((id) => collectSubgraph((outEdges.get(id) || []).filter((e) => e.sourceHandle === 'item').map((e) => e.target), edges, subSet).forEach((b) => loopOwned.add(b)));
   let [halted, haltError, suspended] = [false, null, null];
   const markSkipped = (id, reason) => { settled.add(id); localStatuses.set(id, 'skipped'); if (!loopMeta) nodeStatesJson[id] = { status: 'skipped', reason }; };
-  while (settled.size < subTopo.length && !halted && !suspended) {
-    const ready = subTopo.filter((id) => !settled.has(id) && !loopOwned.has(id) && (inEdges.get(id) || []).every((e) => settled.has(e.source)));
+  const isPredReady = (srcId) => settled.has(srcId) && localStatuses.get(srcId) !== 'suspended';
+  while (settled.size < subTopo.length && !halted) {
+    const ready = subTopo.filter((id) => !settled.has(id) && !loopOwned.has(id) && ((nodeMap.get(id)?.type === 'control.merge' && nodeMap.get(id)?.config?.mode === 'first_completed' && (activeInputs.get(id) || []).length > 0) || (inEdges.get(id) || []).every((e) => isPredReady(e.source))));
     if (!ready.length) break;
     const toRun = [];
     for (const id of ready) {
@@ -84,37 +86,18 @@ async function traverseDag({ graph, subTopo, nodeMap, edges, initialInputs, exec
     for (const r of await runRlsAwareBatch(db, toRun, ({ node, nodeInput }) => runSingleNode({ node, nodeInput, reg, execState, db, app, options, helpers, loopMeta }))) {
       const [n, safeOut] = [r.node, sanitizeTraceData(r.output ?? null)]; settled.add(n.id);
       stepTracesJson.push({ nodeId: n.id, type: n.type, label: n.label, status: r.suspend ? 'suspended' : (r.ok ? 'completed' : 'failed'), input: r.input ?? null, output: safeOut, error: r.error || null, durationMs: r.durationMs, ...(options.dryRun ? { simulated: true } : {}), ...(loopMeta ? { loopNodeId: loopMeta.nodeId, loopIteration: loopMeta.index } : {}) });
-      if (r.suspend) { localStatuses.set(n.id, 'suspended'); nodeStatesJson[n.id] = { status: 'suspended', input: r.input ?? null, output: safeOut, suspend: r.suspend, durationMs: r.durationMs }; suspended = { node: n, suspend: r.suspend, output: r.output }; }
+      if (r.suspend) { localStatuses.set(n.id, 'suspended'); nodeStatesJson[n.id] = { status: 'suspended', input: r.input ?? null, output: safeOut, suspend: r.suspend, durationMs: r.durationMs }; if (!suspended) suspended = { node: n, suspend: r.suspend, output: r.output }; }
       else if (!r.ok) {
         localStatuses.set(n.id, 'failed'); nodeStatesJson[n.id] = { status: 'failed', input: r.input ?? null, output: safeOut, error: r.error, durationMs: r.durationMs };
         const errEdges = (outEdges.get(n.id) || []).filter((e) => e.sourceHandle === 'error');
         if (errEdges.length) errEdges.forEach((e) => activeInputs.get(e.target)?.push({ from: n.id, output: { error: r.error, output: r.output } }));
         else if (!n.continueOnFail && graph.settings?.errorPolicy !== 'continue') { halted = true; haltError = r.error; }
       } else if (n.type === 'control.loop') {
-        const items = Array.isArray(r.output?.items) ? r.output.items : [];
-        const bodySet = collectSubgraph((outEdges.get(n.id) || []).filter((e) => e.sourceHandle === 'item').map((e) => e.target), edges, subSet);
-        const [localTopo, loopResults] = [subTopo.filter((id) => bodySet.has(id)), []];
-        localTopo.forEach((id) => settled.add(id));
-        if (items.length && localTopo.length) {
-          for (let idx = 0; idx < items.length; idx += 1) {
-            execState.loop = { item: items[idx], index: idx, count: items.length };
-            const iterInit = new Map();
-            (outEdges.get(n.id) || []).filter((e) => e.sourceHandle === 'item' && bodySet.has(e.target)).forEach((e) => iterInit.set(e.target, [...(iterInit.get(e.target) || []), { from: n.id, output: items[idx] }]));
-            const traceStart = stepTracesJson.length;
-            const iterRes = await traverseDag({ graph, subTopo: localTopo, nodeMap, edges, initialInputs: iterInit, execState, nodeStatesJson, stepTracesJson, reg, db, app, options, helpers, loopMeta: { nodeId: n.id, index: idx } });
-            const iterDone = !iterRes.halted && !iterRes.suspended ? stepTracesJson.slice(traceStart).filter((t) => t.status === 'completed') : [];
-            loopResults.push(iterDone.length ? (iterDone.at(-1).output ?? null) : null);
-            if (iterRes.suspended) { suspended = iterRes.suspended; break; }
-            if (iterRes.halted) { halted = true; haltError = iterRes.haltError; break; }
-          }
-          execState.loop = null;
-          if (!halted && !suspended) localTopo.forEach((id) => { if (!nodeStatesJson[id]) nodeStatesJson[id] = { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' }; });
-        } else localTopo.forEach((id) => { nodeStatesJson[id] = { status: 'skipped', reason: 'BRANCH_NOT_TAKEN' }; });
-        const finalOut = { ...(r.output || {}), results: loopResults }; const safeFinal = sanitizeTraceData(finalOut);
-        localStatuses.set(n.id, suspended ? 'suspended' : 'completed');
-        recordNodeOutput(execState, n, finalOut, suspended ? 'suspended' : 'completed');
-        nodeStatesJson[n.id] = suspended ? { status: 'suspended', input: r.input ?? null, output: safeFinal, durationMs: r.durationMs } : { status: 'completed', input: r.input ?? null, output: safeFinal, nextPort: 'done', nextPorts: ['done'], durationMs: r.durationMs };
-        if (!halted && !suspended) (outEdges.get(n.id) || []).filter((e) => e.sourceHandle === 'done').forEach((e) => activeInputs.get(e.target)?.push({ from: n.id, output: finalOut }));
+        const lRes = await executeLoopBody({ n, r, graph, subTopo, nodeMap, edges, outEdges, subSet, activeInputs, execState, nodeStatesJson, stepTracesJson, reg, db, app, options, helpers, traverseDag, recordNodeOutput });
+        lRes.localTopo.forEach((id) => settled.add(id));
+        if (lRes.suspended) { if (!suspended) suspended = lRes.suspended; localStatuses.set(n.id, 'suspended'); }
+        else if (lRes.halted) { halted = true; haltError = lRes.haltError; localStatuses.set(n.id, 'failed'); }
+        else localStatuses.set(n.id, 'completed');
       } else {
         localStatuses.set(n.id, 'completed');
         nodeStatesJson[n.id] = { status: 'completed', input: r.input ?? null, output: safeOut, nextPort: r.nextPort, nextPorts: r.nextPorts, durationMs: r.durationMs };
@@ -254,21 +237,28 @@ async function resumeFlowRun(db, { organizationId, runUid, decision = 'approved'
       execState.runUid = run.runUid;
       const nodeMap = new Map(graph.nodes.map((n) => [n.id, n]));
       Object.entries(nodeStatesJson).forEach(([nid, st]) => { const n = nodeMap.get(nid); if (n) recordNodeOutput(execState, n, st.output ?? null, st.status || 'completed', st.error || null); });
-      const resumedOut = { ...(isPlainObject(nodeStatesJson[sNode.id]?.output) ? nodeStatesJson[sNode.id].output : {}), status: resumedPort, decision: resumedPort, payload: execState.resumePayload, resumedAt: new Date().toISOString(), ...(run._delegation ? { delegatedFromUserId: run._delegation.delegatorUserId, delegationUid: run._delegation.delegationUid } : {}) };
+      const resumedOut = { ...(isPlainObject(nodeStatesJson[sNode.id]?.output) ? nodeStatesJson[sNode.id].output : {}), status: resumedPort, decision: resumedPort, payload: execState.resumePayload, resumedAt: new Date().toISOString(), ...(run._delegation ? { delegatedFromUserId: run._delegation.delegatedFromUserId ?? run._delegation.delegatorUserId, delegationUid: run._delegation.delegationUid } : {}) };
       recordNodeOutput(execState, sNode, resumedOut, 'completed');
       const sTrace = [...stepTracesJson].reverse().find((t) => t.nodeId === sNode.id);
       const origIn = nodeStatesJson[sNode.id]?.input ?? sTrace?.input ?? null;
       const safeResumed = sanitizeTraceData(resumedOut);
       nodeStatesJson[sNode.id] = { status: 'completed', input: origIn, output: safeResumed, nextPort: resumedPort, nextPorts: [resumedPort] };
       if (sTrace) Object.assign(sTrace, { status: 'completed', input: origIn, output: safeResumed });
-      const downSet = collectSubgraph(graph.edges.filter((e) => e.source === sNode.id).map((e) => e.target), graph.edges);
-      const subTopo = validation.topoOrder.filter((id) => downSet.has(id));
-      const initInputs = new Map(subTopo.map((id) => [id, []]));
-      graph.edges.filter((e) => downSet.has(e.target)).forEach((e) => {
-        if (e.source === sNode.id && e.sourceHandle === resumedPort) initInputs.get(e.target)?.push({ from: sNode.id, output: resumedOut });
-        else if (!downSet.has(e.source) && nodeStatesJson[e.source]?.status === 'completed' && (nodeStatesJson[e.source].nextPorts || [nodeStatesJson[e.source].nextPort || 'main']).includes(e.sourceHandle)) initInputs.get(e.target)?.push({ from: e.source, output: nodeStatesJson[e.source].output });
-      });
-      const execRes = await runWithOrmDepth(Number(event.depth || 0) + 1, () => traverseDag({ graph, subTopo, nodeMap, edges: graph.edges, initialInputs: initInputs, execState, nodeStatesJson, stepTracesJson, reg, db, app: scopedOpts.app || db?.app, options: scopedOpts, helpers: buildNodeHelpers(db, scopedOpts.app || db?.app, scopedOpts, execState) }));
+      const helpers = buildNodeHelpers(db, scopedOpts.app || db?.app, scopedOpts, execState);
+      const rawStack = Array.isArray(nodeStatesJson.loopCursors) && nodeStatesJson.loopCursors.length ? nodeStatesJson.loopCursors : (nodeStatesJson.loopCursor ? [nodeStatesJson.loopCursor] : []);
+      let [anchorId, anchorPort, anchorOut, execRes] = [sNode.id, resumedPort, resumedOut, { halted: false, haltError: null, suspended: null }];
+      if (rawStack.length) {
+        execRes = await runWithOrmDepth(Number(event.depth || 0) + 1, () => resumeLoopStack({ rawStack, sNode, resumedPort, resumedOut, graph, validation, nodeMap, execState, nodeStatesJson, stepTracesJson, reg, db, app: scopedOpts.app || db?.app, options: scopedOpts, helpers, traverseDag, recordNodeOutput }));
+        if (!execRes.suspended && !execRes.halted) [anchorId, anchorPort, anchorOut] = [execRes.anchorId, execRes.anchorPort, execRes.anchorOut];
+      }
+      if (!execRes.suspended && !execRes.halted) {
+        const anchorIsLoopDone = nodeMap.get(anchorId)?.type === 'control.loop' && anchorPort === 'done';
+        const downSet = collectSubgraph(graph.edges.filter((e) => e.source === anchorId && (!anchorIsLoopDone || e.sourceHandle === 'done')).map((e) => e.target), graph.edges);
+        const subTopo = validation.topoOrder.filter((id) => downSet.has(id));
+        const preSettled = collectPreSettledNodes(subTopo, graph.edges, nodeMap, nodeStatesJson, null, anchorId);
+        const initInputs = buildResumeInitInputs(subTopo, downSet, graph.edges, anchorId, anchorPort, anchorOut, nodeStatesJson, preSettled);
+        execRes = await runWithOrmDepth(Number(event.depth || 0) + 1, () => traverseDag({ graph, subTopo, nodeMap, edges: graph.edges, initialInputs: initInputs, preSettled, execState, nodeStatesJson, stepTracesJson, reg, db, app: scopedOpts.app || db?.app, options: scopedOpts, helpers }));
+      }
       return finalizeDagRun(db, { organizationId: orgId, runUid: run.runUid, execRes, execState, nodeStatesJson, stepTracesJson, triggerPayloadJson: isPlainObject(run.triggerPayloadJson) ? tp : { event, data: event.data, record: tp.record ?? null }, graphSnapshotJson: graph, dryRun, fallbackRecord: run, startedMs: run.startedAt ? new Date(run.startedAt).getTime() : Date.now() });
     });
   } catch (err) {

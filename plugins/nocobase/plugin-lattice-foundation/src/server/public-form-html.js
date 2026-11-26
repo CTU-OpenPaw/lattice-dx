@@ -108,8 +108,44 @@ function buildClientScriptSource() {
   function localizeFormError(msg) {
     var text = String(msg || '').trim();
     if (!text || text === 'Public form not found or inactive.') {
-      return 'Bi\u1ec3u m\u1eabu c\u00f4ng khai kh\u00f4ng t\u1ed3n t\u1ea1i ho\u1eb7c \u0111\u00e3 ng\u1eebng ti\u1ebfp nh\u1eadn.';
+      return 'Bi\\u1ec3u m\\u1eabu c\\u00f4ng khai kh\\u00f4ng t\\u1ed3n t\\u1ea1i ho\\u1eb7c \\u0111\\u00e3 ng\\u1eebng ti\\u1ebfp nh\\u1eadn.';
     }
+    var lower = text.toLowerCase();
+    if (lower.includes('access token') || lower.includes('form_access_token_invalid')) {
+      return 'M\\u00e3 truy c\\u1eadp bi\\u1ec3u m\\u1eabu (Access Token) kh\\u00f4ng h\\u1ee3p l\\u1ec7.';
+    }
+    if (lower.includes('rate limit') || lower.includes('too many requests')) {
+      return 'B\\u1ea1n g\\u1eedi qu\\u00e1 nhanh. Vui l\\u00f2ng ch\\u1edd \\u00edt ph\\u00fat r\\u1ed3i th\\u1eed l\\u1ea1i.';
+    }
+    if (lower.includes('bot protection') || lower.includes('form_bot_detected')) {
+      return 'Y\\u00eau c\\u1ea7u b\\u1ecb t\\u1eeb ch\\u1ed1i b\\u1edfi b\\u1ed9 l\\u1ecdc ch\\u1ed1ng spam.';
+    }
+    if (lower.includes('invalid status lookup credentials') || lower.includes('form_status_unauthorized')) {
+      return 'M\\u00e3 h\\u1ed3 s\\u01a1 ho\\u1eb7c m\\u00e3 tra c\\u1ee9u tr\\u1ea1ng th\\u00e1i kh\\u00f4ng \\u0111\\u00fang.';
+    }
+    if (lower.includes('is required')) {
+      return 'Vui l\\u00f2ng \\u0111i\\u1ec1n \\u0111\\u1ea7y \\u0111\\u1ee7 c\\u00e1c tr\\u01b0\\u1eddng b\\u1eaft bu\\u1ed9c.';
+    }
+    if (lower.includes('exceeds max length')) {
+      return 'N\\u1ed9i dung nh\\u1eadp v\\u01b0\\u1ee3t qu\\u00e1 \\u0111\\u1ed9 d\\u00e0i cho ph\\u00e9p.';
+    }
+    if (lower.includes('valid email')) {
+      return 'Email kh\\u00f4ng h\\u1ee3p l\\u1ec7. Vui l\\u00f2ng ki\\u1ec3m tra l\\u1ea1i.';
+    }
+    if (lower.includes('file type') || lower.includes('not allowed for')) {
+      return '\\u0110\\u1ecbnh d\\u1ea1ng t\\u1ec7p kh\\u00f4ng \\u0111\\u01b0\\u1ee3c h\\u1ed7 tr\\u1ee3 (ch\\u1ec9 nh\\u1eadn PDF, PNG, JPEG, WebP, TXT).';
+    }
+    if (lower.includes('exceeds maximum size') || lower.includes('too large')) {
+      return 'Dung l\\u01b0\\u1ee3ng t\\u1ec7p v\\u01b0\\u1ee3t qu\\u00e1 gi\\u1edbi h\\u1ea1n 2 MB.';
+    }
+    if (lower.includes('does not match declared mime') || lower.includes('invalid base64') || lower.includes('empty file')) {
+      return 'N\\u1ed9i dung t\\u1ec7p kh\\u00f4ng h\\u1ee3p l\\u1ec7 ho\\u1eb7c b\\u1ecb gi\\u1ea3 m\\u1ea1o \\u0111\\u1ecbnh d\\u1ea1ng.';
+    }
+    if (lower.includes('http 401')) return 'X\\u00e1c th\\u1ef1c kh\\u00f4ng h\\u1ee3p l\\u1ec7 (401).';
+    if (lower.includes('http 403')) return 'Kh\\u00f4ng c\\u00f3 quy\\u1ec1n th\\u1ef1c hi\\u1ec7n thao t\\u00e1c n\\u00e0y (403).';
+    if (lower.includes('http 404')) return 'Kh\\u00f4ng t\\u00ecm th\\u1ea5y bi\\u1ec3u m\\u1eabu ho\\u1eb7c h\\u1ed3 s\\u01a1 (404).';
+    if (lower.includes('http 429')) return 'Qu\\u00e1 nhi\\u1ec1u y\\u00eau c\\u1ea7u. Vui l\\u00f2ng th\\u1eed l\\u1ea1i sau.';
+    if (lower.includes('http 5')) return 'M\\u00e1y ch\\u1ee7 \\u0111ang b\\u1eadn. Vui l\\u00f2ng th\\u1eed l\\u1ea1i sau.';
     return text;
   }
 
@@ -188,11 +224,13 @@ function buildClientScriptSource() {
 
   var formArea = el('div');
   var receiptArea = el('div');
+  var lookupArea = el('div');
   var statusErrorBox = el('div', { 'data-testid': 'public-form-status-error', role: 'alert', class: 'dxos-alert dxos-alert-warn dxos-hidden' });
   var statusArea = el('div');
 
   page.appendChild(formArea);
   page.appendChild(receiptArea);
+  page.appendChild(lookupArea);
   page.appendChild(statusErrorBox);
   page.appendChild(statusArea);
   root.appendChild(page);
@@ -208,7 +246,7 @@ function buildClientScriptSource() {
   }
 
   function showStatusError(msg) {
-    statusErrorBox.textContent = String(msg || 'Kh\\u00f4ng th\\u1ec3 tra c\\u1ee9u tr\\u1ea1ng th\\u00e1i h\\u1ed3 s\\u01a1.');
+    statusErrorBox.textContent = localizeFormError(msg || 'Kh\\u00f4ng th\\u1ec3 tra c\\u1ee9u tr\\u1ea1ng th\\u00e1i h\\u1ed3 s\\u01a1.');
     statusErrorBox.classList.remove('dxos-hidden');
   }
 
@@ -324,6 +362,7 @@ function buildClientScriptSource() {
     wrap.appendChild(el('label', { class: 'dxos-label' }, labelText));
 
     var control;
+    var fileState = null;
     if (field.type === 'text') {
       control = el('textarea', {
         name: field.name,
@@ -333,6 +372,25 @@ function buildClientScriptSource() {
         placeholder: field.placeholder || '',
         class: 'dxos-input',
       });
+    } else if (field.type === 'file') {
+      var fileContainer = el('div', { class: 'dxos-file-box' });
+      control = el('input', {
+        type: 'file',
+        name: field.name,
+        accept: '.pdf,.png,.jpg,.jpeg,.webp,.txt,application/pdf,image/png,image/jpeg,image/webp,text/plain',
+        'data-testid': 'public-form-file-input-' + field.name,
+        class: 'dxos-input',
+      });
+      var fileInfoEl = el('div', { class: 'dxos-meta-sub dxos-hidden' });
+      var fileClearBtn = el('button', {
+        type: 'button',
+        'data-testid': 'public-form-file-clear-' + field.name,
+        class: 'dxos-btn dxos-btn-secondary dxos-hidden',
+      }, 'X\\u00f3a t\\u1ec7p');
+      fileState = { data: null, infoEl: fileInfoEl, clearBtn: fileClearBtn };
+      fileContainer.appendChild(control);
+      fileContainer.appendChild(fileInfoEl);
+      fileContainer.appendChild(fileClearBtn);
     } else if (field.type === 'select' && Array.isArray(field.options)) {
       control = el('select', {
         name: field.name,
@@ -380,10 +438,52 @@ function buildClientScriptSource() {
     };
     control.addEventListener('input', clearFieldErr);
     control.addEventListener('change', clearFieldErr);
-    wrap.appendChild(control);
+    if (field.type === 'file' && fileState) {
+      var ALLOWED_MIMES = { 'application/pdf': 1, 'image/png': 1, 'image/jpeg': 1, 'image/webp': 1, 'text/plain': 1 };
+      fileState.clearBtn.addEventListener('click', function () {
+        fileState.data = null;
+        control.value = '';
+        fileState.infoEl.textContent = '';
+        fileState.infoEl.classList.add('dxos-hidden');
+        fileState.clearBtn.classList.add('dxos-hidden');
+        clearFieldErr();
+      });
+      control.addEventListener('change', function (ev) {
+        var f = ev && ev.target && ev.target.files && ev.target.files[0];
+        if (!f) return;
+        var fType = String(f.type || '').toLowerCase();
+        if (fType && !ALLOWED_MIMES[fType]) {
+          setControlError(control, fieldErrorEl, '\\u0110\\u1ecbnh d\\u1ea1ng t\\u1ec7p kh\\u00f4ng \\u0111\\u01b0\\u1ee3c h\\u1ed7 tr\\u1ee3 (ch\\u1ec9 nh\\u1eadn PDF, PNG, JPEG, WebP, TXT).');
+          control.value = '';
+          return;
+        }
+        if (Number(f.size) > 2 * 1024 * 1024) {
+          setControlError(control, fieldErrorEl, 'Dung l\\u01b0\\u1ee3ng t\\u1ec7p v\\u01b0\\u1ee3t qu\\u00e1 2 MB.');
+          control.value = '';
+          return;
+        }
+        var ReaderCtor = typeof FileReader !== 'undefined' ? FileReader : null;
+        if (!ReaderCtor) return;
+        var reader = new ReaderCtor();
+        reader.onload = function () {
+          var resStr = typeof reader.result === 'string' ? reader.result : '';
+          var comma = resStr.indexOf(',');
+          var b64 = comma >= 0 ? resStr.slice(comma + 1) : '';
+          fileState.data = { filename: f.name || 'attachment', mimeType: fType || 'application/octet-stream', contentBase64: b64 };
+          fileState.infoEl.textContent = (f.name || 'attachment') + ' (' + Math.max(1, Math.round(Number(f.size || 0) / 1024)) + ' KB)';
+          fileState.infoEl.classList.remove('dxos-hidden');
+          fileState.clearBtn.classList.remove('dxos-hidden');
+          clearFieldErr();
+        };
+        reader.readAsDataURL(f);
+      });
+      wrap.appendChild(fileContainer);
+    } else {
+      wrap.appendChild(control);
+    }
     wrap.appendChild(fieldErrorEl);
     formEl.appendChild(wrap);
-    fieldControls.push({ field: field, control: control, errorEl: fieldErrorEl });
+    fieldControls.push({ field: field, control: control, errorEl: fieldErrorEl, fileState: fileState });
   });
 
   formEl.appendChild(hpInput);
@@ -437,6 +537,10 @@ function buildClientScriptSource() {
       if (f.type === 'boolean') {
         if (f.required && !ctrl.checked) {
           msg = 'Vui l\\u00f2ng x\\u00e1c nh\\u1eadn ' + label + '.';
+        }
+      } else if (f.type === 'file') {
+        if (f.required && !(entry.fileState && entry.fileState.data)) {
+          msg = 'Vui l\\u00f2ng \\u0111\\u00ednh k\\u00e8m ' + label + '.';
         }
       } else {
         var raw = String(ctrl.value || '');
@@ -494,6 +598,10 @@ function buildClientScriptSource() {
     fieldControls.forEach(function (entry) {
       if (entry.field.type === 'boolean') {
         values[entry.field.name] = Boolean(entry.control.checked);
+      } else if (entry.field.type === 'file') {
+        if (entry.fileState && entry.fileState.data) {
+          values[entry.field.name] = entry.fileState.data;
+        }
       } else {
         values[entry.field.name] = entry.control.value;
       }
@@ -541,6 +649,7 @@ function buildClientScriptSource() {
         tokenRow.appendChild(copyBtn);
         rec.appendChild(tokenRow);
         rec.appendChild(el('div', { class: 'dxos-meta-sub' }, 'Trạng thái ban đầu: ' + (res.status || 'submitted') + ' · Lúc: ' + formatTimestampVi(res.submittedAt)));
+        var recActions = el('div', { class: 'dxos-token-row' });
         var checkBtn = el('button', {
           type: 'button',
           'data-testid': 'public-form-check-status-btn',
@@ -549,7 +658,32 @@ function buildClientScriptSource() {
         checkBtn.addEventListener('click', function () {
           checkStatus(formMeta.slug, res.submissionCode, res.statusToken, checkBtn);
         });
-        rec.appendChild(checkBtn);
+        var resetBtn = el('button', {
+          type: 'button',
+          'data-testid': 'public-form-reset-btn',
+          class: 'dxos-btn dxos-btn-secondary',
+        }, 'G\\u1eedi h\\u1ed3 s\\u01a1 kh\\u00e1c');
+        resetBtn.addEventListener('click', function () {
+          while (receiptArea.firstChild) receiptArea.removeChild(receiptArea.firstChild);
+          while (statusArea.firstChild) statusArea.removeChild(statusArea.firstChild);
+          clearStatusError();
+          clearError();
+          fieldControls.forEach(function (entry) {
+            if (entry.field.type === 'boolean') entry.control.checked = false;
+            else entry.control.value = '';
+            if (entry.fileState) {
+              entry.fileState.data = null;
+              entry.fileState.infoEl.textContent = '';
+              entry.fileState.infoEl.classList.add('dxos-hidden');
+              entry.fileState.clearBtn.classList.add('dxos-hidden');
+            }
+            clearControlError(entry.control, entry.errorEl);
+          });
+          formArea.classList.remove('dxos-hidden');
+        });
+        recActions.appendChild(checkBtn);
+        recActions.appendChild(resetBtn);
+        rec.appendChild(recActions);
         receiptArea.appendChild(rec);
       })
       .catch(function (err) {
@@ -560,6 +694,54 @@ function buildClientScriptSource() {
         submitBtn.textContent = 'G\\u1eedi bi\\u1ec3u m\\u1eabu';
       });
   });
+
+  var lookupForm = el('form', { 'data-testid': 'public-form-manual-status-form', novalidate: true, class: 'dxos-card' });
+  lookupForm.appendChild(el('div', { class: 'dxos-card-title' }, 'Tra c\\u1ee9u tr\\u1ea1ng th\\u00e1i h\\u1ed3 s\\u01a1 \\u0111\\u00e3 n\\u1ed9p'));
+  var lookupCodeInput = el('input', {
+    type: 'text',
+    'data-testid': 'public-form-lookup-code-input',
+    value: rawCode,
+    placeholder: 'M\\u00e3 h\\u1ed3 s\\u01a1 (VD: LDX-FRM-...)',
+    class: 'dxos-input dxos-field',
+  });
+  var lookupTokenRow = el('div', { class: 'dxos-token-row dxos-field' });
+  var lookupTokenInput = el('input', {
+    type: 'password',
+    'data-testid': 'public-form-lookup-token-input',
+    value: effectiveStatusToken,
+    placeholder: 'M\\u00e3 tra c\\u1ee9u tr\\u1ea1ng th\\u00e1i (Status Token)',
+    class: 'dxos-input dxos-input-flex',
+  });
+  var lookupTokenToggle = el('button', {
+    type: 'button',
+    'data-testid': 'public-form-lookup-token-toggle',
+    'aria-label': 'Hi\\u1ec7n/\\u1ea9n m\\u00e3 tra c\\u1ee9u',
+    'aria-pressed': 'false',
+    class: 'dxos-btn dxos-btn-secondary',
+  }, 'Hi\\u1ec7n');
+  lookupTokenToggle.addEventListener('click', function () {
+    var cur = lookupTokenInput.getAttribute ? lookupTokenInput.getAttribute('type') : lookupTokenInput.type;
+    var nextType = cur === 'password' ? 'text' : 'password';
+    lookupTokenInput.type = nextType;
+    if (lookupTokenInput.setAttribute) lookupTokenInput.setAttribute('type', nextType);
+    lookupTokenToggle.setAttribute('aria-pressed', nextType === 'text' ? 'true' : 'false');
+    lookupTokenToggle.textContent = nextType === 'text' ? '\\u1ea8n' : 'Hi\\u1ec7n';
+  });
+  lookupTokenRow.appendChild(lookupTokenInput);
+  lookupTokenRow.appendChild(lookupTokenToggle);
+  var lookupBtn = el('button', {
+    type: 'submit',
+    'data-testid': 'public-form-lookup-btn',
+    class: 'dxos-btn dxos-btn-secondary',
+  }, 'Tra c\\u1ee9u h\\u1ed3 s\\u01a1');
+  lookupForm.appendChild(lookupCodeInput);
+  lookupForm.appendChild(lookupTokenRow);
+  lookupForm.appendChild(lookupBtn);
+  lookupForm.addEventListener('submit', function (evt) {
+    evt.preventDefault();
+    checkStatus(formMeta.slug, cleanToken(lookupCodeInput.value), cleanToken(lookupTokenInput.value), lookupBtn);
+  });
+  lookupArea.appendChild(lookupForm);
 })();`;
 }
 
@@ -605,14 +787,16 @@ function renderPublicFormHtml({
     .dxos-field { margin-bottom: 14px; }
     .dxos-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
     .dxos-input { width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; font-family: inherit; }
+    .dxos-input-flex { flex: 1; min-width: 0; }
+    .dxos-file-box { display: grid; gap: 6px; }
     .dxos-input-error { border-color: #dc2626; background: #fef2f2; }
     .dxos-field-error { color: #b91c1c; font-size: 12px; margin-top: 5px; font-weight: 500; }
     .dxos-checkbox { width: 16px; height: 16px; }
-    .dxos-btn { padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
+    .dxos-btn { min-height: 44px; min-width: 44px; display: inline-flex; align-items: center; justify-content: center; padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
     .dxos-btn:disabled { cursor: not-allowed; opacity: 0.65; }
     .dxos-btn-primary { border: 1px solid #0284c7; background: #0284c7; color: #ffffff; }
-    .dxos-btn-secondary { border: 1px solid #94a3b8; background: #ffffff; color: #0f172a; padding: 6px 12px; font-size: 13px; flex-shrink: 0; }
-    .dxos-btn-success { border: 1px solid #15803d; background: #15803d; color: #ffffff; padding: 8px 14px; margin-top: 8px; }
+    .dxos-btn-secondary { border: 1px solid #94a3b8; background: #ffffff; color: #0f172a; padding: 8px 14px; min-height: 44px; min-width: 44px; font-size: 13px; flex-shrink: 0; }
+    .dxos-btn-success { border: 1px solid #15803d; background: #15803d; color: #ffffff; padding: 8px 14px; min-height: 44px; min-width: 44px; margin-top: 8px; }
     .dxos-token-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
     .dxos-alert { padding: 14px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
     .dxos-alert-error { background: #fee2e2; color: #991b1b; }

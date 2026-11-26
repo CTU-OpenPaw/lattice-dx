@@ -10,11 +10,11 @@
 
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
-const { pathToFileURL } = require('node:url');
 const { redactPiiText, redactPiiDeep, replaceSecretKvPairs } = require('./ai-governance');
 const { redactAuditText, recordAiAuditLog } = require('./ai-schemas');
 const { runWithTenantRls, runInRlsSavepoint } = require('./ai-rls');
 const { parseVietnameseNaturalIntent } = require('./ai-nl-router');
+const { VIETNAMESE_NL_EVAL_CASES } = require('./eval-vietnamese-cases');
 
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
 const TRACE_ID_RE = /^[a-zA-Z0-9_-]{4,128}$/;
@@ -823,19 +823,8 @@ const SECURITY_RED_TEAM_CASES = [
 ];
 
 async function loadFullVietnameseSuite() {
-  const candidates = [
-    path.resolve(__dirname, '../../../../../scripts/eval-vietnamese-nl-agent.mjs'),
-    path.resolve(process.cwd(), 'scripts/eval-vietnamese-nl-agent.mjs'),
-  ];
-  for (const scriptPath of candidates) {
-    try {
-      const mod = await import(pathToFileURL(scriptPath).href);
-      if (Array.isArray(mod?.VIETNAMESE_NL_EVAL_CASES) && mod.VIETNAMESE_NL_EVAL_CASES.length > 0) {
-        return mod.VIETNAMESE_NL_EVAL_CASES;
-      }
-    } catch {
-      // Try next candidate
-    }
+  if (Array.isArray(VIETNAMESE_NL_EVAL_CASES) && VIETNAMESE_NL_EVAL_CASES.length > 0) {
+    return VIETNAMESE_NL_EVAL_CASES;
   }
   return [...WAVE1_3_EVAL_CASES, ...SECURITY_RED_TEAM_CASES];
 }
@@ -851,13 +840,17 @@ function toPreviewCase(tc) {
 }
 
 function listEvalSuites() {
+  const fullCases = Array.isArray(VIETNAMESE_NL_EVAL_CASES) && VIETNAMESE_NL_EVAL_CASES.length > 0
+    ? VIETNAMESE_NL_EVAL_CASES
+    : [...WAVE1_3_EVAL_CASES, ...SECURITY_RED_TEAM_CASES];
   return [
     {
       id: 'vietnamese-nl-agent',
       name: 'Vietnamese NL Agent Suite (Full Wave 1–3)',
       description: 'Đánh giá toàn diện router tiếng Việt tự nhiên (RAG, Tasks, Radar, GraphRAG, Flow Architect, App Builder 2.0, BI Chart, ReAct/Memory, A2A, Approvals, Omnichannel, Public Forms & Security Refusals).',
       supportsLiveLlm: true,
-      estimatedCaseCount: 163,
+      caseCount: fullCases.length,
+      estimatedCaseCount: fullCases.length,
       sampleCases: [...WAVE1_3_EVAL_CASES.slice(0, 5), ...SECURITY_RED_TEAM_CASES.slice(0, 3)].map(toPreviewCase),
     },
     {
@@ -927,7 +920,7 @@ async function runEvalBenchmark(db, options = {}) {
   }
 
   let baseCases = [];
-  if (suiteId === 'vietnamese-nl-agent') {
+  if (suiteId === 'vietnamese-nl-agent' || suiteId === 'vietnamese-nl-163') {
     baseCases = await loadFullVietnameseSuite();
   } else if (suiteId === 'wave1-3-capabilities') {
     baseCases = [...WAVE1_3_EVAL_CASES];

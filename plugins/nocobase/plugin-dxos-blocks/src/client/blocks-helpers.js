@@ -94,7 +94,7 @@ async function fetchWorkflowTasks(api, { statusFilter = 'pending', pageSize = 8 
       pageSize: limit,
       sort: ['-id'],
       appends: ['workflow', 'node', 'execution'],
-      ...(Object.keys(filter).length ? { filter } : {}),
+      ...(Object.keys(filter).length ? { filter: JSON.stringify(filter) } : {}),
     },
   });
   const payload = res?.data;
@@ -103,32 +103,325 @@ async function fetchWorkflowTasks(api, { statusFilter = 'pending', pageSize = 8 
   return { items, total };
 }
 
-async function fetchParaVault(api, { paraSpace = 'all', search = '', pageSize = 8 } = {}) {
-  if (!api?.request) return { items: [], total: 0, pluginDisabled: false };
+async function fetchParaVault(api, { paraSpace = 'all', search = '', page = 1, pageSize = 8 } = {}) {
   const limit = Math.max(1, Math.min(25, Number(pageSize) || 8));
-  const andFilters = [{ active: true }];
+  const currentPage = Math.max(1, Math.floor(Number(page) || 1));
+  if (!api?.request) return { items: [], total: 0, page: currentPage, pageSize: limit, pluginDisabled: false };
+  const andFilters = [{ active: true }, { status: 'active' }];
   if (paraSpace && paraSpace !== 'all') andFilters.push({ paraSpace });
   if (search && String(search).trim()) {
     const q = String(search).trim();
-    andFilters.push({ $or: [{ title: { $includes: q } }, { summary: { $includes: q } }, { tags: { $includes: q } }] });
+    andFilters.push({ $or: [{ code: { $includes: q } }, { title: { $includes: q } }, { summary: { $includes: q } }, { tags: { $includes: q } }] });
   }
+  const filter = { $and: andFilters };
   try {
     const res = await api.request({
       url: 'latticeParaDocuments:list',
       method: 'get',
-      params: { pageSize: limit, sort: ['-id'], filter: { $and: andFilters } },
+      params: { page: currentPage, pageSize: limit, sort: ['-id'], filter: JSON.stringify(filter) },
     });
     const payload = res?.data;
     const items = Array.isArray(payload?.data) ? payload.data : [];
     const total = Number(payload?.meta?.count ?? items.length);
-    return { items, total, pluginDisabled: false };
+    return { items, total, page: currentPage, pageSize: limit, pluginDisabled: false };
   } catch (err) {
     const status = Number(err?.response?.status ?? err?.status);
     if (status === 404 || status === 501) {
-      return { items: [], total: 0, pluginDisabled: true };
+      return { items: [], total: 0, page: currentPage, pageSize: limit, pluginDisabled: true };
     }
     throw err;
   }
+}
+
+function isSafeMarkdownHref(rawUrl) {
+  if (typeof rawUrl !== 'string') return false;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || /[\u0000-\u001f\u007f]/.test(trimmed)) return false;
+  if (isSafeAppPath(trimmed)) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function tryParseMarkdownLink(src, startIdx) {
+  if (src[startIdx] !== '[') return null;
+  let labelEnd = -1;
+  for (let j = startIdx + 1; j < src.length; j += 1) {
+    if (src[j] === '\n') return null;
+    if (src[j] === ']') {
+      labelEnd = j;
+      break;
+    }
+  }
+  if (labelEnd <= startIdx + 1 || src[labelEnd + 1] !== '(') return null;
+  const urlStart = labelEnd + 2;
+  let depth = 1;
+  for (let k = urlStart; k < src.length; k += 1) {
+    const ch = src[k];
+    if (/\s/.test(ch)) return null;
+    if (ch === '(') {
+      depth += 1;
+      if (depth > 32) return null;
+    } else if (ch === ')') {
+      depth -= 1;
+      if (depth === 0) {
+        const href = src.slice(urlStart, k);
+        if (!href) return null;
+        return {
+          label: src.slice(startIdx + 1, labelEnd),
+          href,
+          endIndex: k + 1,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function findClosingBackticks(src, fromIdx, tickLen) {
+  let scan = fromIdx;
+  while (scan < src.length) {
+    if (src[scan] === '`') {
+      let run = 0;
+      while (scan + run < src.length && src[scan + run] === '`') {
+        run += 1;
+      }
+      if (run === tickLen) return scan;
+      scan += run;
+    } else {
+      scan += 1;
+    }
+  }
+  return -1;
+}
+
+function renderInlineMarkdown(h, text, keyPrefix = 'md') {
+  const src = String(text ?? '');
+  if (!src) return null;
+  const parts = [];
+  let textBuf = '';
+  let pos = 0;
+  let tokenIdx = 0;
+
+  const flushText = () => {
+    if (textBuf) {
+      parts.push(textBuf);
+      textBuf = '';
+    }
+  };
+
+  while (pos < src.length) {
+    const ch = src[pos];
+    if (ch === '`') {
+      let tickLen = 0;
+      while (pos + tickLen < src.length && src[pos + tickLen] === '`') {
+        tickLen += 1;
+      }
+      const closeIdx = findClosingBackticks(src, pos + tickLen, tickLen);
+      if (closeIdx !== -1) {
+        flushText();
+        let codeContent = src.slice(pos + tickLen, closeIdx);
+        if (codeContent.length >= 2 && codeContent.startsWith(' ') && codeContent.endsWith(' ') && codeContent.trim().length > 0) {
+          codeContent = codeContent.slice(1, -1);
+        }
+        parts.push(h('code', {
+          key: `${keyPrefix}-i-${tokenIdx++}`,
+          style: {
+            padding: '1px 4px',
+            borderRadius: 4,
+            background: '#e2e8f0',
+            color: '#0f172a',
+            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontSize: '0.92em',
+          },
+        }, codeContent));
+        pos = closeIdx + tickLen;
+        continue;
+      }
+      textBuf += src.slice(pos, pos + tickLen);
+      pos += tickLen;
+      continue;
+    }
+
+    if (ch === '[') {
+      const link = tryParseMarkdownLink(src, pos);
+      if (link) {
+        flushText();
+        const key = `${keyPrefix}-i-${tokenIdx++}`;
+        const trimmedHref = link.href.trim();
+        if (isSafeMarkdownHref(trimmedHref)) {
+          const external = /^https?:\/\//i.test(trimmedHref);
+          parts.push(h('a', {
+            key,
+            href: trimmedHref,
+            ...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {}),
+            style: { color: '#1d4ed8', textDecoration: 'underline' },
+          }, link.label));
+        } else {
+          parts.push(h('span', { key, style: { color: '#475569' } }, link.label));
+        }
+        pos = link.endIndex;
+        continue;
+      }
+    }
+
+    if ((ch === '*' && src[pos + 1] === '*') || (ch === '_' && src[pos + 1] === '_')) {
+      const marker = ch + ch;
+      const nlIdx = src.indexOf('\n', pos + 2);
+      const searchEnd = nlIdx === -1 ? src.length : nlIdx;
+      const closeIdx = src.indexOf(marker, pos + 2);
+      if (closeIdx !== -1 && closeIdx < searchEnd && closeIdx > pos + 2) {
+        flushText();
+        parts.push(h('strong', { key: `${keyPrefix}-i-${tokenIdx++}` }, src.slice(pos + 2, closeIdx)));
+        pos = closeIdx + 2;
+        continue;
+      }
+    }
+
+    if ((ch === '*' && src[pos + 1] !== '*') || (ch === '_' && src[pos + 1] !== '_')) {
+      const nlIdx = src.indexOf('\n', pos + 1);
+      const searchEnd = nlIdx === -1 ? src.length : nlIdx;
+      const closeIdx = src.indexOf(ch, pos + 1);
+      if (closeIdx !== -1 && closeIdx < searchEnd && closeIdx > pos + 1) {
+        flushText();
+        parts.push(h('em', { key: `${keyPrefix}-i-${tokenIdx++}` }, src.slice(pos + 1, closeIdx)));
+        pos = closeIdx + 1;
+        continue;
+      }
+    }
+
+    textBuf += ch;
+    pos += 1;
+  }
+
+  flushText();
+  return parts.length === 1 ? parts[0] : parts;
+}
+
+const MD_FENCE_OPEN_RE = /^(`{3,})([^`]*)$/;
+const MD_HEADING_RE = /^(#{1,4})\s+(.+)$/;
+const MD_UL_RE = /^\s*[-*+]\s+/;
+const MD_OL_RE = /^\s*\d+\.\s+/;
+
+function renderSafeMarkdown(React, markdownText) {
+  if (!React?.createElement) return null;
+  const raw = String(markdownText ?? '').replace(/\r\n?/g, '\n').trim();
+  if (!raw) return null;
+  const h = React.createElement;
+  const lines = raw.split('\n');
+  const blocks = [];
+  let i = 0;
+  let bIdx = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed) {
+      i += 1;
+      continue;
+    }
+
+    const fenceMatch = MD_FENCE_OPEN_RE.exec(trimmed);
+    if (fenceMatch) {
+      const fenceLen = fenceMatch[1].length;
+      const closeFenceRe = new RegExp(`^\`{${fenceLen},}\\s*$`);
+      const codeLines = [];
+      i += 1;
+      while (i < lines.length && !closeFenceRe.test(lines[i].trim())) {
+        codeLines.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1;
+      blocks.push(h('pre', {
+        key: `md-pre-${bIdx++}`,
+        style: {
+          margin: '4px 0',
+          padding: '8px 10px',
+          borderRadius: 6,
+          background: '#0f172a',
+          color: '#f8fafc',
+          overflowX: 'auto',
+          fontSize: 11,
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+        },
+      }, h('code', null, codeLines.join('\n'))));
+      continue;
+    }
+
+    const headingMatch = MD_HEADING_RE.exec(trimmed);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      const tag = `h${level}`;
+      const sizeMap = { 1: 15, 2: 14, 3: 13, 4: 12 };
+      const key = `md-h-${bIdx++}`;
+      blocks.push(h(tag, {
+        key,
+        style: { margin: '6px 0 3px', fontSize: sizeMap[level] || 13, fontWeight: 700, color: '#0f172a' },
+      }, renderInlineMarkdown(h, headingMatch[2], key)));
+      i += 1;
+      continue;
+    }
+
+    if (MD_UL_RE.test(line)) {
+      const items = [];
+      while (i < lines.length && MD_UL_RE.test(lines[i])) {
+        const itemText = lines[i].replace(MD_UL_RE, '');
+        const itemKey = `md-ul-${bIdx}-${items.length}`;
+        items.push(h('li', { key: itemKey, style: { marginBottom: 2 } }, renderInlineMarkdown(h, itemText, itemKey)));
+        i += 1;
+      }
+      blocks.push(h('ul', {
+        key: `md-ul-${bIdx++}`,
+        style: { margin: '4px 0', paddingLeft: 18 },
+      }, ...items));
+      continue;
+    }
+
+    if (MD_OL_RE.test(line)) {
+      const items = [];
+      while (i < lines.length && MD_OL_RE.test(lines[i])) {
+        const itemText = lines[i].replace(MD_OL_RE, '');
+        const itemKey = `md-ol-${bIdx}-${items.length}`;
+        items.push(h('li', { key: itemKey, style: { marginBottom: 2 } }, renderInlineMarkdown(h, itemText, itemKey)));
+        i += 1;
+      }
+      blocks.push(h('ol', {
+        key: `md-ol-${bIdx++}`,
+        style: { margin: '4px 0', paddingLeft: 20 },
+      }, ...items));
+      continue;
+    }
+
+    const paraLines = [];
+    paraLines.push(lines[i]);
+    i += 1;
+    while (
+      i < lines.length
+      && lines[i].trim()
+      && !MD_FENCE_OPEN_RE.test(lines[i].trim())
+      && !MD_HEADING_RE.test(lines[i].trim())
+      && !MD_UL_RE.test(lines[i])
+      && !MD_OL_RE.test(lines[i])
+    ) {
+      paraLines.push(lines[i]);
+      i += 1;
+    }
+    const pKey = `md-p-${bIdx++}`;
+    const children = [];
+    paraLines.forEach((pLine, idx) => {
+      if (idx > 0) children.push(h('br', { key: `${pKey}-br-${idx}` }));
+      children.push(renderInlineMarkdown(h, pLine, `${pKey}-l-${idx}`));
+    });
+    blocks.push(h('p', {
+      key: pKey,
+      style: { margin: '3px 0', lineHeight: 1.55 },
+    }, ...children));
+  }
+
+  return h('div', { style: { display: 'grid', gap: 4 } }, ...blocks);
 }
 
 async function fetchParaSummary(api) {
@@ -467,6 +760,69 @@ function isNumericCollectionField(field) {
   return false;
 }
 
+const BI_FIELD_VI_LABELS = {
+  id: 'Mã định danh (ID)',
+  organizationId: 'Mã tổ chức',
+  status: 'Trạng thái',
+  state: 'Trạng thái',
+  code: 'Mã chứng từ',
+  lotCode: 'Mã lô hàng',
+  name: 'Tên hiển thị',
+  title: 'Tiêu đề',
+  description: 'Mô tả',
+  summary: 'Tóm tắt',
+  category: 'Danh mục',
+  region: 'Khu vực',
+  priority: 'Mức ưu tiên',
+  severity: 'Mức nghiêm trọng',
+  sku: 'Mã SKU',
+  productName: 'Tên sản phẩm',
+  unit: 'Đơn vị tính',
+  quantity: 'Số lượng',
+  qtyOnHand: 'Tồn kho thực tế',
+  qtyReserved: 'Đã giữ chỗ',
+  qtyAvailable: 'Tồn khả dụng',
+  amount: 'Số tiền',
+  totalAmount: 'Tổng tiền',
+  mktCelsius: 'Nhiệt độ MKT (°C)',
+  expiryDate: 'Hạn sử dụng',
+  dueDate: 'Hạn xử lý',
+  scheduledAt: 'Thời gian dự kiến',
+  submittedAt: 'Ngày trình duyệt',
+  cancelledAt: 'Ngày hủy',
+  createdAt: 'Ngày tạo',
+  updatedAt: 'Ngày cập nhật',
+  version: 'Phiên bản',
+  active: 'Đang hoạt động',
+  amendmentNo: 'Số lần điều chỉnh',
+  amendedFromId: 'Điều chỉnh từ chứng từ ID',
+  requesterId: 'ID Người yêu cầu',
+  assigneeId: 'ID Người xử lý',
+  departmentId: 'ID Phòng ban',
+  locationId: 'ID Địa điểm',
+  assetId: 'ID Tài sản',
+  custodianId: 'ID Người quản lý',
+  ownerId: 'ID Chủ sở hữu',
+  handlerId: 'ID Người phụ trách',
+  driverId: 'ID Tài xế',
+  createdById: 'ID Người tạo',
+  updatedById: 'ID Người cập nhật',
+  orderId: 'ID Đơn hàng',
+  lotId: 'ID Lô hàng',
+  paraSpace: 'Phân vùng P.A.R.A.',
+  targetCollection: 'Phân hệ đích',
+  targetRecordId: 'ID Bản ghi đích',
+};
+
+function formatBiFieldLabel(fieldName, rawTitle = '') {
+  const name = String(fieldName || '').trim();
+  const title = String(rawTitle || '').trim();
+  if (!name) return title || '';
+  if (title && title !== name) return `${title} (${name})`;
+  if (Object.hasOwn(BI_FIELD_VI_LABELS, name)) return BI_FIELD_VI_LABELS[name];
+  return name;
+}
+
 function extractBiFieldOptions(collectionMeta, { numericOnly = false } = {}) {
   const fields = Array.isArray(collectionMeta?.fields) ? collectionMeta.fields : [];
   const out = [];
@@ -482,10 +838,9 @@ function extractBiFieldOptions(collectionMeta, { numericOnly = false } = {}) {
     if (BI_VIRTUAL_OR_ASSOC_TYPES.has(ftype)) continue;
     if (numericOnly && !isNumericCollectionField(f)) continue;
     seen.add(name);
-    const title = String(f.title || '').trim();
     out.push({
       value: name,
-      label: title && title !== name ? `${title} (${name})` : name,
+      label: formatBiFieldLabel(name, f.title),
       type: f.type || 'string',
     });
   }
@@ -496,6 +851,7 @@ const STATUS_META_MAP = {
   draft: { label: 'Bản nháp', bg: '#f1f5f9', color: '#334155', border: '#cbd5e1' },
   submitted: { label: 'Đã gửi', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
   hold_mkt: { label: 'Tạm giữ MKT', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
+  quarantined: { label: 'Cách ly QA', bg: '#ffedd5', color: '#9a3412', border: '#fdba74' },
   proposed: { label: 'Đề xuất AI', bg: '#eef2ff', color: '#4338ca', border: '#c7d2fe' },
   manager_approval: { label: 'Chờ quản lý duyệt', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
   synced: { label: 'Đã đồng bộ', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
@@ -512,7 +868,9 @@ const STATUS_META_MAP = {
   in_progress: { label: 'Đang xử lý', bg: '#e0f2fe', color: '#0369a1', border: '#7dd3fc' },
   cancelled: { label: 'Đã hủy', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
   available: { label: 'Sẵn sàng', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
+  released: { label: 'Đã mở khóa QA', bg: '#d1fae5', color: '#065f46', border: '#6ee7b7' },
   reserved: { label: 'Đã giữ chỗ', bg: '#dbeafe', color: '#1d4ed8', border: '#93c5fd' },
+  depleted: { label: 'Đã xuất hết', bg: '#f1f5f9', color: '#475569', border: '#cbd5e1' },
   expired: { label: 'Hết hạn', bg: '#fee2e2', color: '#991b1b', border: '#fca5a5' },
   reviewed: { label: 'Đã xem xét', bg: '#dcfce7', color: '#166534', border: '#86efac' },
   pending_hitl: { label: 'Chờ duyệt HITL', bg: '#fef3c7', color: '#92400e', border: '#fcd34d' },
@@ -553,7 +911,7 @@ function formatStatusLabel(rawStatus, fallbackLabel = '') {
 
 function stripDevBracketTags(rawTitle) {
   return String(rawTitle ?? '')
-    .replace(/\s*\[(?:D|P|W|H|I)\]/g, '')
+    .replace(/\s*\[(?:D|P|W|H|I|AI\s+Studio|AI|BI)\]/gi, '')
     .replace(/\s{2,}/g, ' ')
     .trim();
 }
@@ -635,6 +993,7 @@ module.exports = {
   fetchWorkflowTasks,
   fetchParaVault,
   fetchParaSummary,
+  renderSafeMarkdown,
   inferPortalSlugFromLocation,
   fetchPortalAgents,
   triggerDxosAgent,
@@ -646,5 +1005,7 @@ module.exports = {
   fetchCollectionsMeta,
   inferCollectionFieldsMeta,
   isNumericCollectionField,
+  BI_FIELD_VI_LABELS,
+  formatBiFieldLabel,
   extractBiFieldOptions,
 };

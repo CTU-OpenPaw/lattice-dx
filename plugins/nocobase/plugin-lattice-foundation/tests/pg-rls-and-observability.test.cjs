@@ -1808,19 +1808,22 @@ test('LatticeFoundationPlugin registers and unregisters publicFormGatewayHandler
     plugin.app = fakeApp;
     plugin.db = fakeApp.db;
     await plugin.load();
-    assert.equal(registered.length, 3);
+    assert.equal(registered.length, 4);
     assert.equal(typeof plugin._publicFormGatewayHandler, 'function');
     assert.equal(typeof plugin._publicTrackGatewayHandler, 'function');
     assert.equal(typeof plugin._publicBrandingGatewayHandler, 'function');
+    assert.equal(typeof plugin._mobilePwaGatewayHandler, 'function');
     assert.ok(registered.includes(plugin._publicFormGatewayHandler));
     assert.ok(registered.includes(plugin._publicTrackGatewayHandler));
     assert.ok(registered.includes(plugin._publicBrandingGatewayHandler));
+    assert.ok(registered.includes(plugin._mobilePwaGatewayHandler));
     await plugin.unload();
-    assert.equal(unregistered.length, 3);
+    assert.equal(unregistered.length, 4);
     assert.ok(unregistered.includes(plugin._publicFormGatewayHandler) === false);
     assert.equal(plugin._publicFormGatewayHandler, null);
     assert.equal(plugin._publicTrackGatewayHandler, null);
     assert.equal(plugin._publicBrandingGatewayHandler, null);
+    assert.equal(plugin._mobilePwaGatewayHandler, null);
   } finally {
     Module._load = origLoad;
     delete require.cache[require.resolve('../src/server/index')];

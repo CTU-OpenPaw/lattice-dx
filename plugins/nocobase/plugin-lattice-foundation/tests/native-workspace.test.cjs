@@ -257,3 +257,46 @@ test('workspace renders DX-OS Approval Inbox items, supports decide, and suppres
   await new Promise(resolve => setImmediate(resolve));
   assert.ok(requests.some(r => r.url === 'dxosApprovals:decide' && r.data.itemKey === 'ai:41' && r.data.decision === 'approve'));
 });
+
+test('P1-16: empty workspace renders First-run Setup Checklist for admins/builders and keeps employee view non-admin', async () => {
+  const adminSetup = workspaceHarness({
+    search: '',
+    allAccessRoutes: [],
+    requestHandler: async (req) => {
+      if (req.url === 'roles:check') return { data: { data: { allowConfigure: true, snippets: ['pm'] } } };
+      if (req.url === 'latticePortals:listAccessible') return { data: { data: [] } };
+      if (req.url === 'dxosApprovals:listInbox') return { data: { data: { items: [] } } };
+      return { data: { data: {} } };
+    },
+  });
+  adminSetup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const adminUi = adminSetup.render();
+  const checklist = find(adminUi, node => node.props?.['data-testid'] === 'ldx-onboarding-checklist');
+  assert.ok(checklist, 'Admin empty workspace must render ldx-onboarding-checklist');
+  for (const href of [
+    '/admin/settings/dxos-studio',
+    '/admin/settings/dxos-ai',
+    '/admin/settings/multi-portal',
+    '/admin/settings/dxos-studio?tab=forms',
+    '/admin/settings/auth/enterprise-mappings',
+  ]) {
+    assert.ok(find(checklist, node => node.type === 'Link' && node.props?.to === href), `Checklist missing Link to ${href}`);
+  }
+  assert.ok(JSON.stringify(checklist).includes('LATTICE_SKIP_DEMO_SEED'));
+
+  const empSetup = workspaceHarness({
+    search: '',
+    allAccessRoutes: [],
+    requestHandler: async (req) => {
+      if (req.url === 'roles:check') return { data: { data: { allowAll: false, snippets: [] } } };
+      if (req.url === 'latticePortals:listAccessible') return { data: { data: [] } };
+      if (req.url === 'dxosApprovals:listInbox') return { data: { data: { items: [] } } };
+      return { data: { data: {} } };
+    },
+  });
+  empSetup.render();
+  await new Promise(resolve => setImmediate(resolve));
+  const empUi = empSetup.render();
+  assert.equal(find(empUi, node => node.props?.['data-testid'] === 'ldx-onboarding-checklist'), null);
+});

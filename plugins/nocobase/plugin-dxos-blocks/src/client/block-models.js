@@ -16,6 +16,7 @@ const {
   fetchWorkflowTasks,
   fetchParaVault,
   fetchParaSummary,
+  renderSafeMarkdown,
   inferPortalSlugFromLocation,
   requestAndDownloadExport,
   resolveClientAuthToken,
@@ -231,10 +232,11 @@ function createBlockRenderers(client, React, antd, app) {
       const next = {};
       await Promise.all(metrics.map(async (m, idx) => {
         try {
+          const hasFilter = m.filter && typeof m.filter === 'object' && Object.keys(m.filter).length > 0;
           const res = await api.request({
             url: `${m.collection}:list`,
             method: 'get',
-            params: { pageSize: 1, filter: m.filter },
+            params: { pageSize: 1, ...(hasFilter ? { filter: JSON.stringify(m.filter) } : {}) },
           });
           next[idx] = { count: Number(res?.data?.meta?.count ?? (Array.isArray(res?.data?.data) ? res.data.data.length : 0)) };
         } catch (err) {
@@ -349,44 +351,118 @@ function createBlockRenderers(client, React, antd, app) {
       showEvidence: true,
     }, liveConfig);
     const [state, setState] = React.useState({ loading: true, items: [], error: '' });
+    const [actionBusyId, setActionBusyId] = React.useState(null);
+    const [rejectingId, setRejectingId] = React.useState(null);
+    const [rejectNote, setRejectNote] = React.useState('');
+    const [actionFeedback, setActionFeedback] = React.useState(null);
 
-    React.useEffect(() => {
-      if (!api?.request) { setState({ loading: false, items: [], error: '' }); return; }
-      let active = true;
-      api.request({
-        url: 'dxosBlocks:proposals',
-        method: 'post',
-        data: {
-          targetCollection: cfg.targetCollection || 'latticeIncidentCases',
-          state: cfg.state || 'all',
-          pageSize: Number(cfg.pageSize) || 5,
-        },
-      }).then((res) => {
-        if (!active) return;
+    const loadProposals = React.useCallback(async (isActive = () => true) => {
+      if (!api?.request) {
+        if (isActive()) setState({ loading: false, items: [], error: '' });
+        return;
+      }
+      if (isActive()) setState((prev) => ({ ...prev, loading: true, error: '' }));
+      try {
+        const res = await api.request({
+          url: 'dxosBlocks:proposals',
+          method: 'post',
+          data: {
+            targetCollection: cfg.targetCollection || 'latticeIncidentCases',
+            state: cfg.state || 'all',
+            pageSize: Number(cfg.pageSize) || 5,
+          },
+        });
+        if (!isActive()) return;
         const body = res?.data?.data || res?.data || {};
         setState({ loading: false, items: Array.isArray(body.items) ? body.items : [], error: '' });
-      }).catch(() => {
-        if (active) setState({ loading: false, items: [], error: 'Không tải được danh sách đề xuất AI.' });
-      });
-      return () => { active = false; };
+      } catch {
+        if (isActive()) setState({ loading: false, items: [], error: 'Không tải được danh sách đề xuất AI.' });
+      }
     }, [api, cfg.targetCollection, cfg.state, cfg.pageSize]);
+
+    React.useEffect(() => {
+      let active = true;
+      loadProposals(() => active);
+      return () => { active = false; };
+    }, [loadProposals]);
+
+    const handleDecideProposal = async (item, decision) => {
+      if (!api?.request || !item?.id || actionBusyId != null) return;
+      const cleanNote = decision === 'reject' ? String(rejectNote || '').trim() : '';
+      if (decision === 'reject' && cleanNote.length < 3) {
+        setActionFeedback({ type: 'error', text: 'Vui lòng nhập lý do từ chối tối thiểu 3 ký tự.' });
+        return;
+      }
+      setActionBusyId(item.id);
+      setActionFeedback(null);
+      try {
+        await api.request({
+          url: 'dxosBlocks:decideProposal',
+          method: 'post',
+          data: {
+            id: item.id,
+            proposalId: item.id,
+            decision,
+            ...(cleanNote ? { note: cleanNote } : {}),
+          },
+        });
+        setRejectingId(null);
+        setRejectNote('');
+        const label = decision === 'approve' ? 'Đã phê duyệt' : decision === 'review' ? 'Đã đánh dấu đã xem' : 'Đã từ chối';
+        setActionFeedback({ type: 'success', text: `${label} đề xuất #${item.targetRecordId || item.id}.` });
+        await loadProposals();
+      } catch (err) {
+        const status = Number(err?.response?.status ?? err?.status);
+        const serverMsg = err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message || err?.message;
+        const code = err?.response?.data?.errors?.[0]?.code || err?.response?.data?.code || '';
+        let msg = serverMsg || 'Không thể xử lý đề xuất AI.';
+        if (code === 'SELF_APPROVAL_FORBIDDEN') {
+          msg = 'Không thể tự phê duyệt đề xuất do chính bạn tạo (Poka-yoke).';
+        } else if (status === 403 || code === 'APPROVAL_FORBIDDEN') {
+          msg = 'Bạn không có quyền phê duyệt hoặc từ chối đề xuất này.';
+        } else if (status === 409 || code === 'PROPOSAL_ALREADY_DECIDED') {
+          msg = 'Đề xuất này đã được xử lý trước đó.';
+        } else if (status === 400 && !serverMsg) {
+          msg = 'Dữ liệu quyết định đề xuất không hợp lệ.';
+        }
+        setActionFeedback({ type: 'error', text: msg });
+      } finally {
+        setActionBusyId(null);
+      }
+    };
 
     return h('div', { 'data-testid': 'dxos-ai-proposal-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, stripDevBracketTags(cfg.title || 'Đề xuất AI')),
         h('span', { style: { fontSize: 11, color: '#64748b' } }, `${cfg.targetCollection} · ${state.items.length} mục`),
       ),
+      actionFeedback ? h('div', {
+        'data-testid': 'dxos-ai-proposal-feedback',
+        role: actionFeedback.type === 'error' ? 'alert' : 'status',
+        style: {
+          marginBottom: 8,
+          padding: '6px 10px',
+          borderRadius: 6,
+          fontSize: 12,
+          background: actionFeedback.type === 'error' ? '#fee2e2' : '#dcfce7',
+          color: actionFeedback.type === 'error' ? '#991b1b' : '#166534',
+        },
+      }, actionFeedback.text) : null,
       state.error ? h('div', { style: { fontSize: 13, color: '#b45309' } }, state.error) : null,
       !state.loading && !state.items.length && !state.error
         ? h('div', { style: { fontSize: 13, color: '#64748b' } }, 'Chưa có đề xuất AI nào cho phân hệ này.')
         : h('div', { style: { display: 'grid', gap: 8 } },
           state.items.map((item) => {
-            const propStateMeta = getStatusMeta(item.state || 'proposed');
+            const propState = String(item.state || 'proposed').toLowerCase();
+            const propStateMeta = getStatusMeta(propState);
+            const isProposed = propState === 'proposed';
+            const isBusy = actionBusyId === item.id;
+            const isRejectOpen = rejectingId === item.id;
             return h('div', {
               key: item.id,
-              style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc' },
+              style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 6 },
             },
-              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4, fontSize: 12 } },
+              h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 12 } },
                 h('strong', null, `#${item.targetRecordId}`),
                 h('span', {
                   style: {
@@ -402,12 +478,74 @@ function createBlockRenderers(client, React, antd, app) {
               ),
               h('div', { style: { fontSize: 13, color: '#1e293b' } }, String(item.recommendation || '')),
               cfg.showEvidence !== false && Array.isArray(item.evidence) && item.evidence.length
-                ? h('div', { style: { marginTop: 4, fontSize: 11, color: '#64748b' } }, `Nguồn bằng chứng: ${item.evidence.map((e) => e.kind).join(', ')}`)
+                ? h('div', { style: { fontSize: 11, color: '#64748b' } }, `Nguồn bằng chứng: ${item.evidence.map((e) => e.kind).join(', ')}`)
                 : null,
+              isProposed ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 2 } },
+                h('button', {
+                  type: 'button',
+                  'data-testid': `dxos-proposal-approve-${item.id}`,
+                  disabled: isBusy,
+                  onClick: () => handleDecideProposal(item, 'approve'),
+                  style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #16a34a', background: '#16a34a', color: '#ffffff', fontSize: 11, fontWeight: 700, cursor: isBusy ? 'wait' : 'pointer' },
+                }, 'Phê duyệt'),
+                h('button', {
+                  type: 'button',
+                  'data-testid': `dxos-proposal-review-${item.id}`,
+                  disabled: isBusy,
+                  onClick: () => handleDecideProposal(item, 'review'),
+                  style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #0284c7', background: '#ffffff', color: '#0284c7', fontSize: 11, fontWeight: 700, cursor: isBusy ? 'wait' : 'pointer' },
+                }, 'Đã xem'),
+                h('button', {
+                  type: 'button',
+                  'data-testid': `dxos-proposal-reject-toggle-${item.id}`,
+                  disabled: isBusy,
+                  onClick: () => {
+                    setRejectingId(isRejectOpen ? null : item.id);
+                    setRejectNote('');
+                    setActionFeedback(null);
+                  },
+                  style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #dc2626', background: '#ffffff', color: '#dc2626', fontSize: 11, fontWeight: 700, cursor: isBusy ? 'wait' : 'pointer' },
+                }, 'Từ chối'),
+              ) : null,
+              isProposed && isRejectOpen ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', paddingTop: 4 } },
+                h('input', {
+                  type: 'text',
+                  'data-testid': `dxos-proposal-reject-note-${item.id}`,
+                  value: rejectNote,
+                  onChange: (e) => setRejectNote(e.target.value),
+                  placeholder: 'Lý do từ chối (>= 3 ký tự)...',
+                  style: { flex: '1 1 180px', minWidth: 0, padding: '4px 8px', borderRadius: 6, border: '1px solid #fca5a5', fontSize: 12 },
+                }),
+                h('button', {
+                  type: 'button',
+                  'data-testid': `dxos-proposal-reject-confirm-${item.id}`,
+                  disabled: isBusy,
+                  onClick: () => handleDecideProposal(item, 'reject'),
+                  style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #dc2626', background: '#dc2626', color: '#ffffff', fontSize: 11, fontWeight: 700, cursor: isBusy ? 'wait' : 'pointer' },
+                }, 'Xác nhận từ chối'),
+              ) : null,
             );
           }),
         ),
     );
+  }
+
+  function resolveWorkflowTaskActions(task) {
+    const formsObj = task?.node?.config?.forms && typeof task.node.config.forms === 'object' ? task.node.config.forms : null;
+    const entries = formsObj ? Object.entries(formsObj).filter(([, cfg]) => cfg && typeof cfg === 'object') : [];
+    const [formKey, formCfg] = entries[0] || [task?.node?.key || 'review', null];
+    const rawActions = Array.isArray(formCfg?.actions) && formCfg.actions.length ? formCfg.actions : null;
+    const actions = rawActions
+      ? rawActions.map((act, idx) => ({
+          key: String(act?.key || `action_${idx}`),
+          title: String(act?.title || act?.key || 'Xử lý'),
+          values: act?.values && typeof act.values === 'object' ? { ...act.values } : {},
+        }))
+      : [
+          { key: 'approve', title: 'Phê duyệt', values: { decision: 'approved' } },
+          { key: 'reject', title: 'Từ chối', values: { decision: 'rejected' } },
+        ];
+    return { formKey, actions };
   }
 
   function DxosWorkflowTasksView({ model, liveConfig }) {
@@ -418,14 +556,63 @@ function createBlockRenderers(client, React, antd, app) {
       pageSize: 6,
     }, liveConfig);
     const [state, setState] = React.useState({ loading: true, items: [], error: '' });
+    const [submittingTaskId, setSubmittingTaskId] = React.useState(null);
+    const [taskNotes, setTaskNotes] = React.useState({});
+    const [taskFeedback, setTaskFeedback] = React.useState(null);
+
+    const loadTasks = React.useCallback(async (isActive = () => true) => {
+      try {
+        const res = await fetchWorkflowTasks(api, { statusFilter: cfg.statusFilter, pageSize: cfg.pageSize });
+        if (isActive()) setState({ loading: false, items: res.items, error: '' });
+      } catch {
+        if (isActive()) setState({ loading: false, items: [], error: 'Không tải được công việc được giao.' });
+      }
+    }, [api, cfg.statusFilter, cfg.pageSize]);
 
     React.useEffect(() => {
       let active = true;
-      fetchWorkflowTasks(api, { statusFilter: cfg.statusFilter, pageSize: cfg.pageSize })
-        .then((res) => { if (active) setState({ loading: false, items: res.items, error: '' }); })
-        .catch(() => { if (active) setState({ loading: false, items: [], error: 'Không tải được công việc được giao.' }); });
+      loadTasks(() => active);
       return () => { active = false; };
-    }, [api, cfg.statusFilter, cfg.pageSize]);
+    }, [loadTasks]);
+
+    const handleSubmitTask = async (task, formKey, action) => {
+      if (!api?.request || !task?.id || submittingTaskId != null) return;
+      setSubmittingTaskId(task.id);
+      setTaskFeedback(null);
+      try {
+        const noteText = String(taskNotes[task.id] || '').trim();
+        const values = { ...(action.values || {}), ...(noteText ? { note: noteText } : {}) };
+        await api.request({
+          url: 'workflowManualTasks:submit',
+          method: 'post',
+          params: { filterByTk: task.id },
+          data: {
+            result: {
+              [formKey]: values,
+              _: action.key,
+            },
+          },
+        });
+        setTaskNotes((prev) => {
+          const next = { ...prev };
+          delete next[task.id];
+          return next;
+        });
+        setTaskFeedback({ type: 'success', text: `Đã xử lý tác vụ #${task.id}: ${action.title}.` });
+        await loadTasks();
+      } catch (err) {
+        const status = Number(err?.response?.status ?? err?.status);
+        const serverMsg = err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message || err?.message;
+        const msg = status === 403
+          ? (serverMsg || 'Bạn không có quyền xử lý tác vụ quy trình này.')
+          : status === 409
+            ? (serverMsg || 'Tác vụ này đã được xử lý trước đó.')
+            : (serverMsg || 'Không thể gửi kết quả xử lý tác vụ.');
+        setTaskFeedback({ type: 'error', text: msg });
+      } finally {
+        setSubmittingTaskId(null);
+      }
+    };
 
     return h('div', { 'data-testid': 'dxos-workflow-tasks-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
@@ -436,20 +623,70 @@ function createBlockRenderers(client, React, antd, app) {
           style: { border: '1px solid #cbd5e1', borderRadius: 6, background: '#fff', padding: '2px 10px', cursor: 'pointer', fontSize: 12, whiteSpace: 'nowrap' },
         }, 'Mở tất cả'),
       ),
+      taskFeedback ? h('div', {
+        'data-testid': 'dxos-workflow-tasks-feedback',
+        role: taskFeedback.type === 'error' ? 'alert' : 'status',
+        style: {
+          marginBottom: 8,
+          padding: '6px 10px',
+          borderRadius: 6,
+          fontSize: 12,
+          background: taskFeedback.type === 'error' ? '#fee2e2' : '#dcfce7',
+          color: taskFeedback.type === 'error' ? '#991b1b' : '#166534',
+        },
+      }, taskFeedback.text) : null,
       state.error ? h('div', { style: { fontSize: 13, color: '#b45309' } }, state.error) : null,
       !state.loading && !state.items.length && !state.error
         ? h('div', { style: { fontSize: 13, color: '#64748b' } }, 'Hiện không có tác vụ cần xử lý.')
-        : h('div', { style: { display: 'grid', gap: 6 } },
-          state.items.map((task) => h('div', {
-            key: task.id,
-            style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 6, padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
-          },
-            h('div', null,
-              h('div', { style: { fontSize: 13, fontWeight: 600, color: '#0f172a' } }, task.node?.title || `Tác vụ #${task.id}`),
-              h('div', { style: { fontSize: 11, color: '#64748b' } }, task.workflow?.title || 'Workflow native'),
-            ),
-            h('span', { style: { fontSize: 11, fontWeight: 600, color: task.status === 0 ? '#b45309' : '#166534' } }, task.status === 0 ? 'Cần xử lý' : 'Đã xử lý'),
-          )),
+        : h('div', { style: { display: 'grid', gap: 8 } },
+          state.items.map((task) => {
+            const isPending = task.status === 0;
+            const isBusy = submittingTaskId === task.id;
+            const { formKey, actions } = isPending ? resolveWorkflowTaskActions(task) : { formKey: '', actions: [] };
+            return h('div', {
+              key: task.id,
+              style: { display: 'grid', gap: 6, padding: '8px 10px', borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff' },
+            },
+              h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 6 } },
+                h('div', null,
+                  h('div', { style: { fontSize: 13, fontWeight: 600, color: '#0f172a' } }, task.node?.title || `Tác vụ #${task.id}`),
+                  h('div', { style: { fontSize: 11, color: '#64748b' } }, task.workflow?.title || 'Workflow native'),
+                ),
+                h('span', { style: { fontSize: 11, fontWeight: 600, color: isPending ? '#b45309' : '#166534' } }, isPending ? 'Cần xử lý' : 'Đã xử lý'),
+              ),
+              isPending ? h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' } },
+                h('input', {
+                  type: 'text',
+                  'data-testid': `dxos-workflow-task-note-${task.id}`,
+                  value: taskNotes[task.id] || '',
+                  onChange: (e) => setTaskNotes((prev) => ({ ...prev, [task.id]: e.target.value })),
+                  placeholder: 'Ghi chú xử lý (tùy chọn)...',
+                  style: { flex: '1 1 140px', minWidth: 0, padding: '3px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 11 },
+                }),
+                actions.map((act) => {
+                  const isReject = /reject|cancel|deny|tu_choi/i.test(act.key);
+                  return h('button', {
+                    key: act.key,
+                    type: 'button',
+                    'data-testid': `dxos-workflow-task-action-${task.id}-${act.key}`,
+                    disabled: isBusy,
+                    onClick: () => handleSubmitTask(task, formKey, act),
+                    style: {
+                      padding: '4px 10px',
+                      borderRadius: 6,
+                      border: `1px solid ${isReject ? '#dc2626' : '#0284c7'}`,
+                      background: isReject ? '#ffffff' : '#0284c7',
+                      color: isReject ? '#dc2626' : '#ffffff',
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: isBusy ? 'wait' : 'pointer',
+                      whiteSpace: 'nowrap',
+                    },
+                  }, act.title);
+                }),
+              ) : null,
+            );
+          }),
         ),
     );
   }
@@ -478,7 +715,8 @@ function createBlockRenderers(client, React, antd, app) {
     }, liveConfig);
     const [space, setSpace] = React.useState(cfg.paraSpace || 'all');
     const [search, setSearch] = React.useState('');
-    const [state, setState] = React.useState({ loading: true, items: [], pluginDisabled: false, error: '' });
+    const [page, setPage] = React.useState(1);
+    const [state, setState] = React.useState({ loading: true, items: [], total: 0, pluginDisabled: false, error: '' });
     const [orgInfo, setOrgInfo] = React.useState({ loaded: false, organizationId: null, organizations: [] });
     const [selectedOrg, setSelectedOrg] = React.useState(cfg.defaultOrganizationId || '');
     const [creating, setCreating] = React.useState(false);
@@ -486,6 +724,8 @@ function createBlockRenderers(client, React, antd, app) {
     const [draftCode, setDraftCode] = React.useState('');
     const [activeParaDocId, setActiveParaDocId] = React.useState(() => readParaDocIdFromLocation());
     const [selectedDocState, setSelectedDocState] = React.useState({ loading: false, doc: null, error: '' });
+
+    const pageSize = Math.max(1, Math.min(25, Number(cfg.pageSize) || 6));
 
     const locationSearch = typeof window !== 'undefined' && window.location ? String(window.location.search || '') : '';
 
@@ -508,21 +748,22 @@ function createBlockRenderers(client, React, antd, app) {
     }, []);
 
     const ctxOrg = String(cfg.defaultOrganizationId || cfg.organizationId || app?.apiClient?.auth?.organizationId || '').trim();
+    const loadSeqRef = typeof React.useRef === 'function'
+      ? React.useRef(0)
+      : React.useState({ current: 0 })[0];
 
-    const load = React.useCallback(async () => {
-      setState((prev) => ({ ...prev, loading: true, error: '' }));
-      try {
-        const [res, summary] = await Promise.all([
-          fetchParaVault(api, { paraSpace: space, search, pageSize: cfg.pageSize }),
-          fetchParaSummary(api),
-        ]);
+    React.useEffect(() => {
+      let active = true;
+      (async () => {
+        const summary = await fetchParaSummary(api);
+        if (!active) return;
         let orgs = Array.isArray(summary.organizations) ? summary.organizations.map((o) => String(o || '').trim()).filter(Boolean) : [];
         if (summary.organizationId == null && !orgs.length && api?.request) {
           try {
             const orgRes = await api.request({
               url: 'latticeOrganizations:list',
               method: 'get',
-              params: { pageSize: 20, filter: { active: true }, sort: ['id'] },
+              params: { pageSize: 20, filter: JSON.stringify({ active: true }), sort: ['id'] },
               skipNotify: true,
             });
             const rows = Array.isArray(orgRes?.data?.data) ? orgRes.data.data : [];
@@ -532,22 +773,40 @@ function createBlockRenderers(client, React, antd, app) {
           } catch {
             // Fallback gracefully if organization list is unavailable
           }
+          if (!active) return;
         }
         if (ctxOrg && !orgs.includes(ctxOrg)) {
           orgs = [ctxOrg, ...orgs];
         }
-        setState({ loading: false, items: res.items, pluginDisabled: res.pluginDisabled, error: '' });
         setOrgInfo({ loaded: true, organizationId: summary.organizationId, organizations: orgs });
         if (summary.organizationId == null) {
           const fallback = ctxOrg || orgs[0] || '';
           setSelectedOrg((prev) => (prev && orgs.includes(prev) ? prev : fallback));
         }
-      } catch {
-        setState({ loading: false, items: [], pluginDisabled: false, error: 'Không tải được tài liệu P.A.R.A.' });
-      }
-    }, [api, space, search, cfg.pageSize, ctxOrg]);
+      })();
+      return () => { active = false; };
+    }, [api, ctxOrg]);
 
-    React.useEffect(() => { setSpace(cfg.paraSpace || 'all'); }, [cfg.paraSpace]);
+    const load = React.useCallback(async () => {
+      const seq = ++loadSeqRef.current;
+      setState((prev) => ({ ...prev, loading: true, error: '' }));
+      try {
+        const res = await fetchParaVault(api, { paraSpace: space, search, page, pageSize });
+        if (seq !== loadSeqRef.current) return;
+        setState({
+          loading: false,
+          items: res.items,
+          total: Number(res.total ?? res.items.length ?? 0),
+          pluginDisabled: res.pluginDisabled,
+          error: '',
+        });
+      } catch {
+        if (seq !== loadSeqRef.current) return;
+        setState({ loading: false, items: [], total: 0, pluginDisabled: false, error: 'Không tải được tài liệu P.A.R.A.' });
+      }
+    }, [api, space, search, page, pageSize]);
+
+    React.useEffect(() => { setSpace(cfg.paraSpace || 'all'); setPage(1); }, [cfg.paraSpace]);
     React.useEffect(() => { load(); }, [load]);
 
     React.useEffect(() => {
@@ -645,18 +904,29 @@ function createBlockRenderers(client, React, antd, app) {
     }
 
     const tabs = [['all', 'Tất cả'], ['projects', 'Projects'], ['areas', 'Areas'], ['resources', 'Resources'], ['archives', 'Archives']];
+    const totalPages = Math.max(1, Math.ceil((Number(state.total) || 0) / pageSize));
+    const selectedDoc = selectedDocState.doc;
+    const selectedDocStatus = selectedDoc?.status ? String(selectedDoc.status).trim().toLowerCase() : '';
+    const isSelectedDocBlocked = Boolean(
+      selectedDoc && (selectedDoc.active === false || (selectedDocStatus && selectedDocStatus !== 'active')),
+    );
+    const selectedDocBlockedLabel = selectedDoc?.active === false && (!selectedDocStatus || selectedDocStatus === 'active')
+      ? 'ngừng kích hoạt'
+      : (selectedDocStatus || 'không hoạt động');
+    const selectedDocMarkdown = selectedDoc ? (selectedDoc.contentMarkdown ?? selectedDoc.content ?? '') : '';
+
     return h('div', { 'data-testid': 'dxos-para-vault-block' },
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 } },
         h('strong', { style: { fontSize: 15 } }, stripDevBracketTags(cfg.title || 'Kho P.A.R.A.')),
         h('input', {
           type: 'search', value: search, placeholder: 'Tìm tài liệu...',
-          onChange: (e) => setSearch(e.target.value),
+          onChange: (e) => { setSearch(e.target.value); setPage(1); },
           style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, maxWidth: '100%', minWidth: 0 },
         }),
       ),
       h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 } },
         tabs.map(([key, label]) => h('button', {
-          key, type: 'button', onClick: () => setSpace(key),
+          key, type: 'button', onClick: () => { setSpace(key); setPage(1); },
           style: {
             padding: '3px 10px', borderRadius: 999, fontSize: 12, cursor: 'pointer',
             border: '1px solid #cbd5e1',
@@ -679,8 +949,8 @@ function createBlockRenderers(client, React, antd, app) {
       },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
           h('strong', { style: { fontSize: 13, color: '#1e3a8a' } },
-            selectedDocState.doc
-              ? `${selectedDocState.doc.code ? `${selectedDocState.doc.code} — ` : ''}${selectedDocState.doc.title || `#${activeParaDocId}`}`
+            selectedDoc && !isSelectedDocBlocked
+              ? `${selectedDoc.code ? `${selectedDoc.code} — ` : ''}${selectedDoc.title || `#${activeParaDocId}`}`
               : `Tài liệu P.A.R.A. #${activeParaDocId}`),
           h('button', {
             type: 'button',
@@ -700,9 +970,17 @@ function createBlockRenderers(client, React, antd, app) {
         ),
         selectedDocState.loading ? h('div', { style: { fontSize: 12, color: '#475569' } }, 'Đang tải chi tiết tài liệu…') : null,
         selectedDocState.error ? h('div', { style: { fontSize: 12, color: '#b45309' } }, selectedDocState.error) : null,
-        selectedDocState.doc?.paraSpace ? h('div', { style: { fontSize: 11, color: '#4338ca', fontWeight: 700, textTransform: 'uppercase' } }, `Phân vùng: ${selectedDocState.doc.paraSpace}`) : null,
-        selectedDocState.doc?.summary ? h('div', { style: { fontSize: 12, color: '#334155' } }, selectedDocState.doc.summary) : null,
-        selectedDocState.doc?.content ? h('div', { style: { fontSize: 12, color: '#0f172a', whiteSpace: 'pre-wrap' } }, selectedDocState.doc.content) : null,
+        isSelectedDocBlocked ? h('div', {
+          'data-testid': 'dxos-para-doc-inactive-notice',
+          role: 'alert',
+          style: { fontSize: 12, color: '#92400e', background: '#fef3c7', border: '1px solid #fcd34d', borderRadius: 6, padding: '6px 10px' },
+        }, `Tài liệu này đang ở trạng thái "${selectedDocBlockedLabel}" (nháp/lưu trữ) và không được hiển thị trên cổng nghiệp vụ.`) : null,
+        !isSelectedDocBlocked && selectedDoc?.paraSpace ? h('div', { style: { fontSize: 11, color: '#4338ca', fontWeight: 700, textTransform: 'uppercase' } }, `Phân vùng: ${selectedDoc.paraSpace}`) : null,
+        !isSelectedDocBlocked && selectedDoc?.summary ? h('div', { style: { fontSize: 12, color: '#334155' } }, selectedDoc.summary) : null,
+        !isSelectedDocBlocked && selectedDocMarkdown ? h('div', {
+          'data-testid': 'dxos-para-doc-body',
+          style: { fontSize: 12, color: '#0f172a', lineHeight: 1.55 },
+        }, renderSafeMarkdown(React, selectedDocMarkdown)) : null,
       ) : null,
       cfg.enableQuickCreate !== false ? h('form', { onSubmit: handleQuickCreate, style: { display: 'flex', gap: 6, marginBottom: 10, flexWrap: 'wrap' } },
         isRootAdmin ? h('select', {
@@ -743,6 +1021,44 @@ function createBlockRenderers(client, React, antd, app) {
             );
           }),
         ),
+      (state.items.length > 0 || page > 1) ? h('div', {
+        'data-testid': 'dxos-para-pagination',
+        style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 10, paddingTop: 8, borderTop: '1px solid #e2e8f0', fontSize: 12 },
+      },
+        h('span', { style: { color: '#475569' } }, `Trang ${page} / ${totalPages}`),
+        h('div', { style: { display: 'flex', gap: 6 } },
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-para-prev-page',
+            disabled: page <= 1 || state.loading,
+            onClick: () => setPage((p) => Math.max(1, p - 1)),
+            style: {
+              padding: '3px 10px',
+              borderRadius: 6,
+              border: '1px solid #cbd5e1',
+              background: page <= 1 ? '#f1f5f9' : '#ffffff',
+              color: page <= 1 ? '#94a3b8' : '#0f172a',
+              fontSize: 12,
+              cursor: page <= 1 ? 'not-allowed' : 'pointer',
+            },
+          }, 'Trước'),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-para-next-page',
+            disabled: page >= totalPages || state.loading,
+            onClick: () => setPage((p) => Math.min(totalPages, p + 1)),
+            style: {
+              padding: '3px 10px',
+              borderRadius: 6,
+              border: '1px solid #cbd5e1',
+              background: page >= totalPages ? '#f1f5f9' : '#ffffff',
+              color: page >= totalPages ? '#94a3b8' : '#0f172a',
+              fontSize: 12,
+              cursor: page >= totalPages ? 'not-allowed' : 'pointer',
+            },
+          }, 'Sau'),
+        ),
+      ) : null,
     );
   }
 
@@ -1095,6 +1411,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
 
   const specs = [
     [
+      'DxosPortalHeroBlockModel',
       DxosPortalHeroBlockModel,
       'DX-OS Portal Hero & Quick Actions',
       {
@@ -1113,6 +1430,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosKpiMetricBlockModel',
       DxosKpiMetricBlockModel,
       'DX-OS KPI Metric Grid',
       { title: 'Chỉ số vận hành', columns: 4, metricsJson: DEFAULT_KPI_METRICS },
@@ -1123,6 +1441,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosContextTelemetryBlockModel',
       DxosContextTelemetryBlockModel,
       'DX-OS NGSI-LD Context & Telemetry',
       { title: 'Ngữ cảnh NGSI-LD & Cảm biến', assetEntityId: '', warningThreshold: '80', showSyncStatus: true },
@@ -1134,6 +1453,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosAiProposalBlockModel',
       DxosAiProposalBlockModel,
       'DX-OS AI Proposal & Evidence',
       { title: 'Đề xuất AI & Bằng chứng', targetCollection: 'latticeIncidentCases', state: 'all', pageSize: 5, showEvidence: true },
@@ -1158,6 +1478,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosWorkflowTasksBlockModel',
       DxosWorkflowTasksBlockModel,
       'DX-OS Workflow & My Tasks',
       { title: 'Hộp việc Quy trình Poka-yoke', statusFilter: 'pending', pageSize: 6 },
@@ -1171,6 +1492,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosParaVaultBlockModel',
       DxosParaVaultBlockModel,
       'DX-OS P.A.R.A. Knowledge Vault',
       { title: 'Kho tri thức P.A.R.A.', paraSpace: 'all', pageSize: 6, enableQuickCreate: true, defaultOrganizationId: '' },
@@ -1192,15 +1514,17 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosCreativeStudioBlockModel',
       DxosCreativeStudioBlockModel,
-      'DX-OS Creative Studio Micro-App [AI]',
-      { title: 'Buồng Điều hành Thông minh [AI Studio]', blueprintJson: DEFAULT_CREATIVE_BLUEPRINT },
+      'DX-OS Creative Studio Micro-App',
+      { title: 'Buồng Điều hành Thông minh', blueprintJson: DEFAULT_CREATIVE_BLUEPRINT },
       {
         title: { type: 'string', title: 'Tiêu đề Block', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         blueprintJson: { type: 'string', title: 'Cấu hình DSL Sáng tạo (JSON)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
       },
     ],
     [
+      'DxosRecordWorkbenchBlockModel',
       DxosRecordWorkbenchBlockModel,
       'DX-OS Chatter, Chứng từ & Xuất báo cáo',
       {
@@ -1230,6 +1554,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosWebGisBlockModel',
       DxosWebGisBlockModel,
       'DX-OS Bản đồ Giám sát WebGIS [D]',
       {
@@ -1258,6 +1583,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosKanbanScheduleBlockModel',
       DxosKanbanScheduleBlockModel,
       'DX-OS Bảng Kanban & Lịch [H]',
       {
@@ -1295,6 +1621,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosWmsOpsBlockModel',
       DxosWmsOpsBlockModel,
       'DX-OS Vận hành Kho FEFO & Bulk Import [W]',
       {
@@ -1333,6 +1660,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     ],
     [
+      'DxosBiChartBlockModel',
       DxosBiChartBlockModel,
       'DX-OS Biểu đồ & Phân tích BI [D]',
       {
@@ -1370,7 +1698,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         },
         groupBy: {
           type: 'string',
-          title: 'Trường nhóm chính (groupBy)',
+          title: 'Trường nhóm chính',
           'x-decorator': 'FormItem',
           'x-component': 'Select',
           enum: biGroupByEnum,
@@ -1420,7 +1748,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
   ensureSettingsModalScrollStyle();
 
   const models = {};
-  for (const [ModelClass, label, defaultParams, uiSchema] of specs) {
+  for (const [modelKey, ModelClass, label, defaultParams, uiSchema] of specs) {
     ModelClass.define({ label });
     ModelClass.registerFlow({
       key: 'dxosBlockSettings',
@@ -1446,7 +1774,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         },
       },
     });
-    models[ModelClass.name] = ModelClass;
+    models[modelKey] = ModelClass;
   }
 
   flowEngine.registerModels(models);

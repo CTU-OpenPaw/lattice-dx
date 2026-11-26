@@ -545,8 +545,19 @@ test('M2-4g: submitTwinDesired enforces twinBusy guard against double submit and
     let resolveTwin;
     let twinCalls = 0;
     const twinApi = {
-      auth: { getToken: () => 'jwt-twin' },
+      auth: { role: 'ldx_manager', getToken: () => 'jwt-twin' },
       async request(req) {
+        if (req.url === 'roles:check') {
+          return {
+            data: {
+              data: {
+                allowAll: false,
+                resources: ['latticeAssets'],
+                actions: { 'latticeAssets:update': true },
+              },
+            },
+          };
+        }
         if (req.url === 'dxosBlocks:twinSetDesired') {
           twinCalls += 1;
           return new Promise((resolve) => { resolveTwin = resolve; });
@@ -556,7 +567,10 @@ test('M2-4g: submitTwinDesired enforces twinBusy guard against double submit and
     };
     const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
     let tree = fakeReact._render(MobilePage, { storage, apiClient: twinApi });
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null, 'Twin control must remain hidden fail-closed before roles:check resolves');
     fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    tree = fakeReact._render(MobilePage, { storage, apiClient: twinApi });
     findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.onChange({ target: { value: '12' } });
     findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '-18' } });
     tree = fakeReact._render(MobilePage, { storage, apiClient: twinApi });
@@ -851,6 +865,285 @@ test('M2-4j: submitMobileAiPrompt skips dxosAi:agentChat when live aiConversatio
     assert.equal(calls.includes('dxosAi:agentChat'), false, 'Must NOT call dxosAi:agentChat 404 when live endpoints already failed with server error');
     const drawerText = collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-drawer'));
     assert.ok(drawerText.includes('A2A gateway down') || drawerText.includes('LLM provider unavailable'), 'Must surface live AI server error instead of fake success');
+    fakeReact._unmount();
+  }, { storage });
+});
+
+test('P1-12: Mobile AI chat enforces AbortController timeout, skips cascading dxos-a2a on 503/timeout, renders loading & inline error card with Thử lại button', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+
+  await withMobileGlobals(async () => {
+    const calls = [];
+    let failMode = 'timeout';
+    const aiApi = {
+      auth: { getToken: () => 'jwt-ai-timeout' },
+      async request(req) {
+        calls.push(req.url);
+        if (req.url === 'dxosAi:portalAgents') return { data: { data: { employees: [{ username: 'dxos-logistics' }] } } };
+        if (req.url === 'aiConversations:create') {
+          if (failMode === 'timeout') {
+            return new Promise(() => {}); // Never resolves -> triggers aiTimeoutMs
+          }
+          if (failMode === '503') {
+            throw Object.assign(new Error('Service Unavailable'), { response: { status: 503, data: { errors: [{ message: '9router offline' }] } } });
+          }
+          return { data: { data: { id: 'sess-1' } } };
+        }
+        if (req.url === 'aiConversations:sendMessages') {
+          return { data: { data: { reply: 'Đã khôi phục trợ lý AI.' } } };
+        }
+        return { data: {} };
+      },
+    };
+
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+    fakeReact._flushEffects();
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-pill').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-input').props.onChange({ target: { value: 'Tình trạng đơn?' } });
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+
+    const submitPromise = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-form').props.onSubmit({ preventDefault() {} });
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-loading'), 'Loading indicator must appear while aiBusy');
+    await submitPromise;
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+
+    assert.equal(calls.includes('dxos-a2a'), false, 'Must skip cascading dxos-a2a on timeout');
+    const errCard = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-error-card');
+    assert.ok(errCard, 'Expected inline error card on timeout');
+    const retryBtn = findNode(errCard, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-retry-btn');
+    assert.ok(retryBtn, 'Expected Thử lại button in error card');
+
+    // Retry succeeds cleanly when server recovers
+    failMode = 'ok';
+    await retryBtn.props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+    assert.ok(collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-reply')).includes('Đã khôi phục trợ lý AI.'));
+
+    // 503 also skips cascading dxos-a2a
+    calls.length = 0;
+    failMode = '503';
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-input').props.onChange({ target: { value: 'Thử 503' } });
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-form').props.onSubmit({ preventDefault() {} });
+    tree = fakeReact._render(MobilePage, { storage, apiClient: aiApi, aiTimeoutMs: 30 });
+    assert.equal(calls.includes('dxos-a2a'), false, 'Must skip cascading dxos-a2a on 503');
+    fakeReact._unmount();
+  }, { storage });
+});
+
+test('T2-MOBILE-01: dist/client-v2 marks mobile routes skipAuthCheck: true and guards expired-JWT background calls without blocking epodCapture', async () => {
+  const distV2Src = readFileSync(join(PLUGIN_ROOT, 'dist/client-v2/index.js'), 'utf8');
+  let modV2;
+  const defineV2 = (name, _deps, factory) => {
+    modV2 = factory({ Plugin: class {} }, {});
+  };
+  defineV2.amd = {};
+  const expiredPayload = Buffer.from(JSON.stringify({ userId: 5, exp: Math.floor(Date.now() / 1000) - 3600 })).toString('base64url');
+  const expiredJwt = `eyJhbGciOiJIUzI1NiJ9.${expiredPayload}.sig`;
+
+  const reqInterceptors = [];
+  const networkCalls = [];
+  const routes = new Map([['mobile', { path: '/mobile', element: { type: 'MobileLayout' } }]]);
+  const storage = makeMemoryStorage();
+  storage.setItem('NOCOBASE_TOKEN', expiredJwt);
+
+  const mockWindow = {
+    location: { pathname: '/v/mobile', search: '', hash: '' },
+    localStorage: storage,
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  vm.runInNewContext(distV2Src, {
+    define: defineV2,
+    URL,
+    URLSearchParams,
+    atob: (s) => Buffer.from(s, 'base64').toString('binary'),
+    TextDecoder,
+    sessionStorage: { getItem: () => null },
+    window: mockWindow,
+  });
+
+  const prevWin = global.window;
+  global.window = mockWindow;
+  try {
+    const apiClient = {
+      auth: { getToken: () => expiredJwt },
+      axios: {
+        interceptors: {
+          request: { use: (fn) => reqInterceptors.push(fn) },
+          response: { handlers: [], use: () => {} },
+        },
+      },
+      async request(cfg) {
+        networkCalls.push(cfg.url);
+        throw Object.assign(new Error('Unauthorized'), { status: 401 });
+      },
+    };
+    const PluginClass = modV2.default;
+    const p = new PluginClass();
+    p.app = {
+      apiClient,
+      router: {
+        has: (name) => routes.has(name),
+        routes: Object.fromEntries(routes),
+        add: (name, route) => routes.set(name, route),
+      },
+    };
+    await p.load();
+
+    assert.equal(routes.get('mobile').skipAuthCheck, true);
+    assert.equal(routes.get('dxos-mobile-field').skipAuthCheck, true);
+    assert.equal(routes.get('dxos-mobile-field-sub').skipAuthCheck, true);
+
+    for (const bgUrl of ['auth:check', 'aiEmployees:listByUser', 'aiConversations:unreadCounts', 'blockTemplates:list']) {
+      const res = await apiClient.request({ url: bgUrl });
+      assert.equal(res.status, 200, `Expected expired-JWT guard for ${bgUrl}`);
+    }
+    assert.equal(networkCalls.length, 0);
+
+    // Mutating ePOD sync must still hit the server (triggering 401 stop in flushOfflineQueue)
+    await assert.rejects(
+      () => apiClient.request({ url: 'dxosWms:epodCapture', method: 'post' }),
+      (err) => err.status === 401,
+    );
+    assert.deepEqual(networkCalls, ['dxosWms:epodCapture']);
+  } finally {
+    global.window = prevWin;
+  }
+});
+
+test('T1-MOBILE-06: MobileFieldPwaPage offline incident create queues valid assetEntityId + organizationId + summary and syncs cleanly through dxosBlocks:alarmIngest', async () => {
+  const { createMobileFieldPwaPage, flushOfflineQueue } = require('../src/client-v2/mobile-field-pwa');
+  const { createDxosBlocksActions } = require('../../plugin-dxos-blocks/src/server/blocks-api');
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+
+  const createdIncidents = [];
+  const mockDb = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return {
+          find: async () => [{ id: 201, userId: 35, organizationId: 'native-ui-lab', active: true }],
+        };
+      }
+      if (name === 'roles') {
+        return {
+          findOne: async () => ({ name: 'ldx_manager', allowAll: false, strategy: { actions: ['*:*'] } }),
+        };
+      }
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async () => ({ roleName: 'ldx_manager', name: 'latticeIncidentCases', usingActionsConfig: false }),
+        };
+      }
+      if (name === 'latticeIncidentCases') {
+        return {
+          find: async () => [],
+          create: async ({ values }) => {
+            const row = { id: createdIncidents.length + 1, ...values };
+            createdIncidents.push(row);
+            return row;
+          },
+        };
+      }
+      if (name === 'latticeNotifications') {
+        return { find: async () => [], create: async ({ values }) => values };
+      }
+      return null;
+    },
+  };
+  const blocksActions = createDxosBlocksActions(mockDb, {});
+  const alarmCalls = [];
+
+  await withMobileGlobals(async () => {
+    const winListeners = {};
+    global.window.addEventListener = (ev, fn) => {
+      (winListeners[ev] ||= []).push(fn);
+    };
+    global.window.removeEventListener = (ev, fn) => {
+      if (winListeners[ev]) winListeners[ev] = winListeners[ev].filter((f) => f !== fn);
+    };
+    const managerApi = {
+      auth: { role: 'ldx_manager', getToken: () => 'jwt-mgr' },
+      async request(req) {
+        if (req.url === 'roles:check') {
+          return {
+            data: {
+              data: {
+                role: 'ldx_manager',
+                allowAll: false,
+                resources: ['latticeOrders', 'latticeIncidentCases', 'latticeServiceTickets'],
+                actions: { 'latticeIncidentCases:create': true, 'dxosBlocks:alarmIngest': true },
+              },
+            },
+          };
+        }
+        if (req.url === 'latticeOrders:list') {
+          return { data: { data: [{ id: 10, code: 'ORD-10', organizationId: 'native-ui-lab', status: 'submitted' }] } };
+        }
+        if (req.url === 'latticeIncidentCases:list') return { data: { data: [] } };
+        if (req.url === 'latticeServiceTickets:list') return { data: { data: [] } };
+        if (req.url === 'dxosApprovals:listInbox') return { data: { data: { items: [] } } };
+        if (req.url === 'dxosBlocks:alarmIngest') {
+          alarmCalls.push(req.data);
+          const ctx = {
+            method: 'POST',
+            state: { currentRole: 'ldx_manager', currentUser: { id: 35, username: 'native.lab.manager' } },
+            action: { params: { values: { ...(req.data || {}) } } },
+          };
+          await blocksActions.alarmIngest(ctx, async () => {});
+          return { data: { data: ctx.body } };
+        }
+        return { data: { data: { ok: true } } };
+      },
+    };
+
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 30));
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+
+    // Switch offline via window 'offline' event, open incident form, submit without entering optional entity URN
+    Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: false } });
+    for (const fn of winListeners.offline || []) fn();
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-new-title').props.onChange({ target: { value: 'Sự cố offline E2E test' } });
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+
+    const queued = await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-new-submit').props.onClick({ preventDefault() {} });
+    assert.ok(queued && queued.queued === true, 'Offline incident submit must enqueue item');
+    assert.equal(queued.item.actionType, 'iot.incidentCreate');
+    assert.equal(queued.item.payload.organizationId, 'native-ui-lab');
+    assert.ok(queued.item.payload.assetEntityId, 'Payload must include non-empty assetEntityId');
+    assert.equal(queued.item.payload.summary, 'Sự cố offline E2E test');
+
+    // Outbox drawer displays the incident title
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: managerApi });
+    const drawerText = collectText(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-outbox-drawer'));
+    assert.ok(drawerText.includes('Sự cố offline E2E test'));
+
+    // Reconnect and flush queue -> must pass real blocksActions.alarmIngest with 0 quarantined items
+    const syncRes = await flushOfflineQueue({ apiClient: managerApi, storage, useIndexedDB: false, isOnline: true });
+    assert.equal(syncRes.synced, 1);
+    assert.equal(syncRes.quarantined, 0);
+    assert.equal(syncRes.remaining.length, 0);
+    assert.equal(alarmCalls.length, 1);
+    assert.equal(alarmCalls[0].organizationId, 'native-ui-lab');
+    assert.ok(alarmCalls[0].assetEntityId);
+    assert.equal(createdIncidents.length, 1);
+    assert.equal(createdIncidents[0].name, 'Sự cố offline E2E test');
+    assert.equal(createdIncidents[0].organizationId, 'native-ui-lab');
+
     fakeReact._unmount();
   }, { storage });
 });

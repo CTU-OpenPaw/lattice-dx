@@ -783,3 +783,195 @@ test('M1.1 Iteration 2: isNumericCollectionField aligns formula eligibility with
     ['calcNum', 'calcData'],
   );
 });
+
+test('T3-CF-02 / T4-RW-04: fetchParaVault includes code in $or search filter and DxosParaVaultView drops stale out-of-order responses', async () => {
+  const { fetchParaVault } = require(path.join(PLUGIN_ROOT, 'src/client/blocks-helpers.js'));
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+
+  const seenRequests = [];
+  const api = {
+    async request(req) {
+      seenRequests.push(req);
+      return {
+        data: {
+          data: [{ id: 101, code: 'ACT-RW04-ABCD-1234', title: 'Active SOP', paraSpace: 'projects', status: 'active' }],
+          meta: { count: 1 },
+        },
+      };
+    },
+  };
+
+  const res = await fetchParaVault(api, { paraSpace: 'all', search: '  ACT-RW04-ABCD-1234  ', page: 1, pageSize: 6 });
+  assert.equal(res.items.length, 1);
+  assert.equal(seenRequests.length, 1);
+  assert.equal(seenRequests[0].url, 'latticeParaDocuments:list');
+  assert.equal(
+    typeof seenRequests[0].params.filter,
+    'string',
+    'fetchParaVault must JSON-stringify filter so NocoBase APIClient qs(brackets) does not collapse $or branches into one AND object',
+  );
+  const wireQuery = new URLSearchParams({
+    page: String(seenRequests[0].params.page),
+    pageSize: String(seenRequests[0].params.pageSize),
+    filter: seenRequests[0].params.filter,
+  }).toString();
+  const parsedFilter = JSON.parse(new URLSearchParams(wireQuery).get('filter'));
+  assert.deepEqual(parsedFilter, {
+    $and: [
+      { active: true },
+      { status: 'active' },
+      {
+        $or: [
+          { code: { $includes: 'ACT-RW04-ABCD-1234' } },
+          { title: { $includes: 'ACT-RW04-ABCD-1234' } },
+          { summary: { $includes: 'ACT-RW04-ABCD-1234' } },
+          { tags: { $includes: 'ACT-RW04-ABCD-1234' } },
+        ],
+      },
+    ],
+  });
+  const orClause = parsedFilter.$and.find((entry) => Array.isArray(entry?.$or));
+  assert.equal(orClause.$or.length, 4, '$or must contain 4 distinct branch objects');
+  for (const branch of orClause.$or) {
+    assert.equal(Object.keys(branch).length, 1, 'Each $or branch must remain a single-key object');
+  }
+
+  // Also test race-condition guard in DxosParaVaultView.load when responses arrive out of order
+  const states = [];
+  const refs = [];
+  const memos = [];
+  const callbacks = [];
+  const effects = [];
+  let si = 0; let ri = 0; let mi = 0; let ci = 0; let ei = 0;
+  const depsChanged = (a, b) => !a || !b || a.length !== b.length || a.some((v, i) => !Object.is(v, b[i]));
+  const hooksReact = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({
+      type,
+      props: props || {},
+      children: children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false),
+    }),
+    useState(init) {
+      const idx = si++;
+      if (!(idx in states)) states[idx] = typeof init === 'function' ? init() : init;
+      return [states[idx], (u) => { states[idx] = typeof u === 'function' ? u(states[idx]) : u; }];
+    },
+    useRef(init) {
+      const idx = ri++;
+      if (!(idx in refs)) refs[idx] = { current: init };
+      return refs[idx];
+    },
+    useMemo(fn, deps) {
+      const idx = mi++;
+      if (!memos[idx] || depsChanged(memos[idx].deps, deps)) memos[idx] = { value: fn(), deps };
+      return memos[idx].value;
+    },
+    useCallback(fn, deps) {
+      const idx = ci++;
+      if (!callbacks[idx] || depsChanged(callbacks[idx].deps, deps)) callbacks[idx] = { fn, deps };
+      return callbacks[idx].fn;
+    },
+    useEffect(fn, deps) {
+      const idx = ei++;
+      if (!effects[idx] || depsChanged(effects[idx].deps, deps)) {
+        effects[idx] = { fn, deps, pending: true };
+      }
+    },
+  };
+
+  let summaryCalls = 0;
+  const pendingListResolvers = [];
+  const raceApi = {
+    request(req) {
+      if (req.url === 'latticePara:summary') {
+        summaryCalls += 1;
+        return Promise.resolve({ data: { data: { organizationId: 'org-1', organizations: ['org-1'] } } });
+      }
+      if (req.url === 'latticeParaDocuments:list') {
+        return new Promise((resolve) => {
+          pendingListResolvers.push({ req, resolve });
+        });
+      }
+      return Promise.resolve({ data: { data: {} } });
+    },
+  };
+
+  class MockBlockModel {
+    constructor(opts = {}) { this.props = opts.props || {}; this.stepParams = opts.stepParams || {}; }
+    getStepParams(flowKey, stepKey) { return this.stepParams?.[flowKey]?.[stepKey]; }
+    static define() {}
+    static registerFlow() {}
+  }
+
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => raceApi, useUIConfigurationPermissions: () => ({ allowAll: false }) },
+    hooksReact,
+    {},
+    { BlockModel: MockBlockModel },
+    { registerModels() {} },
+    {},
+  );
+  const paraInst = new models.DxosParaVaultBlockModel({ props: { title: 'Kho P.A.R.A.', pageSize: 6 } });
+  const renderOnce = () => {
+    si = 0; ri = 0; mi = 0; ci = 0; ei = 0;
+    const wrapper = paraInst.renderComponent();
+    const tree = wrapper.type(wrapper.props);
+    for (const ef of effects) {
+      if (ef && ef.pending) {
+        ef.pending = false;
+        ef.fn();
+      }
+    }
+    return tree;
+  };
+
+  const findInput = (node) => {
+    if (!node || typeof node !== 'object') return null;
+    if (node.type === 'input' && node.props?.type === 'search') return node;
+    for (const c of (node.children || [])) {
+      const hit = findInput(c);
+      if (hit) return hit;
+    }
+    return null;
+  };
+
+  // First render fires initial load (seq 1)
+  let tree = renderOnce();
+  const searchInput = findInput(tree);
+  assert.ok(searchInput, 'Search input must be rendered');
+  // Simulate typing rapid search query -> triggers second load (seq 2)
+  searchInput.props.onChange({ target: { value: 'ACT-RW04-NEW' } });
+  tree = renderOnce();
+
+  assert.equal(pendingListResolvers.length, 2, 'Two concurrent list requests should be in flight');
+  assert.equal(summaryCalls, 1, 'Search typing must not re-fetch latticePara:summary repeatedly');
+  const secondFilter = JSON.parse(pendingListResolvers[1].req.params.filter);
+  assert.equal(
+    secondFilter.$and.find((c) => Array.isArray(c?.$or))?.$or?.length,
+    4,
+    'Search refetch must emit 4 distinct $or branches in JSON filter',
+  );
+
+  // Resolve newer request (seq 2) FIRST
+  pendingListResolvers[1].resolve({
+    data: {
+      data: [{ id: 2, code: 'ACT-RW04-NEW', title: 'New Active Doc', paraSpace: 'projects', status: 'active' }],
+      meta: { count: 1 },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 10));
+
+  // Now resolve stale older request (seq 1) AFTER seq 2 — must be ignored!
+  pendingListResolvers[0].resolve({
+    data: {
+      data: [{ id: 1, code: 'STALE-DOC', title: 'Stale Doc', paraSpace: 'projects', status: 'active' }],
+      meta: { count: 1 },
+    },
+  });
+  await new Promise((r) => setTimeout(r, 10));
+
+  tree = renderOnce();
+  const dump = JSON.stringify(tree);
+  assert.ok(dump.includes('ACT-RW04-NEW'), 'Latest search result must be retained');
+  assert.equal(dump.includes('STALE-DOC'), false, 'Stale out-of-order response must be discarded');
+});

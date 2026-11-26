@@ -28,6 +28,7 @@ const PUBLIC_FORM_FIELD_TYPES = Object.freeze([
   'date',
   'email',
   'select',
+  'file',
 ]);
 
 const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/;
@@ -142,11 +143,11 @@ function mapDomainFieldType(rawType) {
 
 function makeStyles() {
   return {
-    stack: { display: 'grid', gap: 14 },
-    card: { padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', background: '#ffffff', display: 'grid', gap: 12 },
-    subCard: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 10 },
-    grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 },
-    grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10 },
+    stack: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 14 },
+    card: { padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', background: '#ffffff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 12 },
+    subCard: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 10 },
+    grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, minWidth: 0 },
+    grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 10, minWidth: 0 },
     rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
     rowWrap: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
     label: { display: 'block', fontSize: 12, fontWeight: 600, color: '#334155', marginBottom: 4 },
@@ -209,12 +210,12 @@ function emptyEditorState() {
 }
 
 function normalizeFormField(f) {
-  const optionsArr = Array.isArray(f.options)
-    ? f.options
-    : String(f.enumText || '')
+  const optionsArr = typeof f.enumText === 'string'
+    ? f.enumText
       .split(',')
       .map((s) => s.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+    : (Array.isArray(f.options) ? f.options : []);
   const out = {
     name: String(f.name || '').trim(),
     label: String(f.label || f.title || f.name || '').trim(),
@@ -262,6 +263,19 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
     const [busy, setBusy] = React.useState(false);
     const [statusQuery, setStatusQuery] = React.useState({ slug: '', submissionCode: '', token: '' });
     const [statusPreview, setStatusPreview] = React.useState(null);
+    const [submissionsDrawer, setSubmissionsDrawer] = React.useState({
+      open: false,
+      form: null,
+      items: [],
+      total: 0,
+      page: 1,
+      pageSize: 20,
+      status: 'all',
+      search: '',
+      loading: false,
+      selectedItem: null,
+    });
+    const [previewForm, setPreviewForm] = React.useState(null);
     const [runtimeRef] = React.useState(() => ({ api }));
     runtimeRef.api = api;
 
@@ -371,10 +385,13 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
         defaultValuesText: JSON.stringify(form.defaultValuesJson || {}, null, 2),
         allowedFields: (Array.isArray(form.allowedFieldsJson) ? form.allowedFieldsJson : [])
           .filter((x) => x && typeof x === 'object')
-          .map((f) => ({
-            ...f,
-            enumText: Array.isArray(f.options) ? f.options.join(', ') : (f.enumText || ''),
-          })),
+          .map((f) => {
+            const { options, ...rest } = f;
+            return {
+              ...rest,
+              enumText: Array.isArray(options) ? options.join(', ') : (f.enumText || ''),
+            };
+          }),
       });
     }
 
@@ -410,7 +427,14 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
     function updateFieldRow(idx, patch) {
       setEditor((prev) => ({
         ...prev,
-        allowedFields: prev.allowedFields.map((row, i) => (i === idx ? { ...row, ...patch } : row)),
+        allowedFields: prev.allowedFields.map((row, i) => {
+          if (i !== idx) return row;
+          const next = { ...row, ...patch };
+          if (Object.prototype.hasOwnProperty.call(patch, 'enumText')) {
+            delete next.options;
+          }
+          return next;
+        }),
       }));
     }
 
@@ -522,6 +546,71 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
       } finally {
         setBusy(false);
       }
+    }
+
+    async function loadSubmissions(targetForm, opts = {}) {
+      const clientApi = runtimeRef.api;
+      if (!clientApi?.request || !targetForm?.slug) return;
+      const nextStatus = opts.status ?? submissionsDrawer.status ?? 'all';
+      const nextSearch = opts.search ?? submissionsDrawer.search ?? '';
+      const nextPage = Math.max(1, Number(opts.page || submissionsDrawer.page || 1));
+      setSubmissionsDrawer((p) => ({
+        ...p,
+        open: true,
+        form: targetForm,
+        status: nextStatus,
+        search: nextSearch,
+        page: nextPage,
+        loading: true,
+      }));
+      try {
+        const res = await clientApi.request({
+          url: 'dxosForms:listSubmissions',
+          method: 'get',
+          params: {
+            ...orgPayload,
+            slug: targetForm.slug,
+            page: nextPage,
+            pageSize: 20,
+            ...(nextStatus && nextStatus !== 'all' ? { status: nextStatus } : {}),
+            ...(String(nextSearch).trim() ? { search: String(nextSearch).trim() } : {}),
+          },
+          skipNotify: true,
+        });
+        const d = unwrapData(res);
+        const items = Array.isArray(d.items) ? d.items : [];
+        setSubmissionsDrawer((p) => ({
+          ...p,
+          open: true,
+          form: targetForm,
+          items,
+          total: Number(d.total ?? items.length) || 0,
+          page: Number(d.page || nextPage) || 1,
+          pageSize: Number(d.pageSize || 20) || 20,
+          loading: false,
+          selectedItem: p.selectedItem && items.some((it) => (it.id || it.submissionCode) === (p.selectedItem.id || p.selectedItem.submissionCode))
+            ? p.selectedItem
+            : (items[0] || null),
+        }));
+      } catch (err) {
+        setSubmissionsDrawer((p) => ({ ...p, loading: false }));
+        reportFeedback({ type: 'error', text: extractError(err, 'Không tải được danh sách hồ sơ nộp.') });
+      }
+    }
+
+    function openLivePreview(formObj) {
+      const fields = Array.isArray(formObj?.allowedFields)
+        ? formObj.allowedFields.map(normalizeFormField)
+        : (Array.isArray(formObj?.allowedFieldsJson) ? formObj.allowedFieldsJson : []);
+      setPreviewForm({
+        slug: formObj?.slug || 'draft-form',
+        title: formObj?.title || formObj?.slug || 'Xem thử Public Form',
+        description: formObj?.description || '',
+        targetCollection: formObj?.targetCollection || 'latticeRequests',
+        requireAccessToken: Boolean(formObj?.requireAccessToken),
+        honeypotField: formObj?.honeypotField || '_hp_website',
+        fields: fields.filter((x) => x && typeof x === 'object'),
+      });
     }
 
     async function handleStatusLookup(e) {
@@ -651,6 +740,8 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
                   h('td', { style: S.td },
                     h('div', { style: S.rowWrap },
                       h('button', { type: 'button', 'data-testid': `dxos-forms-edit-${f.slug}`, onClick: () => loadFormIntoEditor(f), style: S.btn(false) }, 'Sửa'),
+                      h('button', { type: 'button', 'data-testid': `dxos-forms-submissions-${f.slug}`, onClick: () => loadSubmissions(f, { page: 1, status: 'all', search: '' }), style: S.btn(false) }, 'Hồ sơ nộp'),
+                      h('button', { type: 'button', 'data-testid': `dxos-forms-preview-${f.slug}`, onClick: () => openLivePreview(f), style: S.btn(false) }, 'Xem thử'),
                       h('button', {
                         type: 'button',
                         'data-testid': `dxos-forms-copy-link-${f.slug}`,
@@ -674,7 +765,10 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
       h('form', { 'data-testid': 'dxos-forms-save-form', onSubmit: handleSave, style: S.card },
         h('div', { style: S.rowBetween },
           h('h4', { style: { margin: 0, fontSize: 14, color: '#0f172a' } }, editor.id ? `Chỉnh sửa Form: ${editor.slug}` : 'Tạo Public Form mới'),
-          h('button', { type: 'button', 'data-testid': 'dxos-forms-reset-btn', onClick: () => setEditor(emptyEditorState()), style: S.btn(false) }, 'Form mới'),
+          h('div', { style: S.rowWrap },
+            h('button', { type: 'button', 'data-testid': 'dxos-forms-editor-preview-btn', onClick: () => openLivePreview(editor), style: S.btn(false) }, 'Xem thử Form'),
+            h('button', { type: 'button', 'data-testid': 'dxos-forms-reset-btn', onClick: () => setEditor(emptyEditorState()), style: S.btn(false) }, 'Form mới'),
+          ),
         ),
         h('div', { style: S.grid3 },
           h('div', null,
@@ -746,18 +840,51 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
               style: S.btn(false),
             }, `+ ${f.label} (${f.name})`)),
           ),
-          editor.allowedFields.filter((x) => x && typeof x === 'object').map((row, idx) => h('div', { key: `${row.name}-${idx}`, style: { ...S.grid3, padding: 8, background: '#ffffff', borderRadius: 6, border: '1px solid #e2e8f0' } },
-            h('input', { type: 'text', value: row.name, placeholder: 'field_name', onChange: (e) => updateFieldRow(idx, { name: e.target.value }), style: S.input }),
-            h('input', { type: 'text', value: row.label, placeholder: 'Nhãn hiển thị', onChange: (e) => updateFieldRow(idx, { label: e.target.value }), style: S.input }),
-            h('div', { style: S.rowWrap },
-              h('select', { value: row.type, onChange: (e) => updateFieldRow(idx, { type: e.target.value }), style: { ...S.input, width: 110 } },
-                PUBLIC_FORM_FIELD_TYPES.map((ft) => h('option', { key: ft, value: ft }, ft)),
+          editor.allowedFields.filter((x) => x && typeof x === 'object').map((row, idx) => h('div', {
+            key: `${row.name}-${idx}`,
+            'data-testid': `dxos-forms-field-row-${idx}`,
+            style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 8, padding: 8, background: '#ffffff', borderRadius: 6, border: '1px solid #e2e8f0' },
+          },
+            h('div', { style: S.grid3 },
+              h('input', { type: 'text', value: row.name, placeholder: 'field_name', onChange: (e) => updateFieldRow(idx, { name: e.target.value }), style: S.input }),
+              h('input', { type: 'text', value: row.label, placeholder: 'Nhãn hiển thị', onChange: (e) => updateFieldRow(idx, { label: e.target.value }), style: S.input }),
+              h('div', { style: S.rowWrap },
+                h('select', { 'data-testid': `dxos-forms-field-type-${idx}`, value: row.type, onChange: (e) => updateFieldRow(idx, { type: e.target.value }), style: { ...S.input, width: 110 } },
+                  PUBLIC_FORM_FIELD_TYPES.map((ft) => h('option', { key: ft, value: ft }, ft)),
+                ),
+                h('label', { style: { fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 } },
+                  h('input', { type: 'checkbox', checked: Boolean(row.required), onChange: (e) => updateFieldRow(idx, { required: e.target.checked }) }),
+                  'Bắt buộc',
+                ),
+                h('button', { type: 'button', onClick: () => removeFieldRow(idx), style: S.btn(false, true) }, 'Xóa'),
               ),
-              h('label', { style: { fontSize: 11, display: 'flex', alignItems: 'center', gap: 4 } },
-                h('input', { type: 'checkbox', checked: Boolean(row.required), onChange: (e) => updateFieldRow(idx, { required: e.target.checked }) }),
-                'Bắt buộc',
-              ),
-              h('button', { type: 'button', onClick: () => removeFieldRow(idx), style: S.btn(false, true) }, 'Xóa'),
+            ),
+            h('div', { style: S.grid3 },
+              row.type === 'select' ? h('input', {
+                'data-testid': `dxos-forms-field-options-${idx}`,
+                type: 'text',
+                value: row.enumText ?? (Array.isArray(row.options) ? row.options.join(', ') : ''),
+                placeholder: 'Tùy chọn select (cách nhau dấu phẩy: low, high, urgent)',
+                onChange: (e) => updateFieldRow(idx, { enumText: e.target.value, options: undefined }),
+                style: S.input,
+              }) : null,
+              ['string', 'text', 'email'].includes(row.type) ? h('input', {
+                'data-testid': `dxos-forms-field-maxlen-${idx}`,
+                type: 'number',
+                min: 1,
+                value: row.maxLength ?? '',
+                placeholder: 'Độ dài tối đa (maxLength)',
+                onChange: (e) => updateFieldRow(idx, { maxLength: e.target.value }),
+                style: S.input,
+              }) : null,
+              ['string', 'text', 'email'].includes(row.type) ? h('input', {
+                'data-testid': `dxos-forms-field-pattern-${idx}`,
+                type: 'text',
+                value: row.pattern || '',
+                placeholder: 'Regex pattern (tùy chọn)',
+                onChange: (e) => updateFieldRow(idx, { pattern: e.target.value }),
+                style: S.input,
+              }) : null,
             ),
           )),
         ),
@@ -871,6 +998,166 @@ function createPublicFormBuilderPanel(client, React, _antd, app) {
           )
           : null,
       ),
+
+      submissionsDrawer.open ? h('div', {
+        'data-testid': 'dxos-forms-submissions-drawer',
+        style: { ...S.card, border: '2px solid #93c5fd', background: '#f8fafc' },
+      },
+        h('div', { style: S.rowBetween },
+          h('div', null,
+            h('h4', { style: { margin: 0, fontSize: 15, color: '#0f172a' } }, `Hồ sơ đã nộp — /v/form/${submissionsDrawer.form?.slug || ''}`),
+            h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, `Tổng ${submissionsDrawer.total} hồ sơ · Trang ${submissionsDrawer.page}`),
+          ),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-forms-submissions-close-btn',
+            onClick: () => setSubmissionsDrawer((p) => ({ ...p, open: false })),
+            style: S.btn(false),
+          }, 'Đóng Danh sách Hồ sơ'),
+        ),
+        h('div', { style: S.grid3 },
+          h('select', {
+            'data-testid': 'dxos-forms-submissions-status',
+            value: submissionsDrawer.status,
+            onChange: (e) => {
+              const nextStatus = e?.target?.value || 'all';
+              loadSubmissions(submissionsDrawer.form, { status: nextStatus, search: submissionsDrawer.search, page: 1 });
+            },
+            style: S.input,
+          },
+            ['all', 'pending', 'submitted', 'approved', 'rejected', 'completed', 'cancelled'].map((st) => h('option', { key: st, value: st }, `Trạng thái: ${st}`)),
+          ),
+          h('input', {
+            'data-testid': 'dxos-forms-submissions-search',
+            type: 'text',
+            value: submissionsDrawer.search,
+            placeholder: 'Tìm mã hồ sơ / trackingCode / payload…',
+            onChange: (e) => setSubmissionsDrawer((p) => ({ ...p, search: e.target.value })),
+            style: S.input,
+          }),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-forms-submissions-refresh',
+            disabled: submissionsDrawer.loading,
+            onClick: () => loadSubmissions(submissionsDrawer.form, { status: submissionsDrawer.status, search: submissionsDrawer.search, page: 1 }),
+            style: S.btn(true, false, submissionsDrawer.loading),
+          }, submissionsDrawer.loading ? 'Đang tải…' : 'Lọc / Làm mới'),
+        ),
+        h('div', { style: S.tableWrap },
+          h('table', { 'data-testid': 'dxos-forms-submissions-table', style: S.table },
+            h('thead', null, h('tr', null, ['Mã hồ sơ', 'Tracking', 'Trạng thái', 'Tệp đính kèm', 'Thời điểm nộp', 'Thao tác'].map((c) => h('th', { key: c, style: S.th }, c)))),
+            h('tbody', null,
+              !(submissionsDrawer.items || []).length
+                ? h('tr', null, h('td', { colSpan: 6, style: { ...S.td, color: '#64748b' } }, 'Chưa có hồ sơ nộp nào phù hợp bộ lọc.'))
+                : submissionsDrawer.items.map((sub, sIdx) => {
+                  const attCount = Array.isArray(sub.attachments) ? sub.attachments.length : (Array.isArray(sub.attachmentsJson) ? sub.attachmentsJson.length : 0);
+                  const rowKey = sub.submissionCode || sub.submissionUid || sub.id || sIdx;
+                  return h('tr', { key: rowKey },
+                    h('td', { style: S.td }, h('code', null, sub.submissionCode || sub.submissionUid || `#${sub.id}`)),
+                    h('td', { style: S.td }, sub.trackingCode || '-'),
+                    h('td', { style: S.td }, h('span', { style: S.badge('info') }, sub.status || 'submitted')),
+                    h('td', { style: S.td }, `${attCount} tệp`),
+                    h('td', { style: S.td }, sub.submittedAt || sub.createdAt || '-'),
+                    h('td', { style: S.td },
+                      h('button', {
+                        type: 'button',
+                        'data-testid': `dxos-forms-submission-inspect-${rowKey}`,
+                        onClick: () => setSubmissionsDrawer((p) => ({ ...p, selectedItem: sub })),
+                        style: S.btn(false),
+                      }, 'Xem Payload'),
+                    ),
+                  );
+                }),
+            ),
+          ),
+        ),
+        submissionsDrawer.selectedItem ? h('div', {
+          'data-testid': 'dxos-forms-submission-detail',
+          style: { padding: 12, borderRadius: 8, background: '#ffffff', border: '1px solid #cbd5e1', display: 'grid', gap: 8 },
+        },
+          h('div', { style: S.rowBetween },
+            h('strong', { style: { fontSize: 13 } }, `Chi tiết hồ sơ: ${submissionsDrawer.selectedItem.submissionCode || submissionsDrawer.selectedItem.submissionUid || submissionsDrawer.selectedItem.id}`),
+            h('span', { style: S.badge('info') }, submissionsDrawer.selectedItem.status || 'submitted'),
+          ),
+          h('pre', { style: { margin: 0, padding: 8, borderRadius: 6, background: '#0f172a', color: '#e2e8f0', fontSize: 11, overflowX: 'auto' } },
+            JSON.stringify({
+              payload: submissionsDrawer.selectedItem.payloadJson ?? submissionsDrawer.selectedItem.payload ?? {},
+              attachments: submissionsDrawer.selectedItem.attachments ?? submissionsDrawer.selectedItem.attachmentsJson ?? [],
+            }, null, 2),
+          ),
+        ) : null,
+        h('div', { style: S.rowBetween },
+          h('span', { style: { fontSize: 12, color: '#475569' } }, `Trang ${submissionsDrawer.page} / ${Math.max(1, Math.ceil((submissionsDrawer.total || 0) / (submissionsDrawer.pageSize || 20)))}`),
+          h('div', { style: S.rowWrap },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-forms-submissions-prev',
+              disabled: submissionsDrawer.loading || submissionsDrawer.page <= 1,
+              onClick: () => loadSubmissions(submissionsDrawer.form, { status: submissionsDrawer.status, search: submissionsDrawer.search, page: Math.max(1, submissionsDrawer.page - 1) }),
+              style: S.btn(false, false, submissionsDrawer.loading || submissionsDrawer.page <= 1),
+            }, '← Trước'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-forms-submissions-next',
+              disabled: submissionsDrawer.loading || (submissionsDrawer.page * (submissionsDrawer.pageSize || 20) >= (submissionsDrawer.total || 0)),
+              onClick: () => loadSubmissions(submissionsDrawer.form, { status: submissionsDrawer.status, search: submissionsDrawer.search, page: submissionsDrawer.page + 1 }),
+              style: S.btn(false, false, submissionsDrawer.loading || (submissionsDrawer.page * (submissionsDrawer.pageSize || 20) >= (submissionsDrawer.total || 0))),
+            }, 'Sau →'),
+          ),
+        ),
+      ) : null,
+
+      previewForm ? h('div', {
+        'data-testid': 'dxos-forms-live-preview',
+        style: { ...S.card, border: '2px solid #818cf8', background: '#faf5ff' },
+      },
+        h('div', { style: S.rowBetween },
+          h('div', null,
+            h('h4', { style: { margin: 0, fontSize: 15, color: '#312e81' } }, `Xem thử Form: ${previewForm.title}`),
+            h('div', { style: { fontSize: 12, color: '#4338ca' } }, `Đường dẫn: /v/form/${previewForm.slug} · Bảng đích: ${previewForm.targetCollection}`),
+          ),
+          h('button', {
+            type: 'button',
+            'data-testid': 'dxos-forms-preview-close-btn',
+            onClick: () => setPreviewForm(null),
+            style: S.btn(false),
+          }, 'Đóng Xem thử'),
+        ),
+        previewForm.description ? h('p', { style: { margin: 0, fontSize: 13, color: '#334155' } }, previewForm.description) : null,
+        h('div', { style: { display: 'grid', gap: 10, padding: 12, borderRadius: 8, background: '#ffffff', border: '1px solid #ddd6fe' } },
+          !previewForm.fields.length
+            ? h('div', { style: { fontSize: 12, color: '#64748b' } }, 'Chưa có trường nào trong allowlist.')
+            : previewForm.fields.map((fld, fIdx) => {
+              const opts = typeof fld.enumText === 'string'
+                ? fld.enumText.split(',').map((s) => s.trim()).filter(Boolean)
+                : (Array.isArray(fld.options) ? fld.options : []);
+              return h('div', { key: `${fld.name}-${fIdx}` },
+                h('label', { style: S.label }, `${fld.label || fld.name}${fld.required ? ' *' : ''}`),
+                fld.type === 'select'
+                  ? h('select', { defaultValue: opts[0] || '', style: S.input },
+                    opts.length ? opts.map((op) => h('option', { key: op, value: op }, op)) : h('option', { value: '' }, '(Chưa cấu hình lựa chọn)'),
+                  )
+                  : fld.type === 'text'
+                    ? h('textarea', { rows: 2, placeholder: fld.label || fld.name, maxLength: fld.maxLength || undefined, style: S.textarea })
+                    : fld.type === 'boolean'
+                      ? h('input', { type: 'checkbox' })
+                      : fld.type === 'file'
+                        ? h('input', { type: 'file', disabled: true, style: S.input })
+                        : h('input', {
+                          type: fld.type === 'integer' || fld.type === 'number' ? 'number' : (fld.type === 'date' ? 'date' : (fld.type === 'email' ? 'email' : 'text')),
+                          placeholder: fld.label || fld.name,
+                          maxLength: fld.maxLength || undefined,
+                          pattern: fld.pattern || undefined,
+                          style: S.input,
+                        }),
+              );
+            }),
+          h('div', { style: { fontSize: 11, color: '#64748b' } }, `Honeypot chống spam ẩn: ${previewForm.honeypotField}${previewForm.requireAccessToken ? ' · Yêu cầu Access Token' : ''}`),
+          h('div', null,
+            h('button', { type: 'button', disabled: true, style: S.btn(true, false, true) }, 'Gửi hồ sơ (Chế độ Xem thử)'),
+          ),
+        ),
+      ) : null,
     );
   };
 }

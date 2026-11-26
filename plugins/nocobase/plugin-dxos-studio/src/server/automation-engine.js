@@ -612,7 +612,9 @@ function validateRulePayload(payload) {
   if (payload.nextRunAt !== undefined) {
     nextRunAt = payload.nextRunAt ? new Date(payload.nextRunAt) : null;
   } else if (cronExpression && isActive) {
-    nextRunAt = computeNextCronRun(cronExpression, new Date());
+    nextRunAt = computeNextCronRun(cronExpression, new Date(), {
+      timezone: inferredSchedule?.timezone || payload.timezone || 'UTC',
+    });
   }
   return {
     ruleKey,
@@ -629,8 +631,8 @@ function validateRulePayload(payload) {
     active: isActive,
     schemaVersion: isV2 ? 2 : 1,
     triggerIndexJson,
-    ...(cronExpression !== null || payload.cronExpression !== undefined ? { cronExpression } : {}),
-    ...(nextRunAt !== null || payload.cronExpression !== undefined || payload.nextRunAt !== undefined ? { nextRunAt } : {}),
+    ...(cronExpression !== null || payload.cronExpression !== undefined || (isV2 && !inferredSchedule) ? { cronExpression } : {}),
+    ...(nextRunAt !== null || payload.cronExpression !== undefined || payload.nextRunAt !== undefined || (isV2 && !inferredSchedule) ? { nextRunAt } : {}),
     ...(normalizedGraph ? { graphJson: normalizedGraph } : payload.graphJson === null ? { graphJson: null } : {}),
     ...(normalizedDraft ? { draftGraphJson: normalizedDraft } : payload.draftGraphJson === null ? { draftGraphJson: null } : {}),
     ...(payload.publishedVersion !== undefined ? { publishedVersion: Math.max(1, Number(payload.publishedVersion) || 1) } : {}),
@@ -1922,7 +1924,7 @@ function createDxosAutomationsActions(db, options = {}) {
     async listRules(ctx, next) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
-      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
+      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
       const rows = await runAutomationWithRls(db, organizationId, () => {
         const repo = db.getRepository('latticeAutomationRules');
         const filter = { organizationId };
@@ -2016,7 +2018,7 @@ function createDxosAutomationsActions(db, options = {}) {
           ?? existingPlain?.draftGraphJson ?? existingPlain?.graphJson;
         if (!isPlainObject(candidateGraph)) throw fail('FLOW_INVALID_GRAPH', 400, 'No graph available to publish');
         const nextVersion = existingPlain ? Math.max(0, Number(existingPlain.publishedVersion || 0)) + 1 : 1;
-        const { triggerEventType: _staleTrigger, ...existingBase } = existingPlain || {};
+        const { triggerEventType: _staleTrigger, cronExpression: _staleCron, nextRunAt: _staleNext, ...existingBase } = existingPlain || {};
         const explicitTrigger = params.triggerEventType !== undefined ? params.triggerEventType : src.triggerEventType;
         const validated = validateRulePayload({
           ...existingBase,
@@ -2053,7 +2055,7 @@ function createDxosAutomationsActions(db, options = {}) {
     async listRuleVersions(ctx, next) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
-      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
+      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
       const ruleKey = String(params.ruleKey || params.automationCode || '').trim();
       const items = await runAutomationWithRls(db, organizationId, async () => {
         const verRepo = db.getRepository('latticeAutomationRuleVersions');
@@ -2123,7 +2125,7 @@ function createDxosAutomationsActions(db, options = {}) {
         const verPlain = toPlain(verRow);
         const existingPlain = toPlain(existing);
         const nextVersion = Math.max(0, Number(existingPlain.publishedVersion || 0)) + 1;
-        const { triggerEventType: _staleTrigger, ...existingBase } = existingPlain || {};
+        const { triggerEventType: _staleTrigger, cronExpression: _staleCron, nextRunAt: _staleNext, ...existingBase } = existingPlain || {};
         const validated = validateRulePayload({
           ...existingBase,
           ...(params.triggerEventType !== undefined ? { triggerEventType: params.triggerEventType } : {}),
@@ -2164,7 +2166,9 @@ function createDxosAutomationsActions(db, options = {}) {
         const nextValues = { active: nextActive };
         if (schedCfg?.cronExpression) {
           nextValues.cronExpression = schedCfg.cronExpression;
-          nextValues.nextRunAt = nextActive ? computeNextCronRun(schedCfg.cronExpression, new Date()) : null;
+          nextValues.nextRunAt = nextActive
+            ? computeNextCronRun(schedCfg.cronExpression, new Date(), { timezone: schedCfg.timezone })
+            : null;
         }
         await repo.update({ filter: { organizationId, ruleKey }, values: nextValues });
         return repo.findOne({ filter: { organizationId, ruleKey } });
@@ -2194,7 +2198,7 @@ function createDxosAutomationsActions(db, options = {}) {
     async testRule(ctx, next) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
-      const { organizationId, actor } = await requireOrgRoles(ctx, params, { mutating: false });
+      const { organizationId, actor } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
       const simulation = await runAutomationWithRls(db, organizationId, async () => {
         const repo = db.getRepository('latticeAutomationRules');
         let ruleObj = null;
@@ -2268,7 +2272,7 @@ function createDxosAutomationsActions(db, options = {}) {
     async listRuns(ctx, next) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
-      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
+      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
       const rows = await runAutomationWithRls(db, organizationId, () => {
         const repo = db.getRepository('latticeAutomationRuns');
         const filter = { organizationId };
@@ -2286,7 +2290,7 @@ function createDxosAutomationsActions(db, options = {}) {
     async getRunTrace(ctx, next) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
-      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false });
+      const { organizationId } = await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
       const runUid = params.runUid ? String(params.runUid).trim() : null;
       const filter = runUid ? { organizationId, runUid } : { organizationId, id: params.id };
       if (!runUid && params.id === undefined) {
@@ -2437,7 +2441,7 @@ function createDxosAutomationsActions(db, options = {}) {
     async nodeRegistry(ctx, next) {
       const params = readParams(ctx);
       assertAutomationPatScope(ctx, ['read', 'write', 'ai', 'iot'], foundation);
-      await requireOrgRoles(ctx, params, { mutating: false });
+      await requireOrgRoles(ctx, params, { mutating: false, requireManagerOrAdmin: true });
       ctx.body = { nodeTypes: flowRegistry.listNodeSchemas() };
       return next();
     },
@@ -2447,6 +2451,7 @@ function createDxosAutomationsActions(db, options = {}) {
       const isLive = params.live === true || params.dryRun === false;
       const { organizationId, actor } = await requireOrgRoles(ctx, params, {
         mutating: isLive,
+        requireManagerOrAdmin: true,
         allowedPatScopes: isLive ? ['write', 'ai', 'iot'] : ['read', 'write', 'ai', 'iot'],
       });
       const result = await runAutomationWithRls(db, organizationId, async () => {

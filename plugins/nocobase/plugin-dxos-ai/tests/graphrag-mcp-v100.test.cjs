@@ -411,6 +411,9 @@ test('executePgVectorParaQuery enforces dimension matching (1536 chunks / 256 do
   const pgHarness = makeV100Harness({
     dialect: 'postgres',
     pgQueryHandler: async (sql, opts) => {
+      if (!/latticePara(?:Documents|Chunks)/i.test(sql)) {
+        return [[], 0];
+      }
       assert.match(sql, /<=>/);
       assert.equal(opts.replacements.organizationId, 'org-a');
       assert.match(opts.replacements.vectorLiteral, /^\[[-0-9.,eE]+\]$/);

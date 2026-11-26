@@ -869,7 +869,46 @@ test('Unified Approval Inbox consolidates & deduplicates business, ai_hitl, and 
 
   // Must have 3 items (1 business, 1 ai_hitl excluding latticeflow.approval, 1 flow)
   assert.equal(inboxCtx.body.total, 3);
-  assert.deepEqual(inboxCtx.body.counts, { business: 1, ai_hitl: 1, flow: 1 });
+  assert.deepEqual(inboxCtx.body.counts, {
+    business: 1,
+    proposals: 0,
+    ai_hitl: 1,
+    aiHitl: 1,
+    flow: 1,
+    all: 3,
+    total: 3,
+  });
+
+  // Filtering by source='business' keeps all 4 source counts intact (P1-04)
+  const bizOnlyCtx = makeCtx(app, {
+    method: 'GET',
+    user: { id: 102, username: 'mgr_a1' },
+    role: 'ldx_manager',
+    params: { status: 'pending', source: 'business' },
+  });
+  await actions.listInbox(bizOnlyCtx, async () => {});
+  assert.equal(bizOnlyCtx.body.total, 1);
+  assert.equal(bizOnlyCtx.body.items[0].source, 'business');
+  assert.deepEqual(bizOnlyCtx.body.counts, {
+    business: 1,
+    proposals: 0,
+    ai_hitl: 1,
+    aiHitl: 1,
+    flow: 1,
+    all: 3,
+    total: 3,
+  });
+
+  // Search filters unified inbox items across title/summary/ruleKey/collection (P1-04)
+  const searchCtx = makeCtx(app, {
+    method: 'GET',
+    user: { id: 102, username: 'mgr_a1' },
+    role: 'ldx_manager',
+    params: { status: 'pending', source: 'all', search: 'RUN-FLOW-9' },
+  });
+  await actions.listInbox(searchCtx, async () => {});
+  assert.equal(searchCtx.body.total, 1);
+  assert.equal(searchCtx.body.items[0].itemKey, 'flow:RUN-FLOW-9');
   const sources = inboxCtx.body.items.map((i) => i.source);
   assert.deepEqual(sources, ['flow', 'ai_hitl', 'business']);
   const flowItem = inboxCtx.body.items[0];

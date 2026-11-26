@@ -509,7 +509,7 @@ function createSchemaBuilderTools(deps) {
           } else if (typeof flowModelsRepo.upsertModel === 'function') {
             await flowModelsRepo.upsertModel({ ...model, props: nextConfig });
           }
-          bumpSurfaceRevision(args.portalSlug, { pageTitle: args.pageTitle, lastMutatedUid: args.blockUid, message: `AI đã cập nhật block ${meta.title || args.blockUid}` });
+          bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: args.pageTitle, lastMutatedUid: args.blockUid, message: `AI đã cập nhật block ${meta.title || args.blockUid}` });
           return { applied: true, updated: true, blockUid: args.blockUid, afterProps: nextConfig };
         }
 
@@ -529,6 +529,7 @@ function createSchemaBuilderTools(deps) {
             await updateGridLayout(flowModelsRepo, grid, nextLayout);
           }
           bumpSurfaceRevision(args.portalSlug, {
+            organizationId: actor.organizationId,
             pageTitle: val(pageRoute, 'title') || args.pageTitle,
             layoutSignature: computeLayoutSignature({ props: nextLayout }),
             message: 'AI đã sắp xếp lại bố cục đa cột trên trang',
@@ -547,7 +548,7 @@ function createSchemaBuilderTools(deps) {
           const result = await invokeResourceAction(ctx, 'flowSurfaces', args.surfaceAction, {
             values: { target: { uid: args.blockUid }, ...payload },
           });
-          bumpSurfaceRevision(args.portalSlug, { pageTitle: args.pageTitle, lastMutatedUid: args.blockUid, message: `AI đã cấu hình sâu block (${args.surfaceAction})` });
+          bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: args.pageTitle, lastMutatedUid: args.blockUid, message: `AI đã cấu hình sâu block (${args.surfaceAction})` });
           return { applied: true, action, blockUid: args.blockUid, surfaceAction: args.surfaceAction, result };
         }
 
@@ -579,7 +580,7 @@ function createSchemaBuilderTools(deps) {
               await flowModelsRepo.destroy({ filter: { uid: args.blockUid } });
             }
           }
-          bumpSurfaceRevision(args.portalSlug, { pageTitle: val(pageRoute, 'title') || args.pageTitle, blockCount: nextOrder.length, message: action === 'removeBlock' ? `AI đã gỡ block ${args.blockUid}` : 'AI đã sắp xếp lại thứ tự block' });
+          bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: val(pageRoute, 'title') || args.pageTitle, blockCount: nextOrder.length, message: action === 'removeBlock' ? `AI đã gỡ block ${args.blockUid}` : 'AI đã sắp xếp lại thứ tự block' });
           return { applied: true, ...(action === 'reorderBlocks' ? { reordered: true } : { removed: true, blockUid: args.blockUid }), order: nextOrder };
         }
 
@@ -653,7 +654,7 @@ function createSchemaBuilderTools(deps) {
             }
             await updateGridLayout(flowModelsRepo, grid, normalizeGridState(grid, [...prepended, ...existingOrder]));
           }
-          bumpSurfaceRevision(args.portalSlug, { pageTitle: title, message: `AI đã dựng trang đa block "${title}"` });
+          bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: title, message: `AI đã dựng trang đa block "${title}"` });
           return {
             applied: true,
             action,
@@ -704,7 +705,7 @@ function createSchemaBuilderTools(deps) {
               stepParams: { dxosBlockSettings: { config: cfg } },
             });
             const placed = await placeBesideOrInsertBlock(resolved.flowModelsRepo, resolved.grid, blockUid, args.placeBesideBlockUid, failTool);
-            bumpSurfaceRevision(args.portalSlug, { pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, lastMutatedUid: blockUid, message: `AI đã gắn block "${title}"` });
+            bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, lastMutatedUid: blockUid, message: `AI đã gắn block "${title}"` });
             return { dryRun: false, applied: true, mode: 'flowModel', portalSlug: args.portalSlug, blockUid, blockUse: args.blockUse, sideBySideWith: placed.sideBySideWith };
           }
           if (hasRes(ctx, 'flowSurfaces')) {
@@ -722,12 +723,12 @@ function createSchemaBuilderTools(deps) {
               const refreshed = await resolvePageGrid(db, args.portalSlug, args.pageTitle, val);
               if (refreshed.grid) await placeBesideOrInsertBlock(resolved.flowModelsRepo, refreshed.grid, newUid, args.placeBesideBlockUid, failTool);
             }
-            bumpSurfaceRevision(args.portalSlug, { pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, lastMutatedUid: newUid, message: `AI đã gắn block chuẩn "${title}" (${nativeType})` });
+            bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: val(resolved.pageRoute, 'title') || args.pageTitle, lastMutatedUid: newUid, message: `AI đã gắn block chuẩn "${title}" (${nativeType})` });
             return { dryRun: false, applied: true, mode: 'flowSurfaces:addBlock', portalSlug: args.portalSlug, blockUid: newUid, blockUse: nativeType, result: fsRes };
           }
         }
         const bpResult = await invokeResourceAction(ctx, 'flowSurfaces', 'applyBlueprint', { values: blueprint });
-        bumpSurfaceRevision(args.portalSlug, { pageTitle: title, message: `AI đã tạo trang block "${title}"` });
+        bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: title, message: `AI đã tạo trang block "${title}"` });
         return { dryRun: false, applied: true, mode: 'applyBlueprint', portalSlug: args.portalSlug, blockUse: args.blockUse, result: bpResult };
       },
     }),

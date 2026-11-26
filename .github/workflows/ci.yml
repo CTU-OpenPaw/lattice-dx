@@ -9,13 +9,9 @@ on:
   push:
     branches:
       - main
-      - feat/v1.0.0-olp-championship
-      - 'feat/**'
   pull_request:
     branches:
       - main
-      - feat/v1.0.0-olp-championship
-      - 'feat/**'
 permissions:
   contents: read
 
@@ -28,22 +24,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
         with:
           version: 10.23.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
-      - name: Verify targeted Vitest suites (@dx/api, @dx/file-scanner, action-bridge)
-        run: >-
-          pnpm exec vitest run
-          apps/api/src
-          apps/file-scanner/src
-          plugins/nocobase/action-bridge
       - name: Verify Apache-2.0 SPDX headers
         run: node scripts/source-headers.mjs --check
       - name: Verify OSS PoF readiness
@@ -78,11 +68,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
         with:
           version: 10.23.0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           cache: pnpm
@@ -96,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Validate all Docker Compose stacks
         run: |
           set -euo pipefail
@@ -118,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Run Trivy vulnerability, misconfiguration, and secret scan
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

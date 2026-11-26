@@ -539,3 +539,55 @@ test('DMN visual editor supports plain unquoted strings seamlessly and enforces 
   assert.ok(Number(inName1.props.style.minWidth) >= 120);
   assert.ok(Number(outName0.props.style.minWidth) >= 120);
 });
+
+test('P1-03: DmnVisualEditor renders PRIORITY input column when hitPolicy=PRIORITY and forwards draft table to dxosDmn:evaluate', async () => {
+  const { DmnVisualEditor } = require(DMN_EDITOR_PATH);
+  const harness = createReactHarness();
+  const requests = [];
+  const api = {
+    async request(req) {
+      requests.push(req);
+      if (req.url === 'dxosDmn:evaluate') {
+        return {
+          data: {
+            data: {
+              hitPolicy: req.data?.table?.hitPolicy || 'PRIORITY',
+              matched: true,
+              matchedRuleIndex: 0,
+              result: { action: 'urgent' },
+              outputs: { action: 'urgent' },
+            },
+          },
+        };
+      }
+      return { data: { data: {} } };
+    },
+  };
+
+  let tree = await harness.mountAndFlush(DmnVisualEditor, {
+    React: harness.React,
+    api,
+    organizationId: 'org-a',
+    initialTable: {
+      tableKey: 'priority_draft',
+      name: 'Priority Draft',
+      hitPolicy: 'PRIORITY',
+      inputsJson: [{ name: 'temp', type: 'number' }],
+      outputsJson: [{ name: 'action', type: 'string' }],
+      rulesJson: [
+        { when: { temp: { op: 'gt', value: 8 } }, then: { action: 'urgent' }, priority: 10 },
+      ],
+    },
+  });
+
+  const priInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-rule-priority-0')[0];
+  assert.ok(priInput, 'Expected priority input column when hitPolicy=PRIORITY');
+  priInput.props.onChange({ target: { value: '99' } });
+  tree = harness.render(DmnVisualEditor, { React: harness.React, api, organizationId: 'org-a' });
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dmn-sim-run-btn')[0].props.onClick();
+  const evalReq = requests.find((r) => r.url === 'dxosDmn:evaluate');
+  assert.ok(evalReq && evalReq.data.table, 'Draft table must be forwarded to dxosDmn:evaluate');
+  assert.equal(evalReq.data.table.hitPolicy, 'PRIORITY');
+  assert.equal(evalReq.data.table.rulesJson[0].priority, 99);
+});

@@ -135,11 +135,26 @@ const HITL_RISK_LABELS = {
 
 const HITL_STATUS_LABELS = {
   pending: 'Chờ duyệt',
+  executing: 'Đang thực thi',
   executed: 'Đã thực thi',
+  failed: 'Thực thi thất bại',
   approved: 'Đã duyệt',
   rejected: 'Đã từ chối',
   expired: 'Hết hạn',
 };
+
+function formatHitlExpiresLabel(expiresAt) {
+  if (!expiresAt) return '';
+  const ts = new Date(expiresAt).getTime();
+  if (!Number.isFinite(ts)) return String(expiresAt);
+  const diffMs = ts - Date.now();
+  if (diffMs <= 0) return `Đã hết hạn (${new Date(ts).toLocaleString('vi-VN')})`;
+  const totalMin = Math.ceil(diffMs / 60000);
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  const rel = hours > 0 ? `còn ${hours}g ${mins}p` : `còn ${mins}p`;
+  return `Hết hạn: ${rel} (${new Date(ts).toLocaleString('vi-VN')})`;
+}
 
 const AUDIT_STATUS_LABELS = {
   allowed: 'Cho phép',
@@ -393,6 +408,9 @@ function createDxosAiStudioPage(client, React, _antd, app) {
     const [qcBusy, setQcBusy] = React.useState(false);
     const [llmHealth, setLlmHealth] = React.useState(null);
     const [llmHealthBusy, setLlmHealthBusy] = React.useState(false);
+    const [llmServicesList, setLlmServicesList] = React.useState([]);
+    const [llmServicesBusy, setLlmServicesBusy] = React.useState(false);
+    const [llmModelSelections, setLlmModelSelections] = React.useState({});
     const quotaReqSeqRef = typeof React.useRef === 'function'
       ? React.useRef(0)
       : (typeof React.useMemo === 'function' ? React.useMemo(() => ({ current: 0 }), []) : { current: 0 });
@@ -477,10 +495,11 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         if (Array.isArray(pData.profiles)) setProfiles(loadedProfiles);
         if (pData.catalog) setCatalog(pData.catalog);
 
-        const [tRes, aRes, hRes] = await Promise.allSettled([
+        const [tRes, aRes, hRes, lRes] = await Promise.allSettled([
           api.request({ url: 'dxosAi:enterpriseTopology', method: 'get' }),
           api.request({ url: 'dxosAi:auditLogs', method: 'get', params: { pageSize: 40 } }),
           api.request({ url: 'dxosAi:checkLlmHealth', method: 'get', skipNotify: true }),
+          api.request({ url: 'dxosAi:listLlmServices', method: 'get', skipNotify: true }),
         ]);
         let loadedTopology = null;
         const partialErrors = [];
@@ -499,6 +518,12 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           const hData = hRes.value?.data?.data || hRes.value?.data || null;
           if (hData && typeof hData === 'object' && Object.hasOwn(hData, 'ok')) {
             setLlmHealth(hData);
+          }
+        }
+        if (lRes?.status === 'fulfilled') {
+          const lData = lRes.value?.data?.data || lRes.value?.data || {};
+          if (Array.isArray(lData.services)) {
+            setLlmServicesList(lData.services);
           }
         }
         const discoveredOrg = resolveStudioDefaultOrg({
@@ -953,6 +978,58 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         });
       } finally {
         setQcBusy(false);
+      }
+    };
+
+    const loadLlmServices = React.useCallback(async () => {
+      if (clientDenied || !api?.request) return;
+      try {
+        const res = await api.request({ url: 'dxosAi:listLlmServices', method: 'get', skipNotify: true });
+        const d = res?.data?.data || res?.data || {};
+        if (Array.isArray(d.services)) {
+          setLlmServicesList(d.services);
+        }
+      } catch {
+        // Non-fatal in minimal mock harnesses
+      }
+    }, [api, clientDenied]);
+
+    const handleSwitchLlmModel = async (serviceName, modelName) => {
+      const cleanModel = String(modelName || '').trim();
+      if (!api?.request || !serviceName || !cleanModel || llmServicesBusy) return;
+      setLlmServicesBusy(true);
+      setNotice(null);
+      try {
+        await api.request({
+          url: 'dxosAi:switchLlmServiceModel',
+          method: 'post',
+          data: { name: serviceName, modelName: cleanModel },
+        });
+        setNotice({ type: 'ok', text: `Đã chuyển model mặc định của "${serviceName}" sang "${cleanModel}".` });
+        await Promise.all([loadLlmServices(), loadAll()]);
+      } catch (err) {
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Đổi model LLM thất bại.' });
+      } finally {
+        setLlmServicesBusy(false);
+      }
+    };
+
+    const handleDeleteLlmService = async (serviceName) => {
+      if (!api?.request || !serviceName || llmServicesBusy) return;
+      setLlmServicesBusy(true);
+      setNotice(null);
+      try {
+        await api.request({
+          url: 'dxosAi:deleteLlmService',
+          method: 'post',
+          data: { name: serviceName },
+        });
+        setNotice({ type: 'ok', text: `Đã xóa cấu hình dịch vụ LLM "${serviceName}".` });
+        await Promise.all([loadLlmServices(), loadAll()]);
+      } catch (err) {
+        setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Xóa dịch vụ LLM thất bại.' });
+      } finally {
+        setLlmServicesBusy(false);
       }
     };
 
@@ -1619,6 +1696,78 @@ function createDxosAiStudioPage(client, React, _antd, app) {
             llmHealth && !llmHealth.ok && llmHealth.message ? h('div', {
               style: { fontSize: 12, color: '#991b1b', padding: '6px 10px', borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca' },
             }, llmHealth.message) : null,
+            llmServicesList.length ? h('div', {
+              'data-testid': 'dxos-llm-services-list',
+              style: { display: 'grid', gap: 6, paddingTop: 6, borderTop: '1px solid #bae6fd' },
+            },
+              h('div', { style: { fontSize: 12, fontWeight: 700, color: '#0c4a6e' } }, `Nhà cung cấp LLM đã cấu hình (${llmServicesList.length})`),
+              llmServicesList.map((svc) => {
+                const selectedModel = llmModelSelections[svc.name] ?? svc.defaultModel ?? svc.models?.[0]?.value ?? '';
+                const modelOptions = Array.isArray(svc.models) ? svc.models : [];
+                return h('div', {
+                  key: svc.name,
+                  'data-testid': `dxos-llm-service-row-${svc.name}`,
+                  style: {
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 8,
+                    padding: '8px 10px',
+                    borderRadius: 8,
+                    background: '#ffffff',
+                    border: svc.isArchitectDefault ? '1px solid #0284c7' : '1px solid #cbd5e1',
+                    fontSize: 12,
+                  },
+                },
+                  h('div', { style: { display: 'grid', gap: 2 } },
+                    h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                      h('strong', null, svc.name),
+                      h('span', { style: badgeStyle('#e0f2fe', '#075985') }, svc.provider),
+                      svc.isArchitectDefault ? h('span', { style: badgeStyle('#dcfce7', '#166534') }, 'Đang gắn AI Architect') : null,
+                      svc.hasApiKey ? h('span', { style: badgeStyle('#f1f5f9', '#334155') }, `Key: ${svc.maskedApiKey || '****'}`) : null,
+                    ),
+                    svc.baseURL ? h('span', { style: { fontSize: 11, color: '#64748b' } }, svc.baseURL) : null,
+                  ),
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+                    modelOptions.length > 0
+                      ? h('select', {
+                          'data-testid': `dxos-llm-switch-model-${svc.name}`,
+                          value: selectedModel,
+                          onChange: (e) => setLlmModelSelections((prev) => ({ ...prev, [svc.name]: e.target.value })),
+                          style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+                        }, modelOptions.map((m) => h('option', { key: m.value, value: m.value }, m.label || m.value)))
+                      : h('input', {
+                          'data-testid': `dxos-llm-switch-model-${svc.name}`,
+                          value: selectedModel,
+                          onChange: (e) => setLlmModelSelections((prev) => ({ ...prev, [svc.name]: e.target.value })),
+                          placeholder: 'modelName',
+                          style: { padding: '4px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, width: 150 },
+                        }),
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `dxos-llm-switch-btn-${svc.name}`,
+                      disabled: llmServicesBusy || !String(selectedModel || '').trim(),
+                      onClick: () => handleSwitchLlmModel(svc.name, selectedModel),
+                      style: btnStyle(false),
+                    }, 'Đổi model'),
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `dxos-llm-delete-btn-${svc.name}`,
+                      disabled: llmServicesBusy,
+                      onClick: () => setConfirmDialog({
+                        kind: 'deleteLlmService',
+                        serviceName: svc.name,
+                        title: `Xóa dịch vụ LLM "${svc.name}"?`,
+                        message: 'Thao tác này sẽ xóa cấu hình dịch vụ LLM và gỡ liên kết khỏi các trợ lý mặc định đang trỏ tới nó.',
+                        confirmLabel: 'Xóa dịch vụ LLM',
+                      }),
+                      style: btnStyle(false, true),
+                    }, 'Xóa'),
+                  ),
+                );
+              }),
+            ) : null,
           ) : null,
 
           tab === 'topology' ? h('div', { style: { display: 'grid', gap: 12 } },
@@ -2045,7 +2194,11 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               h('select', {
                 'data-testid': 'dxos-audit-status-filter',
                 value: auditStatusFilter,
-                onChange: (e) => setAuditStatusFilter(e.target.value),
+                onChange: (e) => {
+                  const v = e.target.value;
+                  setAuditStatusFilter(v);
+                  loadAuditLogsPage({ page: 1, status: v });
+                },
                 style: { padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
               },
                 h('option', { value: 'all' }, 'Tất cả trạng thái'),
@@ -2057,7 +2210,11 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               h('select', {
                 'data-testid': 'dxos-audit-agent-filter',
                 value: auditAgentFilter,
-                onChange: (e) => setAuditAgentFilter(e.target.value),
+                onChange: (e) => {
+                  const v = e.target.value;
+                  setAuditAgentFilter(v);
+                  loadAuditLogsPage({ page: 1, aiEmployee: v });
+                },
                 style: { padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
               },
                 h('option', { value: 'all' }, 'Tất cả tác nhân'),
@@ -2339,7 +2496,9 @@ function createDxosAiStudioPage(client, React, _antd, app) {
               style: { padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
             },
               h('option', { value: 'pending' }, 'Chờ duyệt (pending)'),
+              h('option', { value: 'executing' }, 'Đang thực thi (executing)'),
               h('option', { value: 'executed' }, 'Đã thực thi (executed)'),
+              h('option', { value: 'failed' }, 'Thực thi thất bại (failed)'),
               h('option', { value: 'rejected' }, 'Đã từ chối (rejected)'),
               h('option', { value: 'expired' }, 'Hết hạn (expired)'),
               h('option', { value: 'all' }, 'Tất cả trạng thái'),
@@ -2383,8 +2542,13 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                     h('span', { style: badgeStyle(statusBg, statusFg) }, HITL_STATUS_LABELS[item.status] || item.status),
                   ),
                 ),
-                h('div', { style: { fontSize: 12, color: '#475569' } },
-                  `Người yêu cầu: ${item.requesterUsername || `#${item.requesterUserId}`} · AI: ${item.aiEmployee || '—'} · Tổ chức: ${item.organizationId}`),
+                h('div', { style: { fontSize: 12, color: '#475569', display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' } },
+                  h('span', null, `Người yêu cầu: ${item.requesterUsername || `#${item.requesterUserId}`} · AI: ${item.aiEmployee || '—'} · Tổ chức: ${item.organizationId}`),
+                  item.expiresAt ? h('span', {
+                    'data-testid': `dxos-hitl-expires-at-${item.id}`,
+                    style: { color: '#b45309', fontWeight: 600 },
+                  }, formatHitlExpiresLabel(item.expiresAt)) : null,
+                ),
                 h('div', {
                   'data-testid': `dxos-hitl-diff-${item.id}`,
                   style: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, display: 'grid', gap: 6 },
@@ -2454,8 +2618,17 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                       style: btnStyle(false, true),
                     }, 'Từ chối'),
                   )
-                  : h('div', { style: { fontSize: 12, color: '#475569' } },
-                    `Người xử lý: ${item.decidedByUsername || '—'}${item.decisionNote ? ` · Ghi chú: ${item.decisionNote}` : ''}`),
+                  : h('div', { style: { display: 'grid', gap: 6 } },
+                    h('div', { style: { fontSize: 12, color: '#475569' } },
+                      `Người xử lý: ${item.decidedByUsername || '—'}${item.decisionNote ? ` · Ghi chú: ${item.decisionNote}` : ''}`),
+                    item.executionResult != null ? h('div', {
+                      'data-testid': `dxos-hitl-execution-result-${item.id}`,
+                      style: { padding: '6px 10px', borderRadius: 6, background: item.status === 'failed' ? '#fef2f2' : '#f0fdf4', border: `1px solid ${item.status === 'failed' ? '#fecaca' : '#bbf7d0'}`, fontSize: 11, color: '#0f172a' },
+                    },
+                      h('strong', null, 'Kết quả thực thi: '),
+                      h('code', null, (typeof item.executionResult === 'string' ? item.executionResult : JSON.stringify(item.executionResult)).slice(0, 320)),
+                    ) : null,
+                  ),
               );
             }),
           ),
@@ -2917,6 +3090,8 @@ function createDxosAiStudioPage(client, React, _antd, app) {
                     if (!dlg) return;
                     if (dlg.kind === 'deleteProfile') {
                       await handleDeleteProfile(dlg.username);
+                    } else if (dlg.kind === 'deleteLlmService') {
+                      await handleDeleteLlmService(dlg.serviceName);
                     } else if (dlg.kind === 'teardownApp') {
                       await handleTeardownBuiltApp(dlg.appItem, keep);
                     } else if (dlg.kind === 'rollbackApp') {

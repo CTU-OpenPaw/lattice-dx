@@ -8,6 +8,7 @@
  */
 const { Plugin, Gateway } = require('@nocobase/server');
 const { seedFoundation } = require('./seed');
+const { installIncidentManagerActionGrants } = require('./native-roles');
 const {createApplicationCatalog}=require('../shared/application-catalog');
 const {registerSampleApplications}=require('../applications/catalog');
 const {defaultContracts}=require('../shared/contracts');
@@ -72,11 +73,48 @@ const {
 const {registerPublicForms}=require('./public-forms');
 const {createPublicFormGatewayHandler}=require('./public-form-html');
 const {createPublicTrackGatewayHandler}=require('./public-track-html');
+const {createMobilePwaGatewayHandler}=require('./mobile-pwa');
 const {
   createPublicBrandingGatewayHandler,
   createSystemSettingsBrandingMiddleware,
 }=require('./public-branding');
 const {attachRlsPolicyToTable, canUsePgRlsSession, withSystemRlsBypass}=require('./pg-rls');
+
+function createPublicAuthPolicyMiddleware() {
+  return async function latticePublicAuthPolicyMiddleware(ctx, next) {
+    await next();
+    if (
+      ctx?.action?.resourceName !== 'authenticators'
+      || ctx?.action?.actionName !== 'publicList'
+      || !ctx?.body
+      || typeof ctx.body !== 'object'
+    ) {
+      return;
+    }
+    if (String(process.env.DX_ALLOW_PUBLIC_SIGNUP || '').trim().toLowerCase() === 'true') {
+      return;
+    }
+    const isWrapped = !Array.isArray(ctx.body) && Array.isArray(ctx.body.data);
+    const list = isWrapped ? ctx.body.data : (Array.isArray(ctx.body) ? ctx.body : null);
+    if (!list) return;
+    const plainList = list.map((item) => (typeof item?.toJSON === 'function' ? item.toJSON() : (item && typeof item === 'object' ? { ...item } : item)));
+    const enterpriseActive = Boolean(String(process.env.DX_NATIVE_AUTH_ISSUER || '').trim())
+      || String(process.env.DX_ENTERPRISE_DISABLE_SIGNUP || '').trim().toLowerCase() === 'true'
+      || plainList.some((item) => item?.authType === 'lattice-keycloak');
+    if (!enterpriseActive) return;
+    const normalized = plainList.map((item) => {
+      if (!item || typeof item !== 'object') return item;
+      const opts = item.options && typeof item.options === 'object' ? { ...item.options } : {};
+      opts.allowSignUp = false;
+      return { ...item, options: opts };
+    });
+    if (isWrapped) {
+      ctx.body.data = normalized;
+    } else {
+      ctx.body = normalized;
+    }
+  };
+}
 class LatticeFoundationPlugin extends Plugin {
   async load() {
     this.db.attachLatticeRlsPolicy = (tableName, txOrOpts) => {
@@ -144,7 +182,13 @@ class LatticeFoundationPlugin extends Plugin {
     if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
       Gateway.registerRequestHandler(this._publicBrandingGatewayHandler);
     }
+    this.unregisterMobilePwaGatewayHandler();
+    this._mobilePwaGatewayHandler = createMobilePwaGatewayHandler({ Gateway });
+    if (Gateway && typeof Gateway.registerRequestHandler === 'function') {
+      Gateway.registerRequestHandler(this._mobilePwaGatewayHandler);
+    }
     this.app.resourceManager.use(createSystemSettingsBrandingMiddleware(), { tag: 'latticePublicBrandingLogo', after: 'acl' });
+    this.app.resourceManager.use(createPublicAuthPolicyMiddleware(), { tag: 'latticePublicAuthPolicy', after: 'acl' });
     this.app.resourceManager.use(createPaasApiKeyAuthMiddleware(this.db),{tag:'latticePaasApiKeyAuth',before:'auth'});
     this.app.resourceManager.use(createNativeScopeMiddleware(this.db,schemas),{tag:'latticeNativeScope',after:'acl'});
     const catalog=createApplicationCatalog();
@@ -166,6 +210,19 @@ class LatticeFoundationPlugin extends Plugin {
       },
     }});
     this.app.acl.allow('latticeApps', ['list', 'get'], 'loggedIn');
+    if (!this._incidentGrantsHookRegistered) {
+      this._incidentGrantsHookRegistered = true;
+      const runGrants = () => { this.ensureIncidentManagerGrants().catch(() => {}); };
+      if (typeof this.app?.once === 'function') this.app.once('afterStart', runGrants);
+      else if (typeof this.app?.on === 'function') this.app.on('afterStart', runGrants);
+    }
+  }
+  async ensureIncidentManagerGrants() {
+    try {
+      await installIncidentManagerActionGrants(this.db);
+    } catch {
+      // Roles/resources tables may not be synced yet or mocked in unit tests.
+    }
   }
   stopEventBusDrainer() {
     if (typeof this._stopEventBusDrainer === 'function') {
@@ -204,10 +261,19 @@ class LatticeFoundationPlugin extends Plugin {
       this._publicBrandingGatewayHandler = null;
     }
   }
+  unregisterMobilePwaGatewayHandler() {
+    if (this._mobilePwaGatewayHandler) {
+      if (Gateway && typeof Gateway.unregisterRequestHandler === 'function') {
+        Gateway.unregisterRequestHandler(this._mobilePwaGatewayHandler);
+      }
+      this._mobilePwaGatewayHandler = null;
+    }
+  }
   async unload() {
     this.unregisterPublicFormGatewayHandler();
     this.unregisterPublicTrackGatewayHandler();
     this.unregisterPublicBrandingGatewayHandler();
+    this.unregisterMobilePwaGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.unload === 'function') await super.unload();
@@ -216,6 +282,7 @@ class LatticeFoundationPlugin extends Plugin {
     this.unregisterPublicFormGatewayHandler();
     this.unregisterPublicTrackGatewayHandler();
     this.unregisterPublicBrandingGatewayHandler();
+    this.unregisterMobilePwaGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.remove === 'function') await super.remove();
@@ -224,6 +291,7 @@ class LatticeFoundationPlugin extends Plugin {
     this.unregisterPublicFormGatewayHandler();
     this.unregisterPublicTrackGatewayHandler();
     this.unregisterPublicBrandingGatewayHandler();
+    this.unregisterMobilePwaGatewayHandler();
     this.stopEventBusDrainer();
     await this.stopOtelExporter();
     if (typeof super.destroy === 'function') await super.destroy();
@@ -234,6 +302,12 @@ class LatticeFoundationPlugin extends Plugin {
       return;
     }
     await this.db.sequelize.transaction((transaction) => seedFoundation(this.db, transaction, { env: process.env }));
+  }
+  async afterEnable() {
+    await this.ensureIncidentManagerGrants();
+  }
+  async start() {
+    await this.ensureIncidentManagerGrants();
   }
 }
 LatticeFoundationPlugin.appendLedgerEntrySafely = appendLedgerEntrySafely;

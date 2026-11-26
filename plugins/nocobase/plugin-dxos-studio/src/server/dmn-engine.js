@@ -25,7 +25,7 @@ const {
 const TABLE_KEY_RE = /^[a-zA-Z0-9_-]{2,80}$/;
 const FIELD_NAME_RE = /^[a-zA-Z0-9_.-]{1,64}$/;
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const HIT_POLICIES = new Set(['FIRST', 'COLLECT']);
+const HIT_POLICIES = new Set(['FIRST', 'UNIQUE', 'COLLECT', 'PRIORITY']);
 const ALLOWED_OPERATORS = new Set([
   'eq', '==', '===',
   'neq', '!=', '!==',
@@ -207,9 +207,19 @@ function validateAndNormalizeRules(rawRules) {
       }
       then[k] = outVal;
     }
+    let priority;
+    const rawPriority = rule.priority ?? rule.rank;
+    if (rawPriority !== undefined && rawPriority !== null && String(rawPriority).trim() !== '') {
+      const pNum = parseFinite(rawPriority);
+      if (pNum === null) {
+        throw fail('DMN_RULE_INVALID', 400, `Độ ưu tiên priority tại luật #${idx} phải là số hữu hạn.`);
+      }
+      priority = pNum;
+    }
     return {
       when,
       then,
+      ...(priority !== undefined ? { priority } : {}),
       ...(typeof rule.description === 'string' && rule.description.trim() ? { description: rule.description.trim().slice(0, 255) } : {}),
     };
   });
@@ -299,8 +309,10 @@ function evaluateDecisionTable(table, context = {}) {
       }
     }
     if (isMatch) {
+      const prio = parseFinite(rule?.priority ?? rule?.rank);
       matchedRules.push({
         ruleIndex: i,
+        priority: prio !== null ? prio : 0,
         outputs: then,
         ...(rule?.description ? { description: rule.description } : {}),
       });
@@ -317,6 +329,43 @@ function evaluateDecisionTable(table, context = {}) {
       result: first ? first.outputs : null,
       outputs: first ? first.outputs : null,
       matchedRules,
+    };
+  }
+
+  if (hitPolicy === 'UNIQUE') {
+    if (matchedRules.length > 1) {
+      throw fail(
+        'DMN_UNIQUE_POLICY_VIOLATION',
+        409,
+        `Chính sách UNIQUE chỉ cho phép tối đa 1 luật khớp, nhưng phát hiện ${matchedRules.length} luật khớp (index: ${matchedRules.map((m) => m.ruleIndex).join(', ')}).`,
+      );
+    }
+    const only = matchedRules[0] || null;
+    return {
+      hitPolicy,
+      matched: Boolean(only),
+      matchedRuleIndex: only ? only.ruleIndex : -1,
+      result: only ? only.outputs : null,
+      outputs: only ? only.outputs : null,
+      results: only ? [only.outputs] : [],
+      matchedRules,
+    };
+  }
+
+  if (hitPolicy === 'PRIORITY') {
+    const sorted = matchedRules.slice().sort((a, b) => {
+      if (b.priority !== a.priority) return b.priority - a.priority;
+      return a.ruleIndex - b.ruleIndex;
+    });
+    const top = sorted[0] || null;
+    return {
+      hitPolicy,
+      matched: Boolean(top),
+      matchedRuleIndex: top ? top.ruleIndex : -1,
+      result: top ? top.outputs : null,
+      outputs: top ? top.outputs : null,
+      results: top ? [top.outputs] : [],
+      matchedRules: sorted,
     };
   }
 
@@ -359,7 +408,8 @@ function createDxosDmnActions(db, foundation = defaultFoundation) {
       const { organizationId } = await resolveTenantActor(db, ctx, {
         requireOrg: false,
         requestedOrgId: params.organizationId,
-        aclCollections: null,
+        aclCollections: ['latticeDecisionTables'],
+        aclAction: 'view',
         patScopes: ['read', 'write', 'dmn'],
       }, foundation);
       const repo = db.getRepository?.('latticeDecisionTables');
@@ -406,7 +456,7 @@ function createDxosDmnActions(db, foundation = defaultFoundation) {
 
       const hitPolicy = String(params.hitPolicy || 'FIRST').trim().toUpperCase();
       if (!HIT_POLICIES.has(hitPolicy)) {
-        throw fail('DMN_HIT_POLICY_INVALID', 400, 'hitPolicy chỉ hỗ trợ FIRST hoặc COLLECT.');
+        throw fail('DMN_HIT_POLICY_INVALID', 400, 'hitPolicy chỉ hỗ trợ FIRST, UNIQUE, COLLECT hoặc PRIORITY.');
       }
 
       const inputsJson = validateAndNormalizeSchemaList(params.inputsJson, 'inputsJson');
@@ -460,17 +510,12 @@ function createDxosDmnActions(db, foundation = defaultFoundation) {
     evaluate: async (ctx, next) => {
       if (!['GET', 'POST'].includes(ctx.method || 'GET')) throw fail('METHOD_NOT_ALLOWED', 405);
       const params = readParams(ctx);
-      const { organizationId } = await resolveTenantActor(db, ctx, {
+      const { isRoot, organizationId } = await resolveTenantActor(db, ctx, {
         requireOrg: true,
         requestedOrgId: params.organizationId,
         aclCollections: null,
         patScopes: ['read', 'write', 'dmn'],
       }, foundation);
-      const tableKey = typeof params.tableKey === 'string' ? params.tableKey.trim() : '';
-      if (!tableKey) throw fail('DMN_TABLE_KEY_REQUIRED', 400, 'Cần tableKey để đánh giá DMN.');
-
-      const repo = db.getRepository?.('latticeDecisionTables');
-      if (!repo) throw fail('DMN_REPO_UNAVAILABLE', 503);
 
       let evalContext = params.context ?? params.input ?? {};
       if (typeof evalContext === 'string') {
@@ -480,6 +525,43 @@ function createDxosDmnActions(db, foundation = defaultFoundation) {
           throw fail('DMN_CONTEXT_INVALID', 400, 'context DMN không phải JSON hợp lệ.');
         }
       }
+
+      if (params.table && typeof params.table === 'object' && !Array.isArray(params.table)) {
+        if (!isRoot) {
+          const adminOk = await isOrgAdmin(db, ctx);
+          const granted = await hasCollectionPermission(db, ctx, ['latticeDecisionTables'], ['view', 'update']);
+          if (!adminOk && !granted) {
+            throw fail('DXOS_ACL_DENIED', 403, 'Chỉ người dùng có quyền xem/sửa bảng quyết định DMN mới được mô phỏng bảng nháp.');
+          }
+        }
+        const draftTable = params.table;
+        const draftHitPolicy = String(draftTable.hitPolicy || 'FIRST').trim().toUpperCase();
+        if (!HIT_POLICIES.has(draftHitPolicy)) {
+          throw fail('DMN_HIT_POLICY_INVALID', 400, 'hitPolicy chỉ hỗ trợ FIRST, UNIQUE, COLLECT hoặc PRIORITY.');
+        }
+        const rawDraftRules = draftTable.rulesJson ?? draftTable.rules ?? [];
+        const normalizedRules = validateAndNormalizeRules(rawDraftRules);
+        const draftTableKey = typeof draftTable.tableKey === 'string' && draftTable.tableKey.trim()
+          ? draftTable.tableKey.trim()
+          : (typeof params.tableKey === 'string' && params.tableKey.trim() ? params.tableKey.trim() : 'draft');
+        const evaluation = evaluateDecisionTable(
+          { hitPolicy: draftHitPolicy, rulesJson: normalizedRules },
+          evalContext,
+        );
+        ctx.body = {
+          tableKey: draftTableKey,
+          simulated: true,
+          version: Number(draftTable.version) || 0,
+          ...evaluation,
+        };
+        return next();
+      }
+
+      const tableKey = typeof params.tableKey === 'string' ? params.tableKey.trim() : '';
+      if (!tableKey) throw fail('DMN_TABLE_KEY_REQUIRED', 400, 'Cần tableKey để đánh giá DMN.');
+
+      const repo = db.getRepository?.('latticeDecisionTables');
+      if (!repo) throw fail('DMN_REPO_UNAVAILABLE', 503);
 
       const table = await runWithOptionalRls(db, organizationId, (transaction) => (
         repo.findOne({ filter: { organizationId, tableKey }, ...(transaction ? { transaction } : {}) })

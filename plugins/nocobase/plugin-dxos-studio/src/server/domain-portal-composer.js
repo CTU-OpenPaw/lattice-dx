@@ -10,6 +10,145 @@
 
 const crypto = require('crypto');
 const { fail, val } = require('./wms-dmn-shared');
+const { attachDxosBlocksToTab } = require('./portal-composer');
+
+function buildDomainCockpitBlocks({ slug, title, collectionName }) {
+  if (slug === 'cmms' || collectionName === 'latticeCustomWorkOrders') {
+    return [
+      {
+        uidSuffix: 'hero',
+        use: 'DxosPortalHeroBlockModel',
+        config: {
+          title: 'Trung tâm Bảo trì CMMS & Thiết bị Lạnh',
+          subtitle: 'Theo dõi lệnh bảo trì, cảnh báo cảm biến IoT và xử lý phiếu công việc chuẩn GSP/GDP.',
+          badge: 'DX-OS · CMMS',
+          accentColor: '#0ea5e9',
+          actionsJson: JSON.stringify([
+            { label: 'Trung tâm Sự cố', path: '/p/incidents', primary: true },
+            { label: 'Workspace Điều hành', path: '/admin/lattice-workspace' },
+          ]),
+        },
+      },
+      {
+        uidSuffix: 'kpi',
+        use: 'DxosKpiMetricBlockModel',
+        config: {
+          title: 'Chỉ số Bảo trì CMMS [D]',
+          columns: 3,
+          metricsJson: JSON.stringify([
+            { label: 'Tổng lệnh bảo trì', collection: collectionName, color: '#0ea5e9', targetPath: '/p/cmms' },
+            { label: 'Đang mở / Chờ xử lý', collection: collectionName, filter: { status: 'open' }, color: '#f59e0b', targetPath: '/p/cmms' },
+            { label: 'Ưu tiên Khẩn cấp', collection: collectionName, filter: { priority: 'critical' }, color: '#ef4444', targetPath: '/p/cmms' },
+          ]),
+        },
+      },
+      {
+        uidSuffix: 'tasks',
+        use: 'DxosWorkflowTasksBlockModel',
+        config: { title: 'Hộp việc Bảo trì & Phê duyệt [P]', statusFilter: 'pending', pageSize: 5 },
+      },
+      {
+        uidSuffix: 'bi-chart',
+        use: 'DxosBiChartBlockModel',
+        config: {
+          title: 'Phân bổ Lệnh Bảo trì theo Trạng thái [BI]',
+          collection: collectionName,
+          chartType: 'bar',
+          groupBy: 'status',
+          secondaryGroupBy: 'priority',
+          metricOp: 'count',
+          metricField: '',
+          metric: { op: 'count' },
+          limit: 20,
+        },
+      },
+    ];
+  }
+  if (slug === 'partner-claims' || collectionName === 'latticeCustomPartnerClaims') {
+    return [
+      {
+        uidSuffix: 'hero',
+        use: 'DxosPortalHeroBlockModel',
+        config: {
+          title: 'Cổng Đối soát & Bồi thường Đối tác Chuỗi lạnh',
+          subtitle: 'Đánh giá mức độ rủi ro theo DMN, đối chiếu chứng cứ PKI và phê duyệt mức bồi thường tự động.',
+          badge: 'DX-OS · ĐỐI SOÁT',
+          accentColor: '#7c3aed',
+          actionsJson: JSON.stringify([
+            { label: 'Hộp thư Phê duyệt', path: '/admin/settings/dxos-studio?tab=approvals', primary: true },
+            { label: 'Cổng Logistics', path: '/p/logistics' },
+          ]),
+        },
+      },
+      {
+        uidSuffix: 'kpi',
+        use: 'DxosKpiMetricBlockModel',
+        config: {
+          title: 'Chỉ số Đối soát Bồi thường [D]',
+          columns: 3,
+          metricsJson: JSON.stringify([
+            { label: 'Hồ sơ đối soát', collection: collectionName, color: '#7c3aed', targetPath: '/p/partner-claims' },
+            { label: 'Đang chờ duyệt', collection: collectionName, filter: { status: 'open' }, color: '#f59e0b', targetPath: '/p/partner-claims' },
+            { label: 'Đã chốt bồi thường', collection: collectionName, filter: { status: 'approved' }, color: '#10b981', targetPath: '/p/partner-claims' },
+          ]),
+        },
+      },
+      {
+        uidSuffix: 'tasks',
+        use: 'DxosWorkflowTasksBlockModel',
+        config: { title: 'Hồ sơ Đối soát chờ Phê duyệt [P]', statusFilter: 'pending', pageSize: 5 },
+      },
+      {
+        uidSuffix: 'bi-chart',
+        use: 'DxosBiChartBlockModel',
+        config: {
+          title: 'Phân tích Bồi thường theo Mức độ [BI]',
+          collection: collectionName,
+          chartType: 'bar',
+          groupBy: 'settlementStatus',
+          secondaryGroupBy: 'severity',
+          metricOp: 'sum',
+          metricField: 'settlementAmountVnd',
+          metric: { op: 'sum', field: 'settlementAmountVnd' },
+          limit: 20,
+        },
+      },
+    ];
+  }
+  return [
+    {
+      uidSuffix: 'hero',
+      use: 'DxosPortalHeroBlockModel',
+      config: {
+        title: title || slug,
+        subtitle: `Bảng điều hành tổng hợp nghiệp vụ ${title || slug}.`,
+        badge: `DX-OS · ${String(slug || 'PORTAL').toUpperCase()}`,
+        accentColor: '#2563eb',
+      },
+    },
+    {
+      uidSuffix: 'kpi',
+      use: 'DxosKpiMetricBlockModel',
+      config: {
+        title: `Chỉ số ${title || slug} [D]`,
+        columns: 2,
+        metricsJson: JSON.stringify([
+          { label: 'Tổng bản ghi', collection: collectionName, color: '#2563eb', targetPath: `/p/${slug}` },
+        ]),
+      },
+    },
+  ];
+}
+
+async function isDxosBlocksPluginActive(db) {
+  const pluginsRepo = db.getRepository?.('applicationPlugins');
+  if (!pluginsRepo || typeof pluginsRepo.find !== 'function') return false;
+  const rows = (await pluginsRepo.find({})) || [];
+  const blocksPlugin = rows.find(
+    (p) => val(p, 'packageName') === '@latticedx/plugin-dxos-blocks' || val(p, 'name') === '@latticedx/plugin-dxos-blocks',
+  );
+  return val(blocksPlugin, 'enabled') === true;
+}
 
 const ROLE_NAME_RE = /^[a-z][a-z0-9_]{1,40}$/;
 const RESERVED_SYSTEM_ROLES = new Set(['root', 'admin', 'anonymous', 'member', 'ldx_sysadmin', 'ldx_connector']);
@@ -296,6 +435,14 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
             props: { ...(existingTabModel.props || {}), title: portalTitle, routePath },
           });
         }
+        if (await isDxosBlocksPluginActive(db)) {
+          await attachDxosBlocksToTab(
+            db,
+            tSchemaUid,
+            cleanSlug,
+            buildDomainCockpitBlocks({ slug: cleanSlug, title: portalTitle, collectionName }),
+          );
+        }
       }
     }
 
@@ -426,6 +573,14 @@ async function upsertPortalPageForDomain(db, { slug, title, collectionName, role
         },
       },
     });
+    if (await isDxosBlocksPluginActive(db)) {
+      await attachDxosBlocksToTab(
+        db,
+        tabSchemaUid,
+        cleanSlug,
+        buildDomainCockpitBlocks({ slug: cleanSlug, title: portalTitle, collectionName }),
+      );
+    }
   }
 
   return {

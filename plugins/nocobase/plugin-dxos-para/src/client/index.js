@@ -95,6 +95,103 @@
 
   const OCR_SERVICE_TYPES = new Set(['leave', 'it_support', 'facilities', 'hr_request']);
   const OCR_SERVICE_PRIORITIES = new Set(['low', 'medium', 'high']);
+  const OCR_COLLECTION_FIELDS = {
+    latticeStockLots: [
+      ['lotCode', 'Mã lô (lotCode)'],
+      ['sku', 'SKU'],
+      ['productName', 'Tên sản phẩm (productName)'],
+      ['qtyOnHand', 'Số lượng tồn (qtyOnHand)'],
+      ['unit', 'Đơn vị (unit)'],
+      ['expiryDate', 'Hạn sử dụng (YYYY-MM-DD)'],
+    ],
+    latticeServiceTickets: [
+      ['code', 'Mã phiếu (code)'],
+      ['name', 'Tiêu đề (name)'],
+      ['serviceType', 'Loại dịch vụ (serviceType)'],
+      ['priority', 'Độ ưu tiên (priority)'],
+      ['description', 'Mô tả (description)'],
+    ],
+    latticeRequests: [
+      ['code', 'Mã yêu cầu (code)'],
+      ['name', 'Tên / Tiêu đề (name)'],
+      ['category', 'Danh mục (category)'],
+      ['quantity', 'Số lượng (quantity)'],
+      ['estimatedCost', 'Chi phí dự kiến (estimatedCost)'],
+      ['description', 'Mô tả (description)'],
+    ],
+    latticeOrders: [
+      ['code', 'Mã chứng từ (code)'],
+      ['name', 'Tên / Tiêu đề (name)'],
+      ['customer', 'Khách hàng (customer)'],
+      ['origin', 'Điểm đi (origin)'],
+      ['destination', 'Điểm đến (destination)'],
+      ['quantity', 'Số lượng (quantity)'],
+      ['description', 'Mô tả (description)'],
+    ],
+  };
+
+  function normalizeOcrDraftForCollection(collection, rawValues = {}, ocrResult = null) {
+    const src = rawValues && typeof rawValues === 'object' ? { ...rawValues } : {};
+    const lineItems = Array.isArray(ocrResult?.lineItems) ? ocrResult.lineItems : [];
+    const firstItem = lineItems[0] || {};
+    const resultSuggested = ocrResult?.suggestedValues && typeof ocrResult.suggestedValues === 'object'
+      ? ocrResult.suggestedValues
+      : {};
+
+    if (collection === 'latticeStockLots') {
+      const lotCode = Object.hasOwn(src, 'lotCode')
+        ? String(src.lotCode ?? '').trim()
+        : String(firstItem.lotCode || '').trim();
+      const sku = Object.hasOwn(src, 'sku')
+        ? String(src.sku ?? '').trim()
+        : String(firstItem.sku || '').trim();
+      const productName = Object.hasOwn(src, 'productName')
+        ? String(src.productName ?? '').trim()
+        : String(firstItem.productName || '').trim();
+      const qtyOnHand = Object.hasOwn(src, 'qtyOnHand')
+        ? src.qtyOnHand
+        : (Object.hasOwn(src, 'quantity') ? src.quantity : (firstItem.quantity ?? ''));
+      const unit = Object.hasOwn(src, 'unit')
+        ? String(src.unit ?? '').trim()
+        : String(firstItem.unit || '').trim();
+      const expiryDate = Object.hasOwn(src, 'expiryDate')
+        ? String(src.expiryDate ?? '').trim()
+        : String(firstItem.expiryDate || '').trim();
+
+      const next = {
+        ...src,
+        lotCode,
+        sku,
+        productName,
+        qtyOnHand,
+        unit,
+        expiryDate,
+      };
+      delete next.code;
+      delete next.name;
+      delete next.quantity;
+      return next;
+    }
+
+    const next = { ...src };
+    delete next.lotCode;
+    delete next.qtyOnHand;
+    delete next.productName;
+    if (!Object.hasOwn(next, 'code') && resultSuggested.code) {
+      next.code = resultSuggested.code;
+    }
+    if (next.quantity == null && src.qtyOnHand != null && src.qtyOnHand !== '') {
+      next.quantity = src.qtyOnHand;
+    }
+    if (!next.name && (next.customer || next.destination || next.code || resultSuggested.name)) {
+      next.name = resultSuggested.name || (
+        next.customer
+          ? `Hồ sơ OCR — ${next.customer}`
+          : (next.destination ? `Hồ sơ OCR — ${next.destination}` : String(next.code || ''))
+      );
+    }
+    return next;
+  }
 
   function sanitizeOcrServiceType(raw) {
     const norm = String(raw ?? '').trim().toLowerCase();
@@ -126,11 +223,23 @@
     const description = [baseDesc, ...extraNotes].filter(Boolean).join('\n').slice(0, 2000);
 
     if (targetCollection === 'latticeStockLots') {
-      const lotCode = String(vals.lotCode || vals.code || '').trim();
-      const sku = String(vals.sku || firstItem.sku || '').trim();
-      const productName = String(vals.productName || vals.name || firstItem.productName || '').trim();
-      const qtyOnHand = Number(vals.qtyOnHand ?? vals.quantity ?? firstItem.quantity);
-      const expiryDate = String(vals.expiryDate || firstItem.expiryDate || '').trim();
+      const lotCode = String(vals.lotCode || '').trim();
+      const rawSku = Object.hasOwn(vals, 'sku') ? vals.sku : (firstItem.sku || '');
+      const sku = String(rawSku || '').trim();
+      const rawProductName = Object.hasOwn(vals, 'productName')
+        ? vals.productName
+        : (vals.name || firstItem.productName || '');
+      const productName = String(rawProductName || '').trim();
+      const rawQty = Object.hasOwn(vals, 'qtyOnHand')
+        ? vals.qtyOnHand
+        : (vals.quantity ?? firstItem.quantity);
+      const qtyOnHand = rawQty === '' || rawQty == null ? NaN : Number(rawQty);
+      const rawExpiry = Object.hasOwn(vals, 'expiryDate')
+        ? vals.expiryDate
+        : (firstItem.expiryDate || '');
+      const expiryDate = String(rawExpiry || '').trim();
+      const rawUnit = Object.hasOwn(vals, 'unit') ? vals.unit : (firstItem.unit || '');
+      const unit = String(rawUnit || '').trim();
       if (!lotCode || !sku || !productName || !Number.isFinite(qtyOnHand) || qtyOnHand <= 0 || !expiryDate) {
         return {
           ok: false,
@@ -147,7 +256,7 @@
           productName,
           qtyOnHand,
           expiryDate,
-          ...(vals.unit || firstItem.unit ? { unit: String(vals.unit || firstItem.unit).trim() } : {}),
+          ...(unit ? { unit } : {}),
           ...(org ? { organizationId: org } : {}),
         },
       };
@@ -168,12 +277,16 @@
     }
 
     if (targetCollection === 'latticeRequests') {
+      const rawQty = Object.hasOwn(vals, 'quantity') ? vals.quantity : firstItem.quantity;
+      const qtyNum = rawQty === '' || rawQty == null ? NaN : Number(rawQty);
+      const rawCost = Object.hasOwn(vals, 'estimatedCost') ? vals.estimatedCost : undefined;
+      const costNum = rawCost === '' || rawCost == null ? NaN : Number(rawCost);
       const payload = {
         code,
         name,
         ...(vals.category ? { category: String(vals.category).trim() } : {}),
-        ...(Number.isFinite(Number(vals.quantity ?? firstItem.quantity)) ? { quantity: Number(vals.quantity ?? firstItem.quantity) } : {}),
-        ...(Number.isFinite(Number(vals.estimatedCost)) ? { estimatedCost: Number(vals.estimatedCost) } : {}),
+        ...(Number.isFinite(qtyNum) ? { quantity: qtyNum } : {}),
+        ...(Number.isFinite(costNum) ? { estimatedCost: costNum } : {}),
         ...(description ? { description } : {}),
         ...(org ? { organizationId: org } : {}),
       };
@@ -195,7 +308,8 @@
     }
 
     // Default: latticeOrders
-    const qtyNum = Number(vals.quantity ?? firstItem.quantity);
+    const rawQty = Object.hasOwn(vals, 'quantity') ? vals.quantity : firstItem.quantity;
+    const qtyNum = rawQty === '' || rawQty == null ? NaN : Number(rawQty);
     const payload = {
       code,
       name,
@@ -643,12 +757,7 @@
           const suggested = parsed?.suggestedValues && typeof parsed.suggestedValues === 'object'
             ? { ...parsed.suggestedValues }
             : {};
-          if (!suggested.name && (suggested.customer || suggested.destination || suggested.code)) {
-            suggested.name = suggested.customer
-              ? `Hồ sơ OCR — ${suggested.customer}`
-              : (suggested.destination ? `Hồ sơ OCR — ${suggested.destination}` : String(suggested.code || ''));
-          }
-          setOcrDraftValues(suggested);
+          setOcrDraftValues(normalizeOcrDraftForCollection(targetCollection, suggested, parsed));
         } catch (err) {
           setStatusMsg({
             type: 'error',
@@ -674,13 +783,17 @@
         setOcrCreating(true);
         setStatusMsg(null);
         try {
+          const isStockLot = targetCollection === 'latticeStockLots';
           const res = await api.request({
-            url: `${targetCollection}:create`,
+            url: isStockLot ? 'dxosWms:receiveStock' : `${targetCollection}:create`,
             method: 'post',
             data: built.payload,
             skipNotify: true,
           });
-          const created = unwrapPayload(res);
+          const payload = unwrapPayload(res);
+          const created = isStockLot && payload?.lot && typeof payload.lot === 'object'
+            ? payload.lot
+            : payload;
           const portalPath = COLLECTION_PORTAL_ROUTES[targetCollection] || '/p/logistics';
           setOcrCreatedRecord({
             collection: targetCollection,
@@ -941,10 +1054,15 @@
                 antdRef.Space,
                 { wrap: true },
                 h(antdRef.Select, {
+                  'data-testid': 'dxos-para-ocr-target-select',
                   value: targetCollection,
                   style: { width: 260 },
                   options: TARGET_COLLECTION_OPTIONS,
-                  onChange: (val) => { setTargetCollection(val); setOcrCreatedRecord(null); },
+                  onChange: (val) => {
+                    setTargetCollection(val);
+                    setOcrCreatedRecord(null);
+                    setOcrDraftValues((prev) => normalizeOcrDraftForCollection(val, prev, ocrResult));
+                  },
                 }),
                 h('input', {
                   'data-testid': 'dxos-para-ocr-file-input',
@@ -992,16 +1110,7 @@
                       h(
                         antdRef.Row,
                         { gutter: [8, 8] },
-                        [
-                          ['code', 'Mã chứng từ (code)'],
-                          ['name', 'Tên / Tiêu đề (name)'],
-                          ['customer', 'Khách hàng (customer)'],
-                          ['destination', 'Điểm đến (destination)'],
-                          ['quantity', 'Số lượng (quantity)'],
-                          ['sku', 'SKU (nếu nhập lô)'],
-                          ['lotCode', 'Mã lô (nếu nhập lô)'],
-                          ['expiryDate', 'Hạn sử dụng (YYYY-MM-DD)'],
-                        ].map(([fieldKey, label]) => h(
+                        (OCR_COLLECTION_FIELDS[targetCollection] || OCR_COLLECTION_FIELDS.latticeOrders).map(([fieldKey, label]) => h(
                           antdRef.Col,
                           { key: fieldKey, xs: 24, sm: 12 },
                           h('div', { style: { fontSize: 11, color: '#475569', marginBottom: 2 } }, label),

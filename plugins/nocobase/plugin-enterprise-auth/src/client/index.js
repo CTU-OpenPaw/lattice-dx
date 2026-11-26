@@ -48,7 +48,7 @@
     return h(antd.Alert,{type:'info',showIcon:true,message:'Kết nối Keycloak native',description:'Issuer, Client ID và callback do cấu hình triển khai quản lý. Liên kết subject với tài khoản có sẵn tại Enterprise identity mappings. Không tự tạo người dùng hoặc cấp quyền khi đăng nhập.'});
   }
   function MappingSettings(){
-    const api=client.useAPIClient(),[form]=antd.Form.useForm(),[configuration,setConfiguration]=React.useState(),[mappings,setMappings]=React.useState([]),[loadingMappings,setLoadingMappings]=React.useState(false),[unlinkingKey,setUnlinkingKey]=React.useState(null),[linking,setLinking]=React.useState(false),[status,setStatus]=React.useState();
+    const api=client.useAPIClient(),[form]=antd.Form.useForm(),[configuration,setConfiguration]=React.useState(),[mappings,setMappings]=React.useState([]),[targets,setTargets]=React.useState({authenticators:[],users:[]}),[loadingMappings,setLoadingMappings]=React.useState(false),[unlinkingKey,setUnlinkingKey]=React.useState(null),[linking,setLinking]=React.useState(false),[status,setStatus]=React.useState();
     const loadMappings=React.useCallback(async()=>{
       setLoadingMappings(true);
       try{
@@ -61,9 +61,25 @@
       }
     },[api]);
     React.useEffect(()=>{
-      api.request({url:'enterpriseAuth:configuration',skipNotify:true}).then(r=>setConfiguration(r.data.data)).catch(()=>setStatus({type:'error',message:'Chỉ quản trị viên root được cấu hình. Kiểm tra cấu hình triển khai.'}));
+      api.request({url:'enterpriseAuth:configuration',skipNotify:true}).then(r=>{
+        const cfg=r.data?.data||r.data;
+        setConfiguration(cfg);
+      }).catch(err=>{
+        const code=err?.response?.status||err?.status;
+        setStatus({type:'error',message:code===403?'Chỉ quản trị viên root được cấu hình. Kiểm tra cấu hình triển khai.':'Không thể tải cấu hình SSO doanh nghiệp.'});
+      });
+      api.request({url:'enterpriseAuth:listLinkTargets',skipNotify:true}).then(r=>{
+        const data=r.data?.data||r.data;
+        if(data&&(Array.isArray(data.authenticators)||Array.isArray(data.users))){
+          setTargets({authenticators:Array.isArray(data.authenticators)?data.authenticators:[],users:Array.isArray(data.users)?data.users:[]});
+          const firstAuth=data.authenticators?.find(a=>a.enabled!==false)||data.authenticators?.[0];
+          if(firstAuth?.name&&typeof form.getFieldValue==='function'&&!form.getFieldValue('authenticator')){
+            form.setFieldsValue?.({authenticator:firstAuth.name});
+          }
+        }
+      }).catch(()=>{});
       loadMappings();
-    },[api,loadMappings]);
+    },[api,loadMappings,form]);
     const handleUnlink=async(row)=>{
       const rowKey=`${row.authenticator}:${row.subject}:${row.userId}`;
       setUnlinkingKey(rowKey);
@@ -77,7 +93,8 @@
         setUnlinkingKey(null);
       }
     };
-    const info=configuration?h(antd.Descriptions,{column:1,items:Object.entries(configuration).map(([key,value])=>({key,label:key,children:value}))}):null;
+    const info=configuration?h(antd.Descriptions,{column:1,items:Object.entries(configuration).filter(([k])=>k!=='warning'&&k!=='configured').map(([key,value])=>({key,label:key,children:value??'—'}))}):null;
+    const configWarning=configuration&&configuration.configured===false?h(antd.Alert,{type:'warning',showIcon:true,message:'Cấu hình SSO doanh nghiệp chưa sẵn sàng hoặc không khớp môi trường',description:configuration.warning||'Kiểm tra DX_NATIVE_AUTH_ISSUER / DX_NATIVE_AUTH_INTERNAL_ISSUER.'}):null;
     const mappingTable=h(antd.Table,{
       rowKey:r=>`${r.authenticator}:${r.subject}:${r.userId}`,
       size:'small',
@@ -88,7 +105,11 @@
       columns:[
         {title:'Authenticator',dataIndex:'authenticator'},
         {title:'Subject (Keycloak)',dataIndex:'subject'},
-        {title:'User ID',dataIndex:'userId'},
+        {title:'User / Nhân viên',key:'userDisplay',render:(_v,row)=>{
+          const label=[row.employeeName,row.username,row.email].filter(Boolean).join(' · ');
+          return label?`${label} (#${row.userId})`:`#${row.userId}`;
+        }},
+        {title:'Tổ chức',dataIndex:'organizationId',render:v=>v||'—'},
         {title:'Issuer',dataIndex:'issuer'},
         {title:'Thao tác',key:'action',render:(_v,row)=>{
           const rowKey=`${row.authenticator}:${row.subject}:${row.userId}`;
@@ -104,24 +125,40 @@
         }},
       ],
     });
+    const authOptions=targets.authenticators.map(a=>({value:a.name,label:`${a.title||a.name} (${a.name})${a.enabled===false?' [Tạm tắt]':''}`}));
+    const userOptions=targets.users.map(u=>{
+      const name=u.employeeName||u.nickname||u.username||`User #${u.id}`;
+      const meta=[u.email||u.username,u.employeeCode,u.organizationId].filter(Boolean).join(' · ');
+      return {value:String(u.id),label:meta?`${name} (${meta}) — #${u.id}`:`${name} (#${u.id})`};
+    });
+    const renderControl=(name,placeholder)=>{
+      if(name==='authenticator'&&authOptions.length>0){
+        return h(antd.Select,{placeholder,options:authOptions,showSearch:true,optionFilterProp:'label'});
+      }
+      if(name==='userId'&&userOptions.length>0){
+        return h(antd.Select,{placeholder,options:userOptions,showSearch:true,optionFilterProp:'label'});
+      }
+      return h(antd.Input,{placeholder});
+    };
     const linkFields=[
-      {name:'authenticator',label:'Tên authenticator',placeholder:'native-keycloak',rules:[{required:true,message:'Vui lòng nhập tên authenticator.'}]},
+      {name:'authenticator',label:'Tên authenticator',placeholder:'native-keycloak',rules:[{required:true,message:'Vui lòng chọn hoặc nhập tên authenticator.'}]},
       {name:'subject',label:'Keycloak user ID (subject)',placeholder:'UUID người dùng Keycloak',rules:[{required:true,message:'Vui lòng nhập Keycloak user ID (subject).'}]},
-      {name:'userId',label:'NocoBase user ID',placeholder:'ID tài khoản đã có nhân viên',rules:[{required:true,message:'Vui lòng nhập NocoBase user ID.'},{pattern:/^\d+$/,message:'User ID phải là số nguyên dương.'}]},
+      {name:'userId',label:'Người dùng / Nhân viên nội bộ',placeholder:'Chọn tài khoản đã có nhân viên',rules:[{required:true,message:'Vui lòng chọn hoặc nhập NocoBase user ID.'},{pattern:/^\d+$/,message:'User ID phải là số nguyên dương.'}]},
     ];
-    return h(antd.Space,{direction:'vertical',style:{padding:24,maxWidth:880,width:'100%'}},h(antd.Typography.Title,{level:4},'Enterprise identity mappings'),h(AdminSettings),info,status?h(antd.Alert,status):null,mappingTable,h(antd.Form,{form,layout:'vertical',onFinish:async values=>{
+    return h(antd.Space,{direction:'vertical',style:{padding:24,maxWidth:980,width:'100%'}},h(antd.Typography.Title,{level:4},'Enterprise identity mappings'),h(AdminSettings),configWarning,info,status?h(antd.Alert,status):null,mappingTable,h(antd.Form,{form,layout:'vertical',onFinish:async values=>{
       setLinking(true);
       try{
         await api.request({url:'enterpriseAuth:link',method:'post',data:values,skipNotify:true});
         form.resetFields();
         setStatus({type:'success',message:'Đã liên kết tài khoản. Quyền và đơn vị giữ theo NocoBase.'});
         await loadMappings();
-      }catch{
-        setStatus({type:'error',message:'Không thể liên kết. Kiểm tra subject, user ID, nhân viên đang hoạt động hoặc mapping đã tồn tại.'});
+      }catch(err){
+        const msg=err?.response?.data?.errors?.[0]?.message||err?.message;
+        setStatus({type:'error',message:msg||'Không thể liên kết. Kiểm tra subject, user ID, nhân viên đang hoạt động hoặc mapping đã tồn tại.'});
       }finally{
         setLinking(false);
       }
-    }},...linkFields.map(({name,label,placeholder,rules})=>h(antd.Form.Item,{key:name,name,label,rules},h(antd.Input,{placeholder}))),h(antd.Button,{type:'primary',htmlType:'submit',loading:linking,disabled:linking},'Liên kết tài khoản')));
+    }},...linkFields.map(({name,label,placeholder,rules})=>h(antd.Form.Item,{key:name,name,label,rules},renderControl(name,placeholder))),h(antd.Button,{type:'primary',htmlType:'submit',loading:linking,disabled:linking},'Liên kết tài khoản')));
   }
   class EnterpriseLoginClient extends client.Plugin{
     async load(){

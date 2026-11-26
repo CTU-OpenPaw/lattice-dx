@@ -246,6 +246,9 @@ const bundled = await esbuild.build({
   format: 'cjs',
   platform: 'browser',
   target: ['es2020'],
+  minify: true,
+  keepNames: true,
+  treeShaking: true,
   define: {
     __DXOS_BUNDLED__: 'true',
     'process.env.NODE_ENV': '"production"',

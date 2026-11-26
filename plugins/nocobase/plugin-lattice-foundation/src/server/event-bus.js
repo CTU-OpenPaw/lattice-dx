@@ -49,6 +49,14 @@ function failEvent(code, status = 400, message = code) {
   return Object.assign(new Error(message), { code, status });
 }
 
+function hasMatchingActiveRlsTx(db) {
+  const activeRls = getActiveRlsContext();
+  return Boolean(
+    activeRls?.transaction
+    && (!activeRls.sequelize || !db?.sequelize || activeRls.sequelize === db.sequelize),
+  );
+}
+
 function normalizeRawBody(body) {
   if (Buffer.isBuffer(body)) return body.toString('utf8');
   if (typeof body === 'string') return body;
@@ -254,7 +262,7 @@ function serializeDelivery(row) {
 }
 
 function runEventsScopedDb(db, organizationId, fn) {
-  const activeTx = getActiveRlsContext()?.transaction || null;
+  const activeTx = hasMatchingActiveRlsTx(db) ? getActiveRlsContext()?.transaction || null : null;
   if (!canUsePgRlsSession(db) || activeTx) {
     return fn(activeTx || undefined);
   }
@@ -395,7 +403,7 @@ async function publishDomainEvent(
         }
       };
       try {
-        if (tx && getActiveRlsContext()?.transaction === tx) {
+        if (tx && hasMatchingActiveRlsTx(db) && getActiveRlsContext()?.transaction === tx) {
           await runInRlsSavepoint(db, markDispatched);
         } else {
           await markDispatched(tx);
@@ -488,9 +496,10 @@ async function syncParentEventStatus(db, organizationId, eventId, { transaction 
     }
   };
   try {
-    const activeTx = transaction || getActiveRlsContext()?.transaction || null;
+    const matchingActiveTx = hasMatchingActiveRlsTx(db) ? getActiveRlsContext()?.transaction || null : null;
+    const activeTx = transaction || matchingActiveTx;
     if (activeTx) {
-      if (getActiveRlsContext()?.transaction === activeTx) {
+      if (matchingActiveTx && matchingActiveTx === activeTx) {
         await runInRlsSavepoint(db, runSync);
       } else {
         await runSync(activeTx);
@@ -523,24 +532,27 @@ async function claimDueDeliveries(db, {
 
   if (isPg && typeof db?.sequelize?.transaction === 'function') {
     const withClaimRlsScope = (fn) => {
-      if (!canUsePgRlsSession(db) || getActiveRlsContext()?.transaction) {
-        return db.sequelize.transaction(fn);
+      if (hasMatchingActiveRlsTx(db)) {
+        return runInRlsSavepoint(db, fn);
       }
-      return organizationId
-        ? withTenantRlsContext(db, organizationId, fn)
-        : withSystemRlsBypass(db, fn);
+      if (canUsePgRlsSession(db)) {
+        return organizationId
+          ? withTenantRlsContext(db, organizationId, fn)
+          : withSystemRlsBypass(db, fn);
+      }
+      return db.sequelize.transaction(fn);
     };
 
     if (staleLockMs > 0) {
       try {
         const cutoff = new Date(nowDate.getTime() - staleLockMs);
         const reclaimSql = 'UPDATE "latticeWebhookDeliveries" SET status = \'retry_wait\', "lockedAt" = NULL, "lockedBy" = NULL, "nextAttemptAt" = NOW() WHERE status = \'processing\' AND "lockedAt" IS NOT NULL AND "lockedAt" < :cutoff';
-        if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction) {
+        if (hasMatchingActiveRlsTx(db)) {
+          await runInRlsSavepoint(db, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } }));
+        } else if (canUsePgRlsSession(db)) {
           await (organizationId
             ? withTenantRlsContext(db, organizationId, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } }))
             : withSystemRlsBypass(db, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } })));
-        } else if (getActiveRlsContext()?.transaction) {
-          await runInRlsSavepoint(db, (transaction) => db.sequelize.query(reclaimSql, { transaction, replacements: { cutoff } }));
         } else {
           await db.sequelize.query(reclaimSql, { replacements: { cutoff } });
         }
@@ -652,7 +664,7 @@ async function dispatchOneDelivery(
   const delOrg = val(delivery, 'organizationId');
   const eventId = val(delivery, 'eventId');
   const subId = Number(val(delivery, 'subscriptionId'));
-  const externalActiveTx = getActiveRlsContext()?.transaction || null;
+  const externalActiveTx = hasMatchingActiveRlsTx(db) ? getActiveRlsContext()?.transaction || null : null;
   const runScopedDb = (fn) => (!externalActiveTx && canUsePgRlsSession(db) && delOrg
     ? withTenantRlsContext(db, delOrg, fn)
     : fn(externalActiveTx || undefined));
@@ -710,7 +722,7 @@ async function dispatchOneDelivery(
           env,
           ...(spTx ? { transaction: spTx } : (transaction ? { transaction } : {})),
         });
-        const resolved = transaction && getActiveRlsContext()?.transaction === transaction
+        const resolved = transaction && hasMatchingActiveRlsTx(db) && getActiveRlsContext()?.transaction === transaction
           ? await runInRlsSavepoint(db, resolveSecrets)
           : await resolveSecrets(transaction);
         extraHeaders = buildConnectorAuthHeaders(resolved.connector.authType, resolved.secrets);

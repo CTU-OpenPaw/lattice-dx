@@ -13,6 +13,7 @@ const { createBuilderBrokerPanels, parseJsonSafe } = require('./builder-broker-p
 const { createFlowPinStorage } = require('./flow-pin-storage');
 const { createPublicFormBuilderPanel } = require('./public-form-builder');
 const { createApprovalInboxPanel } = require('./approval-inbox-panel');
+const { createNotifyPanel } = require('./notify-panel');
 
 const VALID_STUDIO_TABS = new Set([
   'workflows',
@@ -26,6 +27,9 @@ const VALID_STUDIO_TABS = new Set([
   'builder',
   'forms',
   'approvals',
+  'notify',
+  'governance',
+  ...GOVERNANCE_SECTIONS.map((s) => s.id),
 ]);
 
 const STUDIO_NAV_GROUPS = Object.freeze([
@@ -53,6 +57,7 @@ const STUDIO_NAV_GROUPS = Object.freeze([
     items: [
       ['automation', 'Vault & Automation Rules'],
       ['broker', 'Broker & Sự kiện'],
+      ['notify', 'Kênh Thông báo & Nhật ký'],
       ['outbox', 'Hàng đợi Outbox & DLQ'],
       ['plugins', 'Hệ sinh thái 7 Plugin'],
       ['pof', 'Sẵn sàng PoF & Hệ thống'],
@@ -85,6 +90,16 @@ function readInitialStudioTab() {
   }
 }
 
+function readInitialGovSection() {
+  try {
+    const search = typeof window !== 'undefined' && window.location ? window.location.search : '';
+    const sec = new URLSearchParams(search || '').get('section') || '';
+    return GOVERNANCE_SECTIONS.some((s) => s.id === sec) ? sec : 'api-keys';
+  } catch {
+    return 'api-keys';
+  }
+}
+
 function createDxosStudioSettingsPage(client, React, antd, app) {
   const h = React.createElement;
   const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
@@ -96,6 +111,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
   } = createBuilderBrokerPanels(client, React, antd, app);
   const PublicFormBuilderPanel = createPublicFormBuilderPanel(client, React, antd, app);
   const ApprovalInboxPanel = createApprovalInboxPanel(client, React, antd, app);
+  const NotifyPanel = createNotifyPanel(client, React, antd, app);
 
   function openRoute(path) {
     const url = app?.getRouteUrl?.(path) || path;
@@ -127,7 +143,12 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const [bundleText, setBundleText] = React.useState('');
     const [bundleInfo, setBundleInfo] = React.useState(null);
     const [enableBundleWorkflows, setEnableBundleWorkflows] = React.useState(false);
-    const [govSection, setGovSection] = React.useState('api-keys');
+    const [govSection, setGovSection] = React.useState(readInitialGovSection);
+    const [uploadedFileName, setUploadedFileName] = React.useState('');
+    const [outboxState, setOutboxState] = React.useState('failed');
+    const [outboxPage, setOutboxPage] = React.useState(1);
+    const [expandedOutboxId, setExpandedOutboxId] = React.useState(null);
+    const [confirmPurgeOutbox, setConfirmPurgeOutbox] = React.useState(false);
 
     const loadAll = React.useCallback(async () => {
       if (uiDenied) { setForbidden(true); setLoading(false); return; }
@@ -164,25 +185,37 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
 
     React.useEffect(() => { loadAll(); }, [loadAll]);
 
-    const loadOutbox = React.useCallback(async () => {
+    const loadOutbox = React.useCallback(async (nextState = outboxState, nextPage = outboxPage) => {
       if (uiDenied || !api?.request) return;
       try {
-        const res = await api.request({ url: 'dxosStudio:outboxDlqList', method: 'get', skipNotify: true });
+        const res = await api.request({
+          url: 'dxosStudio:outboxDlqList',
+          method: 'get',
+          params: {
+            state: nextState || 'failed',
+            page: nextPage || 1,
+            pageSize: 20,
+            ...(selectedOrg ? { organizationId: selectedOrg } : {}),
+          },
+          skipNotify: true,
+        });
         const d = res?.data?.data || res?.data || {};
         setOutboxData({
           items: Array.isArray(d.items) ? d.items : [],
           total: Number(d.total || 0),
+          page: Number(d.page || nextPage || 1),
+          pageSize: Number(d.pageSize || 20),
           summary: d.summary || { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 },
         });
       } catch (err) {
         const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được hàng đợi Outbox / DLQ.';
         setFeedback({ type: 'error', text: msg });
       }
-    }, [api, uiDenied]);
+    }, [api, uiDenied, outboxState, outboxPage, selectedOrg]);
 
     React.useEffect(() => {
-      if (!uiDenied && tab === 'outbox') loadOutbox();
-    }, [tab, loadOutbox, uiDenied]);
+      if (!uiDenied && tab === 'outbox') loadOutbox(outboxState, outboxPage);
+    }, [tab, loadOutbox, uiDenied, outboxState, outboxPage]);
 
     async function handleReplayDlq(eventIds) {
       if (!api?.request || busyAction) return;
@@ -193,9 +226,39 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         const res = await api.request({ url: 'dxosStudio:outboxDlqReplay', method: 'post', data: payload });
         const d = res?.data?.data || res?.data || {};
         setFeedback({ type: 'success', text: `Đã đưa ${d.replayedCount || 0} bản ghi Outbox DLQ trở lại hàng đợi xử lý.` });
-        await loadOutbox();
+        await loadOutbox(outboxState, outboxPage);
       } catch (err) {
         setFeedback({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || 'Không phát lại được hàng đợi DLQ.' });
+      } finally {
+        setBusyAction(false);
+      }
+    }
+
+    async function handlePurgeOutbox() {
+      if (!api?.request || busyAction) return;
+      if (outboxState === 'pending' || outboxState === 'processing') {
+        setConfirmPurgeOutbox(false);
+        return;
+      }
+      setBusyAction(true);
+      setFeedback(null);
+      try {
+        const targetState = outboxState === 'all' ? 'failed' : outboxState;
+        const res = await api.request({
+          url: 'dxosStudio:outboxDlqPurge',
+          method: 'post',
+          data: {
+            state: targetState,
+            ...(selectedOrg ? { organizationId: selectedOrg } : {}),
+          },
+        });
+        const d = res?.data?.data || res?.data || {};
+        setConfirmPurgeOutbox(false);
+        setFeedback({ type: 'success', text: `Đã dọn ${d.purgedCount || 0} bản ghi Outbox (${d.state || targetState}).` });
+        setOutboxPage(1);
+        await loadOutbox(outboxState, 1);
+      } catch (err) {
+        setFeedback({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || 'Không dọn được hàng đợi Outbox.' });
       } finally {
         setBusyAction(false);
       }
@@ -281,6 +344,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           portals: Array.isArray(b.portals) ? b.portals.length : 0,
           workflows: Array.isArray(b.workflows) ? b.workflows.length : 0,
           customCollections: Array.isArray(b.customCollections) ? b.customCollections.length : 0,
+          connectors: Array.isArray(b.connectors) ? b.connectors.length : 0,
           aiProfiles: Array.isArray(b.aiProfiles) ? b.aiProfiles.length : 0,
           governance: (Array.isArray(b?.governance?.decisionTables) ? b.governance.decisionTables.length : 0)
             + (Array.isArray(b?.governance?.slaPolicies) ? b.governance.slaPolicies.length : 0)
@@ -291,6 +355,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           sha256: b?.metadata?.contentSha256 || '',
           schemaVersion: b?.metadata?.schemaVersion || '',
           exportedAt: b?.metadata?.exportedAt || '',
+          warnings: Array.isArray(b?.metadata?.warnings) ? b.metadata.warnings : [],
           counts: exportCounts,
         });
         setFeedback({ type: 'success', text: `Đã xuất ${b?.metadata?.schemaVersion || 'Solution Bundle'} (${(b?.metadata?.contentSha256 || '').slice(0, 12)}…).` });
@@ -298,6 +363,30 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         setFeedback({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || 'Không xuất được Solution Bundle.' });
       } finally {
         setBusyAction(false);
+      }
+    }
+
+    async function handleBundleFileUpload(e) {
+      const file = e?.target?.files?.[0];
+      if (!file) return;
+      try {
+        let text = '';
+        if (typeof file.text === 'function') {
+          text = await file.text();
+        } else if (typeof FileReader !== 'undefined') {
+          text = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(new Error('Không đọc được tệp JSON.'));
+            reader.readAsText(file);
+          });
+        }
+        setBundleText(text);
+        setUploadedFileName(String(file.name || 'bundle.json'));
+        setBundleInfo(null);
+        setFeedback({ type: 'success', text: `Đã nạp tệp "${file.name || 'bundle.json'}" (${text.length} ký tự). Bấm Kiểm tra Diff (Dry-Run) để xem thay đổi.` });
+      } catch (err) {
+        setFeedback({ type: 'error', text: err?.message || 'Không đọc được tệp JSON đã chọn.' });
       }
     }
 
@@ -345,6 +434,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           ...(prev || {}),
           diff: d.diff || null,
           applied: d.applied || null,
+          warnings: Array.isArray(d.warnings) ? d.warnings : [],
           lastSnapshotUid: d.snapshotUid || prev?.lastSnapshotUid || '',
         }));
         setFeedback({
@@ -369,7 +459,10 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         const res = await api.request({
           url: 'dxosStudio:solutionBundleRollback',
           method: 'post',
-          data: { organizationId: selectedOrg || undefined },
+          data: {
+            organizationId: selectedOrg || undefined,
+            enableWorkflows: enableBundleWorkflows === true,
+          },
         });
         const d = res?.data?.data || res?.data || {};
         if (d.rolledBack === false) {
@@ -451,7 +544,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const isGovernanceTab = tab === 'governance' || GOVERNANCE_SECTIONS.some((s) => s.id === tab);
     const activeGovSection = tab === 'governance' ? govSection : (isGovernanceTab ? tab : govSection);
 
-    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '20px 24px 64px', maxWidth: 1320, margin: '0 auto', display: 'grid', gap: 16 } },
+    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '20px 24px 64px', maxWidth: 1320, width: '100%', boxSizing: 'border-box', margin: '0 auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, minWidth: 0 } },
       h('style', null, [
         '@media (max-width: 1023px) {',
         '  .dxos-studio-shell { flex-direction: column !important; }',
@@ -470,7 +563,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
       h('div', {
         className: 'dxos-studio-shell',
         'data-testid': 'dxos-studio-shell',
-        style: { display: 'flex', alignItems: 'flex-start', gap: 18 },
+        style: { display: 'flex', alignItems: 'flex-start', gap: 18, minWidth: 0, maxWidth: '100%' },
       },
         h('aside', {
           className: 'dxos-studio-sidebar',
@@ -540,7 +633,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         ),
         h('main', {
           'data-testid': 'dxos-studio-content',
-          style: { flex: 1, minWidth: 0, display: 'grid', gap: 14 },
+          style: { flex: 1, minWidth: 0, maxWidth: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 14 },
         },
       feedback ? h('div', {
         role: 'status',
@@ -555,7 +648,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         feedback.designerUrl ? h('button', { type: 'button', onClick: () => openRoute(feedback.designerUrl), style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #166534', background: '#fff', color: '#166534', cursor: 'pointer', fontSize: 12 } }, 'Mở Workflow Designer') : null,
       ) : null,
 
-      tab === 'workflows' ? h('form', { onSubmit: handleInstallWorkflow, style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 14 } },
+      tab === 'workflows' ? h('form', { onSubmit: handleInstallWorkflow, style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 14 } },
         h('div', null,
           h('label', { style: { display: 'block', fontSize: 13, fontWeight: 600, marginBottom: 4 } }, 'Chọn mẫu quy trình DX-OS Poka-yoke'),
           h('select', {
@@ -603,7 +696,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         ),
       ) : null,
 
-      tab === 'portals' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
+      tab === 'portals' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 12 } },
         h('h3', { style: { margin: 0, fontSize: 16 } }, 'Dựng & Nâng cấp 4 Cổng Đa-Block'),
         h('p', { style: { margin: 0, fontSize: 13, color: '#475569' } }, 'Tự động tạo trang Dịch vụ Nội bộ & Tài liệu P.A.R.A., kèm 4 trang Tổng quan kết hợp Hero + KPI + Việc của tôi + NGSI-LD + Đề xuất AI + Kho P.A.R.A. mà không ghi đè trang bạn đã tự thiết kế.'),
         h('div', { style: { display: 'flex', gap: 10, flexWrap: 'wrap' } },
@@ -615,10 +708,10 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         ),
       ) : null,
 
-      tab === 'plugins' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
+      tab === 'plugins' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 12 } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
           h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hệ sinh thái 7 Plugin Apache-2.0 Open-Core'),
-          h('div', { style: { display: 'flex', gap: 8 } },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
             h('button', { type: 'button', onClick: () => openRoute('/admin/settings/dxos-ai'), style: btnStyle(true) }, 'Mở AI Workforce & 6-Plane Center'),
             h('button', { type: 'button', onClick: () => openRoute('/admin/pm/list'), style: btnStyle(false) }, 'Mở Trình quản lý Plugin (bật/tắt trực tiếp)'),
           ),
@@ -635,7 +728,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         ),
       ) : null,
 
-      tab === 'pof' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 10 } },
+      tab === 'pof' ? h('div', { style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 10 } },
         h('h3', { style: { margin: 0, fontSize: 16 } }, 'Chỉ số Hệ thống & Tuân thủ Nguồn mở (PoF)'),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 } },
           [
@@ -651,12 +744,60 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         h('div', { style: { fontSize: 13, color: '#334155' } }, `Nhận diện Điều 5.2 NocoBase: ${readiness?.clause52Attribution || 'Powered by NocoBase'}`),
       ) : null,
 
-      tab === 'outbox' ? h('div', { 'data-testid': 'dxos-studio-outbox-dlq-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
+      tab === 'outbox' ? (() => {
+        const purgeUnsupportedState = outboxState === 'pending' || outboxState === 'processing';
+        const purgeDisabled = busyAction || purgeUnsupportedState;
+        const purgeTitle = purgeUnsupportedState
+          ? 'Chỉ hỗ trợ dọn các trạng thái Thất bại (failed), Đang thử lại (retry), Đã đồng bộ (delivered) hoặc Tất cả.'
+          : 'Dọn bản ghi Outbox theo trạng thái đang lọc';
+        return h('div', { 'data-testid': 'dxos-studio-outbox-dlq-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 12 } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
           h('h3', { style: { margin: 0, fontSize: 16 } }, 'Hàng đợi Outbox & Sự kiện lỗi (DLQ)'),
-          h('div', { style: { display: 'flex', gap: 8 } },
-            h('button', { type: 'button', onClick: () => loadOutbox(), style: btnStyle(false) }, 'Làm mới DLQ'),
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+            h('select', {
+              'data-testid': 'dxos-outbox-status-filter',
+              value: outboxState,
+              onChange: (e) => {
+                const nextState = e?.target?.value || 'failed';
+                setOutboxState(nextState);
+                setOutboxPage(1);
+                setConfirmPurgeOutbox(false);
+                loadOutbox(nextState, 1);
+              },
+              style: { padding: '6px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, background: '#fff' },
+            },
+              h('option', { value: 'failed' }, 'Trạng thái: Thất bại (DLQ)'),
+              h('option', { value: 'all' }, 'Trạng thái: Tất cả'),
+              h('option', { value: 'retry' }, 'Trạng thái: Đang thử lại'),
+              h('option', { value: 'pending' }, 'Trạng thái: Chờ gửi'),
+              h('option', { value: 'processing' }, 'Trạng thái: Đang xử lý'),
+              h('option', { value: 'delivered' }, 'Trạng thái: Đã đồng bộ'),
+            ),
+            h('button', { type: 'button', onClick: () => loadOutbox(outboxState, outboxPage), style: btnStyle(false) }, 'Làm mới DLQ'),
             h('button', { type: 'button', disabled: busyAction || !(outboxData.items || []).length, onClick: () => handleReplayDlq(), style: btnStyle(true, false, busyAction || !(outboxData.items || []).length) }, 'Phát lại toàn bộ DLQ'),
+            !confirmPurgeOutbox || purgeUnsupportedState
+              ? h('button', {
+                type: 'button',
+                'data-testid': 'dxos-outbox-purge-btn',
+                title: purgeTitle,
+                disabled: purgeDisabled,
+                onClick: () => { if (!purgeDisabled) setConfirmPurgeOutbox(true); },
+                style: btnStyle(false, true, purgeDisabled),
+              }, purgeUnsupportedState ? 'Không thể dọn (chỉ failed/retry/delivered)' : 'Dọn bản ghi (Purge)')
+              : h('div', { style: { display: 'inline-flex', gap: 6, alignItems: 'center' } },
+                h('button', {
+                  type: 'button',
+                  'data-testid': 'dxos-outbox-purge-confirm-btn',
+                  disabled: purgeDisabled,
+                  onClick: () => handlePurgeOutbox(outboxState === 'failed' ? 'failed' : outboxState),
+                  style: btnStyle(false, true, purgeDisabled),
+                }, 'Xác nhận dọn Outbox'),
+                h('button', {
+                  type: 'button',
+                  onClick: () => setConfirmPurgeOutbox(false),
+                  style: btnStyle(false),
+                }, 'Hủy'),
+              ),
           ),
         ),
         h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8 } },
@@ -674,31 +815,108 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         !(outboxData.items || []).length
           ? h('div', { style: { padding: 12, borderRadius: 8, background: '#f8fafc', fontSize: 13, color: '#475569' } }, 'Không có sự kiện lỗi (DLQ) tồn đọng. Hệ thống Outbox non-blocking hoạt động bình thường.')
           : h('div', { style: { display: 'grid', gap: 8 } },
-            outboxData.items.map((item) => h('div', { key: item.eventId || item.id, style: { padding: 10, borderRadius: 8, border: '1px solid #fecaca', background: '#fef2f2', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-              h('div', { style: { fontSize: 12 } },
-                h('div', { style: { fontWeight: 700, color: '#0f172a' } }, `${item.collectionName || 'entity'}#${item.recordId || ''} · ${item.eventId}`),
-                h('div', { style: { color: '#991b1b' } }, `Tổ chức: ${item.organizationId} · Số lần thử: ${item.attempts} · Mã lỗi: ${item.errorCode || 'UNKNOWN'}`),
-              ),
-              h('button', { type: 'button', disabled: busyAction, onClick: () => handleReplayDlq([item.eventId]), style: btnStyle(false, false, busyAction) }, 'Phát lại'),
-            )),
+            outboxData.items.map((item) => {
+              const rowKey = item.eventId || String(item.id || '');
+              const expanded = expandedOutboxId === rowKey;
+              return h('div', {
+                key: rowKey,
+                style: {
+                  padding: 10, borderRadius: 8,
+                  border: `1px solid ${item.status === 'delivered' ? '#bbf7d0' : '#fecaca'}`,
+                  background: item.status === 'delivered' ? '#f0fdf4' : '#fef2f2',
+                  display: 'grid', gap: 8, minWidth: 0,
+                },
+              },
+                h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+                  h('div', { style: { fontSize: 12, minWidth: 0 } },
+                    h('div', { style: { fontWeight: 700, color: '#0f172a', wordBreak: 'break-word' } }, `${item.collectionName || 'entity'}#${item.recordId || ''} · ${item.eventId}`),
+                    h('div', { style: { color: item.status === 'delivered' ? '#166534' : '#991b1b' } }, `Trạng thái: ${item.status || outboxState} · Tổ chức: ${item.organizationId} · Số lần thử: ${item.attempts} · Mã lỗi: ${item.errorCode || 'NONE'}`),
+                  ),
+                  h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `dxos-outbox-payload-toggle-${rowKey}`,
+                      onClick: () => setExpandedOutboxId(expanded ? null : rowKey),
+                      style: btnStyle(false),
+                    }, expanded ? 'Ẩn Payload' : 'Xem Payload'),
+                    h('button', { type: 'button', disabled: busyAction, onClick: () => handleReplayDlq([item.eventId]), style: btnStyle(false, false, busyAction) }, 'Phát lại'),
+                  ),
+                ),
+                expanded ? h('div', {
+                  'data-testid': `dxos-outbox-payload-view-${rowKey}`,
+                  style: { padding: 10, borderRadius: 6, background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace', fontSize: 11, overflowX: 'auto', display: 'grid', gap: 6 },
+                },
+                  item.lastError ? h('div', { style: { color: '#fca5a5', wordBreak: 'break-word' } }, `lastError: ${item.lastError}`) : null,
+                  h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, JSON.stringify(item.payloadJson ?? null, null, 2)),
+                ) : null,
+              );
+            }),
           ),
-      ) : null,
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 12, color: '#475569' } },
+          h('span', null, `Trang ${outboxData.page || outboxPage} / ${Math.max(1, Math.ceil((outboxData.total || (outboxData.items || []).length || 0) / (outboxData.pageSize || 25)))} (Tổng ${outboxData.total ?? (outboxData.items || []).length} sự kiện)`),
+          h('div', { style: { display: 'flex', gap: 6 } },
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-outbox-prev',
+              disabled: busyAction || (outboxData.page || outboxPage) <= 1,
+              onClick: () => {
+                const prev = Math.max(1, (outboxData.page || outboxPage) - 1);
+                setOutboxPage(prev);
+                loadOutbox(outboxState, prev);
+              },
+              style: btnStyle(false, false, busyAction || (outboxData.page || outboxPage) <= 1),
+            }, '← Trang trước'),
+            h('button', {
+              type: 'button',
+              'data-testid': 'dxos-outbox-next',
+              disabled: busyAction || ((outboxData.page || outboxPage) * (outboxData.pageSize || 25) >= (outboxData.total || 0)),
+              onClick: () => {
+                const next = (outboxData.page || outboxPage) + 1;
+                setOutboxPage(next);
+                loadOutbox(outboxState, next);
+              },
+              style: btnStyle(false, false, busyAction || ((outboxData.page || outboxPage) * (outboxData.pageSize || 25) >= (outboxData.total || 0))),
+            }, 'Trang sau →'),
+          ),
+        ),
+      );
+      })() : null,
 
-      tab === 'gitops' ? h('div', { 'data-testid': 'dxos-studio-gitops-bundle-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gap: 12 } },
+      tab === 'gitops' ? h('div', { 'data-testid': 'dxos-studio-gitops-bundle-panel', style: { padding: 18, borderRadius: 12, border: '1px solid #e2e8f0', background: '#fff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 12 } },
         h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
           h('h3', { style: { margin: 0, fontSize: 16 } }, 'GitOps Solution Bundle v3 (Schema · RBAC · Portals · Workflows · AI · Governance)'),
-          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
             h('button', { type: 'button', disabled: busyAction, onClick: handleExportBundle, style: btnStyle(true, false, busyAction) }, 'Xuất Bundle JSON'),
             h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: handleDownloadBundle, style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Tải tệp .json'),
+            h('label', { style: { ...btnStyle(false, false, busyAction), display: 'inline-flex', alignItems: 'center', gap: 6 } },
+              'Tải lên tệp .json',
+              h('input', {
+                type: 'file',
+                accept: '.json,application/json',
+                'data-testid': 'dxos-studio-gitops-file-input',
+                disabled: busyAction,
+                onChange: handleBundleFileUpload,
+                style: { display: 'none' },
+              }),
+            ),
             h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(true), style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Kiểm tra Diff (Dry-Run)'),
             h('button', { type: 'button', disabled: busyAction || !bundleText.trim(), onClick: () => handleImportBundle(false), style: btnStyle(false, false, busyAction || !bundleText.trim()) }, 'Áp dụng Bundle'),
             h('button', { type: 'button', disabled: busyAction, onClick: handleRollbackBundle, style: btnStyle(false, true, busyAction) }, 'Hoàn tác Import gần nhất'),
           ),
         ),
+        uploadedFileName ? h('div', { style: { fontSize: 12, color: '#0369a1' } }, `Tệp đã nạp: ${uploadedFileName}`) : null,
         h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#334155' } },
           h('input', { type: 'checkbox', checked: enableBundleWorkflows, onChange: (e) => setEnableBundleWorkflows(Boolean(e?.target?.checked)) }),
-          'Tự động kích hoạt Workflow khi Áp dụng Bundle (mặc định tắt để tránh kích hoạt ngoài ý muốn)',
+          'Tự động kích hoạt Workflow khi Áp dụng / Hoàn tác Bundle (mặc định tắt để tránh kích hoạt ngoài ý muốn)',
         ),
+        Array.isArray(bundleInfo?.warnings) && bundleInfo.warnings.length ? h('div', {
+          'data-testid': 'dxos-studio-gitops-warnings',
+          role: 'alert',
+          style: { padding: 10, borderRadius: 8, border: '1px solid #fde68a', background: '#fffbeb', color: '#92400e', fontSize: 12, display: 'grid', gap: 4 },
+        },
+          h('strong', null, 'Cảnh báo chuẩn hóa / bảo mật khi Export/Import:'),
+          bundleInfo.warnings.map((w, wIdx) => h('div', { key: `warn-${wIdx}` }, `• ${w}`)),
+        ) : null,
         bundleInfo?.sha256 || bundleInfo?.lastSnapshotUid ? h('div', { style: { fontSize: 12, color: '#475569', display: 'flex', gap: 12, flexWrap: 'wrap' } },
           bundleInfo?.sha256 ? h('span', null, `SHA-256: ${bundleInfo.sha256}`) : null,
           bundleInfo?.lastSnapshotUid ? h('span', null, `Snapshot hoàn tác: ${bundleInfo.lastSnapshotUid}`) : null,
@@ -713,6 +931,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
             ['portals', 'Cổng Portal', bundleInfo?.applied?.portalsUpserted, bundleInfo?.diff?.sections?.portals, bundleInfo?.counts?.portals],
             ['workflows', 'Quy trình', bundleInfo?.applied?.workflowsUpserted, bundleInfo?.diff?.sections?.workflows, bundleInfo?.counts?.workflows],
             ['customCollections', 'Bảng tùy biến', bundleInfo?.applied?.customCollectionsUpserted, bundleInfo?.diff?.sections?.customCollections, bundleInfo?.counts?.customCollections],
+            ['connectors', 'Connectors', bundleInfo?.applied?.connectorsUpserted, bundleInfo?.diff?.sections?.connectors, bundleInfo?.counts?.connectors],
             ['aiProfiles', 'Nhân sự AI', bundleInfo?.applied?.aiProfilesUpserted, bundleInfo?.diff?.sections?.aiProfiles, bundleInfo?.counts?.aiProfiles],
             ['governance', 'Quản trị Governance', (() => {
               const ap = bundleInfo?.applied;
@@ -749,14 +968,65 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
             );
           }),
         ) : null,
+        bundleInfo?.diff?.sections ? h('div', {
+          'data-testid': 'dxos-studio-gitops-diff-tree',
+          style: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 8 },
+        },
+          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#0f172a' } }, 'Chi tiết Diff theo từng mục (Item-level Diff Tree)'),
+          Object.entries(bundleInfo.diff.sections).map(([secKey, secVal]) => {
+            const added = Array.isArray(secVal?.added) ? secVal.added : [];
+            const changed = Array.isArray(secVal?.changed) ? secVal.changed : [];
+            const removed = Array.isArray(secVal?.removed) ? secVal.removed : [];
+            const detailEntry = bundleInfo?.diff?.details?.[secKey] || {};
+            const detailEntries = Object.entries(detailEntry)
+              .filter(([, d]) => d && typeof d === 'object' && Array.isArray(d.fields) && d.fields.length);
+            const fmtDiffVal = (v) => (v === undefined ? '∅' : JSON.stringify(v));
+            const addEntries = detailEntries.filter(([, d]) => d.action === 'add');
+            const changeEntries = detailEntries.filter(([, d]) => d.action === 'change');
+            const removeEntries = detailEntries.filter(([, d]) => d.action === 'remove');
+            if (!added.length && !changed.length && !removed.length && !detailEntries.length) return null;
+            return h('div', { key: secKey, style: { padding: 8, borderRadius: 6, border: '1px solid #e2e8f0', background: '#fff', fontSize: 12, display: 'grid', gap: 4 } },
+              h('div', { style: { fontWeight: 700, color: '#1e293b' } }, secKey),
+              (added.length || addEntries.length) ? h('div', { style: { color: '#166534', display: 'grid', gap: 2 } },
+                h('span', null, `+ Thêm mới (${added.length || addEntries.length}): ${(added.length ? added : addEntries.map(([k]) => k)).join(', ')}`),
+                addEntries.map(([itemKey, d]) => h('div', {
+                  key: `${secKey}-add-${itemKey}`,
+                  style: { paddingLeft: 12, fontSize: 11, color: '#15803d', wordBreak: 'break-word' },
+                }, `${itemKey}: ${d.fields.map((f) => `${f.field} (${fmtDiffVal(f.before)} -> ${fmtDiffVal(f.after)})`).join('; ')}`)),
+              ) : null,
+              (changed.length || changeEntries.length) ? h('div', { style: { color: '#92400e', display: 'grid', gap: 2 } },
+                h('span', null, `~ Thay đổi (${changed.length || changeEntries.length}): ${(changed.length ? changed : changeEntries.map(([k]) => k)).join(', ')}`),
+                changeEntries.map(([itemKey, d]) => h('div', {
+                  key: `${secKey}-change-${itemKey}`,
+                  style: { paddingLeft: 12, fontSize: 11, color: '#475569', wordBreak: 'break-word' },
+                }, `${itemKey}: ${d.fields.map((f) => `${f.field} (${fmtDiffVal(f.before)} -> ${fmtDiffVal(f.after)})`).join('; ')}`)),
+              ) : null,
+              (removed.length || removeEntries.length) ? h('div', { style: { color: '#991b1b', display: 'grid', gap: 2 } },
+                h('span', null, `- Bị xóa khỏi Bundle (${removed.length || removeEntries.length}): ${(removed.length ? removed : removeEntries.map(([k]) => k)).join(', ')}`),
+                removeEntries.map(([itemKey, d]) => h('div', {
+                  key: `${secKey}-remove-${itemKey}`,
+                  style: { paddingLeft: 12, fontSize: 11, color: '#b91c1c', wordBreak: 'break-word' },
+                }, `${itemKey}: ${d.fields.map((f) => `${f.field} (${fmtDiffVal(f.before)} -> ${fmtDiffVal(f.after)})`).join('; ')}`)),
+              ) : null,
+            );
+          }),
+        ) : null,
         h('textarea', {
           value: bundleText,
           onChange: (e) => setBundleText(e.target.value),
           placeholder: 'Dán hoặc xuất JSON latticedx.solution-bundle/v3 (hỗ trợ cả v1/v2) tại đây…',
           rows: 10,
-          style: { width: '100%', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12 },
+          style: { width: '100%', boxSizing: 'border-box', padding: 10, borderRadius: 8, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12 },
         }),
       ) : null,
+
+      tab === 'notify' ? h(NotifyPanel, {
+        api,
+        selectedOrg,
+        organizations,
+        openRoute,
+        setFeedback,
+      }) : null,
 
       tab === 'broker' ? h(BrokerAndEventsPanel, {
         api,
@@ -795,7 +1065,6 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
         selectedOrg,
         organizations,
         openRoute,
-        setFeedback,
       }) : null,
 
       isGovernanceTab ? h(GovernanceConsoles, {

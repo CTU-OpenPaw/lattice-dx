@@ -67,7 +67,7 @@ function hasUnsafeTemplateSyntax(value, seen = new WeakSet()) {
 
 function assertSafeFlowTemplate(value, label = 'template') {
   if (hasUnsafeTemplateSyntax(value)) {
-    throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, `${label} contains unsafe template or prototype key`);
+    throw fail('UNSAFE_TEMPLATE_EXPRESSION', 400, `${label} chứa biểu thức template hoặc khóa prototype không an toàn`);
   }
   return true;
 }
@@ -81,28 +81,28 @@ function validateFilterStructure(node, fieldLabel = 'filterJson') {
     }
     return { ok: true };
   }
-  if (!isPlainObject(node)) return { ok: false, code: 'INVALID_FILTER_CLAUSE', message: `${fieldLabel} must be a plain object, array, or null` };
-  if (hasUnsafeTemplateSyntax(node)) return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: `${fieldLabel} contains unsafe template or prototype key` };
+  if (!isPlainObject(node)) return { ok: false, code: 'INVALID_FILTER_CLAUSE', message: `${fieldLabel} phải là object, mảng hoặc null` };
+  if (hasUnsafeTemplateSyntax(node)) return { ok: false, code: 'UNSAFE_TEMPLATE_EXPRESSION', message: `${fieldLabel} chứa biểu thức template hoặc khóa prototype không an toàn` };
   if (typeof node.field === 'string') {
     const opsKeys = Object.keys(node).filter((k) => k !== 'field');
     if (opsKeys.some((k) => EXPLICIT_FILTER_CLAUSE_KEYS.has(k))) {
       if ('op' in node) {
         const opStr = String(node.op || '').trim();
         if (!opStr || BLOCKED_PROTO_KEYS.has(opStr) || !VALID_FILTER_OPERATORS.has(opStr)) {
-          return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} explicit clause has invalid operator` };
+          return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} có toán tử điều kiện không hợp lệ` };
         }
       } else {
         const nonValue = opsKeys.filter((k) => k !== 'value');
-        if (!nonValue.length && !opsKeys.includes('value')) return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} explicit clause has no operators` };
+        if (!nonValue.length && !opsKeys.includes('value')) return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} thiếu toán tử so sánh` };
         for (const k of nonValue) {
-          if (!VALID_FILTER_OPERATORS.has(k)) return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} unsupported operator "${k}"` };
+          if (!VALID_FILTER_OPERATORS.has(k)) return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel} không hỗ trợ toán tử "${k}"` };
         }
       }
     }
   }
   for (const [key, expected] of Object.entries(node)) {
     if (key === '$and' || key === 'and' || key === 'all' || key === '$or' || key === 'or' || key === 'any' || (key === 'rules' && Array.isArray(expected))) {
-      if (!Array.isArray(expected)) return { ok: false, code: 'INVALID_FILTER_CLAUSE', message: `${fieldLabel}.${key} must be an array` };
+      if (!Array.isArray(expected)) return { ok: false, code: 'INVALID_FILTER_CLAUSE', message: `${fieldLabel}.${key} phải là một mảng` };
       for (const item of expected) {
         const res = validateFilterStructure(item, `${fieldLabel}.${key}`);
         if (!res.ok) return res;
@@ -111,7 +111,7 @@ function validateFilterStructure(node, fieldLabel = 'filterJson') {
       const res = validateFilterStructure(expected, `${fieldLabel}.$not`);
       if (!res.ok) return res;
     } else if (isPlainObject(expected) && Object.keys(expected).length === 0) {
-      return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel}.${key} operator object cannot be empty` };
+      return { ok: false, code: 'INVALID_FILTER_OPERATOR', message: `${fieldLabel}.${key} không được là object toán tử rỗng` };
     }
   }
   return { ok: true };
@@ -147,16 +147,16 @@ function validateNodeSecurity(node, graphRuleKey, opts, errors) {
   if (node.type === 'control.loop') {
     const maxIter = cfg.maxIterations === undefined ? maxLoops : cfg.maxIterations;
     if (!Number.isInteger(maxIter) || maxIter < 1 || maxIter > maxLoops) {
-      errors.push({ code: 'FLOW_LOOP_LIMIT_EXCEEDED', nodeId: node.id, message: `control.loop maxIterations must be in 1..${maxLoops}` });
+      errors.push({ code: 'FLOW_LOOP_LIMIT_EXCEEDED', nodeId: node.id, message: `Số lần lặp tối đa (maxIterations) của control.loop phải nằm trong khoảng 1..${maxLoops}` });
     }
   }
   if (node.type === 'control.subflow') {
     if (cfg.maxDepth !== undefined && cfg.maxDepth !== null) {
       const md = Number(cfg.maxDepth);
-      if (!Number.isInteger(md) || md < 1 || md > MAX_HARD_DEPTH) errors.push({ code: 'INVALID_MAX_DEPTH', nodeId: node.id, message: `maxDepth must be 1..${MAX_HARD_DEPTH}` });
+      if (!Number.isInteger(md) || md < 1 || md > MAX_HARD_DEPTH) errors.push({ code: 'INVALID_MAX_DEPTH', nodeId: node.id, message: `Độ sâu đệ quy (maxDepth) phải từ 1..${MAX_HARD_DEPTH}` });
     }
     if (graphRuleKey && cfg.ruleKey && String(cfg.ruleKey).trim() === String(graphRuleKey).trim()) {
-      errors.push({ code: 'FLOW_SELF_RECURSIVE_SUBFLOW', nodeId: node.id, message: 'control.subflow cannot invoke itself' });
+      errors.push({ code: 'FLOW_SELF_RECURSIVE_SUBFLOW', nodeId: node.id, message: 'control.subflow không được phép gọi đệ quy chính quy trình hiện tại' });
     }
   }
   if (['data.create', 'data.update', 'data.query', 'ai.agent'].includes(node.type)) {
@@ -165,19 +165,19 @@ function validateNodeSecurity(node, graphRuleKey, opts, errors) {
     if (col) {
       const hasBrace = col.includes('{') || col.includes('}');
       if (hasBrace ? !isSafeTemplateString(col) : !isAllowlistedTargetCollection(col, allowlistedCollections, systemProtectedCollections)) {
-        errors.push({ code: 'TARGET_COLLECTION_FORBIDDEN', nodeId: node.id, message: `Collection "${col}" is forbidden for ${node.type}` });
+        errors.push({ code: 'TARGET_COLLECTION_FORBIDDEN', nodeId: node.id, message: `Bảng dữ liệu "${col}" không được phép sử dụng cho nút ${node.type}` });
       }
     }
   }
   if (node.type === 'integration.http' || node.type === 'ai.llm' || node.type === 'iot.twin_command') {
     for (const key of ['url', 'path', 'baseUrl', 'baseURL', 'endpoint', 'downlinkUrl']) {
-      if (isUnsafeStaticUrl(cfg[key])) errors.push({ code: 'CONNECTOR_URL_UNSAFE', nodeId: node.id, message: `Unsafe SSRF/metadata URL in ${node.type}.${key}` });
+      if (isUnsafeStaticUrl(cfg[key])) errors.push({ code: 'CONNECTOR_URL_UNSAFE', nodeId: node.id, message: `URL không an toàn (chặn SSRF/metadata) tại ${node.type}.${key}` });
     }
   }
   if (node.type === 'trigger.schedule' && cfg.cron !== undefined && cfg.cron !== null && String(cfg.cron).trim() !== '') {
     const fields = typeof cfg.cron === 'string' ? cfg.cron.trim().split(/\s+/) : [];
     if (fields.length !== 5 || !fields.every((f) => CRON_FIELD_RE.test(f))) {
-      errors.push({ code: 'FLOW_INVALID_CRON', nodeId: node.id, message: 'trigger.schedule cron must have 5 valid fields' });
+      errors.push({ code: 'FLOW_INVALID_CRON', nodeId: node.id, message: 'Biểu thức cron của trigger.schedule phải gồm đúng 5 trường hợp lệ' });
     }
   }
   if (node.type === 'control.if' && cfg.condition !== undefined) {
@@ -197,26 +197,26 @@ function validateFlowGraph(rawGraph, {
 } = {}) {
   const errors = [];
   if (!isPlainObject(rawGraph)) {
-    return { ok: false, graph: normalizeGraph({}), topoOrder: [], triggerNode: null, triggerNodes: [], errors: [{ code: 'FLOW_INVALID_GRAPH', message: 'Flow graph must be a plain object' }] };
+    return { ok: false, graph: normalizeGraph({}), topoOrder: [], triggerNode: null, triggerNodes: [], errors: [{ code: 'FLOW_INVALID_GRAPH', message: 'Sơ đồ quy trình phải là một object hợp lệ' }] };
   }
   if (hasUnsafeTemplateSyntax(rawGraph)) {
-    errors.push({ code: 'UNSAFE_TEMPLATE_EXPRESSION', message: 'Flow graph contains unsafe template or prototype key' });
+    errors.push({ code: 'UNSAFE_TEMPLATE_EXPRESSION', message: 'Sơ đồ quy trình chứa biểu thức template hoặc khóa prototype không an toàn' });
   }
   const graph = normalizeGraph(rawGraph);
-  if (graph.nodes.length > maxNodes) errors.push({ code: 'FLOW_MAX_NODES_EXCEEDED', message: `Flow exceeds max nodes (${maxNodes})` });
+  if (graph.nodes.length > maxNodes) errors.push({ code: 'FLOW_MAX_NODES_EXCEEDED', message: `Quy trình vượt quá giới hạn tối đa ${maxNodes} nút` });
 
   const nodeMap = new Map();
   const triggerNodes = [];
   for (const node of graph.nodes) {
-    if (!node.id) { errors.push({ code: 'FLOW_INVALID_NODE_ID', message: 'Node id is required' }); continue; }
-    if (nodeMap.has(node.id)) { errors.push({ code: 'FLOW_DUPLICATE_NODE_ID', nodeId: node.id, message: `Duplicate node id "${node.id}"` }); continue; }
+    if (!node.id) { errors.push({ code: 'FLOW_INVALID_NODE_ID', message: 'Mã nút (node id) là bắt buộc' }); continue; }
+    if (nodeMap.has(node.id)) { errors.push({ code: 'FLOW_DUPLICATE_NODE_ID', nodeId: node.id, message: `Trùng mã nút "${node.id}"` }); continue; }
     nodeMap.set(node.id, node);
     if (node.type.startsWith('trigger.')) triggerNodes.push(node);
-    if (nodeRegistry && !lookupRegistrySchema(nodeRegistry, node.type)) errors.push({ code: 'FLOW_UNKNOWN_NODE_TYPE', nodeId: node.id, message: `Unknown node type "${node.type}"` });
+    if (nodeRegistry && !lookupRegistrySchema(nodeRegistry, node.type)) errors.push({ code: 'FLOW_UNKNOWN_NODE_TYPE', nodeId: node.id, message: `Loại nút không hợp lệ "${node.type}"` });
     validateNodeSecurity(node, rawGraph.ruleKey, { allowlistedCollections, systemProtectedCollections, maxLoops }, errors);
   }
   if (requireTrigger ? triggerNodes.length !== 1 : triggerNodes.length > 1) {
-    errors.push({ code: 'FLOW_TRIGGER_COUNT_INVALID', message: requireTrigger ? 'Exactly 1 trigger node required' : 'At most 1 trigger node allowed' });
+    errors.push({ code: 'FLOW_TRIGGER_COUNT_INVALID', message: requireTrigger ? 'Quy trình bắt buộc phải có đúng 1 nút kích hoạt (Trigger)' : 'Chỉ được phép tối đa 1 nút kích hoạt (Trigger) trong một quy trình' });
   }
 
   const basePorts = new Set(STANDARD_PORTS);
@@ -236,10 +236,10 @@ function validateFlowGraph(rawGraph, {
       ? new Set(tgtSchema.inputs)
       : (tgtNode?.type?.startsWith('trigger.') ? new Set() : basePorts);
     if (!allowedSrc.has(edge.sourceHandle) || !allowedTgt.has(edge.targetHandle)) {
-      errors.push({ code: 'FLOW_INVALID_PORT', edgeId: edge.id, message: `Invalid port "${edge.sourceHandle}" -> "${edge.targetHandle}"` });
+      errors.push({ code: 'FLOW_INVALID_PORT', edgeId: edge.id, message: `Cổng kết nối không hợp lệ "${edge.sourceHandle}" -> "${edge.targetHandle}"` });
     }
-    if (!srcNode || !tgtNode) { errors.push({ code: 'FLOW_EDGE_NODE_NOT_FOUND', edgeId: edge.id, message: `Edge "${edge.id}" references missing node` }); continue; }
-    if (edge.source === edge.target) { errors.push({ code: 'FLOW_CYCLE_DETECTED', edgeId: edge.id, nodeId: edge.source, message: `Self-loop on "${edge.source}"` }); continue; }
+    if (!srcNode || !tgtNode) { errors.push({ code: 'FLOW_EDGE_NODE_NOT_FOUND', edgeId: edge.id, message: `Nhánh nối "${edge.id}" tham chiếu tới nút không tồn tại` }); continue; }
+    if (edge.source === edge.target) { errors.push({ code: 'FLOW_CYCLE_DETECTED', edgeId: edge.id, nodeId: edge.source, message: `Nút "${edge.source}" tự nối vòng lặp về chính nó` }); continue; }
     adj.get(edge.source).push(edge.target);
     inDegree.set(edge.target, inDegree.get(edge.target) + 1);
   }
@@ -256,28 +256,28 @@ function validateFlowGraph(rawGraph, {
       if (nextDeg === 0) queue.push(nextId);
     }
   }
-  if (topoOrder.length < nodeMap.size) errors.push({ code: 'FLOW_CYCLE_DETECTED', message: 'Flow graph contains a cycle' });
+  if (topoOrder.length < nodeMap.size) errors.push({ code: 'FLOW_CYCLE_DETECTED', message: 'Sơ đồ quy trình chứa vòng lặp (cycle) không hợp lệ' });
   return { ok: errors.length === 0, graph, topoOrder, triggerNode: triggerNodes[0] || null, triggerNodes, errors };
 }
 
 function validatePromptSecurity({ prompt, targetNode, rule, graph } = {}) {
   for (const text of [String(prompt || ''), String(targetNode || '')]) {
-    if (PROMPT_INJECTION_RE.test(text)) return { refused: true, error: 'Prompt injection or security bypass attempt refused.' };
-    if (PROTOTYPE_OR_CODE_RE.test(text)) return { refused: true, error: 'Prototype pollution or code execution expression refused.' };
-    if (SENSITIVE_NAME_RE.test(text) || SYSTEM_TABLE_PROMPT_RE.test(text)) return { refused: true, error: 'Targeting system or sensitive collections is forbidden.' };
+    if (PROMPT_INJECTION_RE.test(text)) return { refused: true, error: 'Từ chối yêu cầu có dấu hiệu chèn lệnh hoặc vượt rào bảo mật.' };
+    if (PROTOTYPE_OR_CODE_RE.test(text)) return { refused: true, error: 'Từ chối biểu thức can thiệp prototype hoặc thực thi mã.' };
+    if (SENSITIVE_NAME_RE.test(text) || SYSTEM_TABLE_PROMPT_RE.test(text)) return { refused: true, error: 'Không được phép tác động tới các bảng hệ thống hoặc bảng nhạy cảm.' };
   }
   if (rule !== undefined && rule !== null) {
-    if (!isPlainObject(rule) || hasUnsafeTemplateSyntax(rule)) return { refused: true, error: 'Rule payload contains unsafe template or prototype key.' };
+    if (!isPlainObject(rule) || hasUnsafeTemplateSyntax(rule)) return { refused: true, error: 'Dữ liệu quy trình chứa biểu thức template hoặc khóa prototype không an toàn.' };
     const fRes = validateFilterStructure(rule.filterJson, 'filterJson');
     if (!fRes.ok) return { refused: true, error: fRes.message };
     for (const act of Array.isArray(rule.actionsJson) ? rule.actionsJson : []) {
       const col = String(act?.collection || act?.targetCollection || '').trim();
-      if (col && !isSafeTemplateString(col) && !isAllowlistedTargetCollection(col)) return { refused: true, error: `Target collection "${col}" is forbidden.` };
+      if (col && !isSafeTemplateString(col) && !isAllowlistedTargetCollection(col)) return { refused: true, error: `Bảng dữ liệu đích "${col}" không được phép sử dụng.` };
     }
   }
   if (graph !== undefined && graph !== null) {
     const gRes = validateFlowGraph(graph, { requireTrigger: false });
-    if (!gRes.ok) return { refused: true, error: gRes.errors[0]?.message || 'Flow graph failed security validation.' };
+    if (!gRes.ok) return { refused: true, error: gRes.errors[0]?.message || 'Sơ đồ quy trình không đạt kiểm tra bảo mật.' };
   }
   return { refused: false };
 }

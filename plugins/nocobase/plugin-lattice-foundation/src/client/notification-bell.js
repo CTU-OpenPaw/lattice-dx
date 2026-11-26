@@ -66,6 +66,75 @@ function resolveBellPortalSlug(pathname) {
   return 'workspace';
 }
 
+function extractCustomPortalSlug(pathname) {
+  const clean = String(pathname || '').split('?')[0].split('#')[0].trim();
+  const pMatch = /^\/p\/([a-z0-9_-]{1,64})(?:\/|$)/i.exec(clean);
+  if (pMatch && PORTAL_SLUG_RE.test(pMatch[1])) return pMatch[1].toLowerCase();
+  return '';
+}
+
+const accessiblePortalCache = new WeakMap();
+
+function extractAccessiblePortalSlugs(items) {
+  const slugs = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    if (!item || item.enabled === false) continue;
+    if (typeof item.slug === 'string' && PORTAL_SLUG_RE.test(item.slug.trim())) {
+      slugs.add(item.slug.trim().toLowerCase());
+    }
+    const m = /^\/p\/([a-z0-9_-]{1,64})(?:\/|$)/i.exec(String(item.routePath || '').trim());
+    if (m && PORTAL_SLUG_RE.test(m[1])) {
+      slugs.add(m[1].toLowerCase());
+    }
+  }
+  return slugs;
+}
+
+function getCachedAccessiblePortalSlugs(api, token) {
+  if (!api || typeof api !== 'object') return null;
+  const cacheKey = `${token || ''}:${String(api?.auth?.role ?? '')}`;
+  const cached = accessiblePortalCache.get(api);
+  if (cached && cached.key === cacheKey && cached.settled) {
+    return cached.slugs;
+  }
+  return null;
+}
+
+async function resolveAccessiblePortalSlugs(api, token) {
+  if (!api || typeof api !== 'object' || typeof api.request !== 'function') {
+    return { unauthorized: false, slugs: new Set() };
+  }
+  const cacheKey = `${token || ''}:${String(api?.auth?.role ?? '')}`;
+  const cached = accessiblePortalCache.get(api);
+  if (cached && cached.key === cacheKey) {
+    if (cached.settled) return { unauthorized: false, slugs: cached.slugs };
+    if (cached.promise) return cached.promise;
+  }
+  const promise = Promise.resolve(
+    api.request({ url: 'latticePortals:listAccessible', method: 'get', skipNotify: true }),
+  ).then((res) => {
+    const raw = res?.data?.data ?? res?.data;
+    const slugs = Array.isArray(raw) ? extractAccessiblePortalSlugs(raw) : new Set();
+    if (Array.isArray(raw)) {
+      accessiblePortalCache.set(api, { key: cacheKey, settled: true, slugs });
+    } else if (accessiblePortalCache.get(api)?.promise === promise) {
+      accessiblePortalCache.delete(api);
+    }
+    return { unauthorized: false, slugs };
+  }).catch((err) => {
+    if (accessiblePortalCache.get(api)?.promise === promise) {
+      accessiblePortalCache.delete(api);
+    }
+    const status = Number(err?.response?.status ?? err?.status);
+    if (status === 401) {
+      return { unauthorized: true, slugs: new Set() };
+    }
+    return { unauthorized: false, slugs: new Set() };
+  });
+  accessiblePortalCache.set(api, { key: cacheKey, settled: false, promise });
+  return promise;
+}
+
 function resolveClientAuthToken(api, storage) {
   if (!api) return '';
   try {
@@ -272,6 +341,7 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
     }, [api?.auth?.role, effectivePath, isTopbar]);
 
     const portalSlug = resolveBellPortalSlug(effectivePath);
+    const customPortalSlug = extractCustomPortalSlug(effectivePath);
 
     React.useEffect(() => {
       if (!visible) {
@@ -310,11 +380,13 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
         : (typeof fetch === 'function' ? fetch : null);
       const baseApi = typeof api?.getBaseURL === 'function' ? api.getBaseURL() : '/api/';
       const prefix = String(baseApi || '/api/').replace(/\/?$/, '/');
-      const sseUrl = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(portalSlug)}`;
 
-      const unsubscribeSse = (token && typeof fetchFn === 'function')
-        ? subscribeSurfaceEvents({
-          portalSlug,
+      let unsubscribeSse = () => {};
+      const startSse = (ssePortalSlug) => {
+        if (disposed || !token || typeof fetchFn !== 'function') return;
+        const sseUrl = `${prefix}dxosAi:surfaceEvents?portalSlug=${encodeURIComponent(ssePortalSlug)}`;
+        unsubscribeSse = subscribeSurfaceEvents({
+          portalSlug: ssePortalSlug,
           sseUrl,
           token,
           fetchFn,
@@ -329,8 +401,29 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
           onAuthError: () => {
             if (!disposed) setAuthRejected(true);
           },
-        })
-        : () => {};
+        });
+      };
+
+      if (token && typeof fetchFn === 'function') {
+        if (!customPortalSlug) {
+          startSse(portalSlug);
+        } else {
+          const cachedSlugs = getCachedAccessiblePortalSlugs(api, token);
+          if (cachedSlugs) {
+            startSse(cachedSlugs.has(customPortalSlug) ? customPortalSlug : 'workspace');
+          } else {
+            resolveAccessiblePortalSlugs(api, token).then((result) => {
+              if (disposed) return;
+              if (result.unauthorized) {
+                setAuthRejected(true);
+                return;
+              }
+              const ssePortalSlug = result.slugs.has(customPortalSlug) ? customPortalSlug : 'workspace';
+              startSse(ssePortalSlug);
+            });
+          }
+        }
+      }
 
       const onVisibility = () => {
         if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
@@ -348,7 +441,7 @@ function createNotificationBellCore(client, React, _antd, app, { defaultVariant 
           document.removeEventListener?.('visibilitychange', onVisibility);
         }
       };
-    }, [visible, portalSlug, api]);
+    }, [visible, portalSlug, customPortalSlug, api, api?.auth?.role]);
 
     const setPopoverOpen = useCb((next) => {
       setOpen(next);

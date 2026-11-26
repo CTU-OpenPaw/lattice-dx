@@ -211,6 +211,7 @@ function createWorkspaceComponent(client, React, runtime) {
         h('a',{href:'/lattice',className:'lx-brand','aria-label':'Lattice Workspace'},h('span',{className:'lx-brand-mark','aria-hidden':true},'L'),h('strong',null,'LatticeDX'),h('span',{className:'lx-badge'},'Workspace')),
         h('div',{className:'lx-search'},h('label',null,h(Icon,{name:'search'}),h('span',{className:'lx-sr-only'},'Tìm ứng dụng'),h('input',{ref:searchRef,value:search,placeholder:'Tìm ứng dụng hoặc nhấn Ctrl+K',onChange:event=>setSearch(event.target.value),'aria-label':'Tìm ứng dụng','aria-controls':'lx-search-results','aria-expanded':!!search})),search&&h('div',{className:'lx-search-results',id:'lx-search-results'},(results.length||matchingSystems.length)?[...results.map(app=>h('a',{key:app.id,href:app.route},app.name)),...matchingSystems.map(sys=>h('a',{key:sys.id+sys.version,href:'/lattice/systems/'+sys.id+'/'+sys.version},'[Hệ thống] '+(sys.title||sys.id)+' (v'+sys.version+')'))]:h('p',{className:'lx-muted'},'Không tìm thấy ứng dụng hoặc hệ thống phù hợp.'))),
         h('div',{className:'lx-account'},
+          h('a',{href:'/admin/lattice-workspace','data-testid':'ldx-back-workspace-v2',className:'lx-button',style:{color:'#1d4ed8',borderColor:'#bfdbfe',background:'#eff6ff',fontWeight:600,textDecoration:'none'}},'← Quay lại Workspace v2'),
           h('span',{className:'lx-badge'},connection.connected?'Tài khoản doanh nghiệp':'Chưa kết nối'),
           h('div',{style:{position:'relative',display:'inline-flex',alignItems:'center'}},
             h('button',{

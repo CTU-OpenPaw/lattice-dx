@@ -128,6 +128,11 @@ const aiNodes = [
     inputSchema: {
       fields: [
         { name: 'mode', label: 'Chế độ suy luận', type: 'select', options: ['single', 'react'] },
+        { name: 'aiEmployee', label: 'Nhân viên AI (Persona)', type: 'string', placeholder: 'ops_triage' },
+        { name: 'model', label: 'Ghi đè Model', type: 'string', placeholder: 'ag/gemini-3.8-flash' },
+        { name: 'temperature', label: 'Nhiệt độ (Temperature)', type: 'number', placeholder: '0.2' },
+        { name: 'maxTokens', label: 'Số Token Tối đa', type: 'number', placeholder: '1000' },
+        { name: 'enableMemory', label: 'Bật bộ nhớ dài hạn', type: 'boolean' },
         { name: 'maxTurns', label: 'Số vòng tối đa', type: 'number' },
         { name: 'tools', label: 'Công cụ được phép', type: 'json' },
         { name: 'outputSchema', label: 'Schema JSON đầu ra', type: 'json' },
@@ -139,6 +144,7 @@ const aiNodes = [
         { name: 'recommendation', label: 'Đề xuất mặc định', type: 'textarea', required: false },
         { name: 'prompt', label: 'Lệnh phân tích AI', type: 'textarea' },
         { name: 'evidence', label: 'Bằng chứng đính kèm (JSON)', type: 'json' },
+        { name: 'toolName', label: 'Tên công cụ HITL', type: 'string', placeholder: 'triage_flow_event' },
       ],
     },
     async execute({ node, config, input, context, db, app, options, helpers }) {

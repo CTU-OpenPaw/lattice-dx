@@ -37,7 +37,10 @@ chmod 700 "$wal_dir" 2>/dev/null || true
 
 dest="${wal_dir}/$2.gz"
 if [ -e "$dest" ]; then
-  echo "WAL archive already exists: $dest" >&2
+  if gzip -t -- "$dest" 2>/dev/null && gzip -dc -- "$dest" 2>/dev/null | cmp -s - "$wal_path"; then
+    exit 0
+  fi
+  echo "WAL archive already exists with different content: $dest" >&2
   exit 1
 fi
 
@@ -47,3 +50,14 @@ umask 077
 gzip -c -- "$wal_path" > "$tmp_dest"
 mv "$tmp_dest" "$dest"
 trap - EXIT INT TERM
+
+retention_days="${PITR_WAL_RETENTION_DAYS:-7}"
+case "$retention_days" in
+  ''|*[!0-9]*)
+    ;;
+  *)
+    if [ "$retention_days" -gt 0 ]; then
+      find "$wal_dir" -maxdepth 1 -type f -name '*.gz' -mtime "+$retention_days" -exec rm -f -- {} + 2>/dev/null || true
+    fi
+    ;;
+esac

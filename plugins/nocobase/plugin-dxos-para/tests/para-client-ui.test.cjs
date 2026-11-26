@@ -622,3 +622,162 @@ test('DxosParaSettingsPage falls back to organizations[0] when summary.organizat
     Module._load = origLoad;
   }
 });
+
+test('P1-10: OCR-to-Record renders collection-matched fields, avoids code->lotCode leak, and honors user edits/clears', async () => {
+  const origLoad = Module._load;
+  const { React, render } = createMiniHooks();
+  const AntdStub = createAntdStub();
+  const calls = [];
+  class MockClientPlugin {
+    constructor(app) { this.app = app; }
+  }
+  const api = {
+    async request(cfg) {
+      calls.push(cfg);
+      if (cfg.url === 'latticePara:summary') {
+        return { data: { data: { organizationId: 'org-a', organizations: ['org-a'], spaces: {}, total: 1 } } };
+      }
+      if (cfg.url === 'latticePara:indexHealth') {
+        return { data: { data: { organizationId: 'org-a', documentsCount: 1, chunksCount: 1, recentFailures: [] } } };
+      }
+      if (cfg.url === 'latticeParaDocuments:list') {
+        return { data: { data: [] } };
+      }
+      if (cfg.url === 'latticePara:extractFormFields') {
+        return {
+          data: {
+            data: {
+              organizationId: 'org-a',
+              format: 'text',
+              ocrEngine: 'offline-deterministic-fallback',
+              targetCollection: cfg.data?.targetCollection || 'latticeOrders',
+              confidence: 0.9,
+              suggestedValues: {
+                code: 'ORD-OCR-PW-01',
+                customer: 'Bệnh viện Cần Thơ',
+                destination: 'Kho lạnh Cần Thơ',
+                quantity: 120,
+              },
+              lineItems: [
+                { sku: 'SKU-VAC-01', productName: 'Vaccine Lạnh', quantity: 120, unit: 'hộp', expiryDate: '2027-12-31' },
+              ],
+              warnings: [],
+            },
+          },
+        };
+      }
+      if (cfg.url === 'dxosWms:receiveStock') {
+        return { data: { data: { lot: { id: 99, ...cfg.data, status: 'available' } } } };
+      }
+      if (cfg.url === 'latticeServiceTickets:create') {
+        return { data: { data: { id: 99, ...cfg.data } } };
+      }
+      return { data: { data: {} } };
+    },
+  };
+  Module._load = function mockedLoad(req, parent, isMain) {
+    if (req === '@nocobase/client') return { Plugin: MockClientPlugin, useAPIClient: () => api };
+    if (req === 'react') return React;
+    if (req === 'antd') return AntdStub;
+    return origLoad.call(this, req, parent, isMain);
+  };
+
+  try {
+    const clientIndexPath = path.join(PLUGIN_ROOT, 'src/client/index.js');
+    delete require.cache[require.resolve(clientIndexPath)];
+    const { createDxosParaSettingsPage, buildOcrRecordPayload } = require(clientIndexPath);
+
+    // 1. Unit contract: buildOcrRecordPayload NEVER falls back lotCode to vals.code and honors explicit clears
+    const noFallbackLot = buildOcrRecordPayload(
+      'latticeStockLots',
+      { lotCode: '', code: 'ORD-OCR-PW-01', sku: 'S1', productName: 'P1', qtyOnHand: 10, expiryDate: '2027-12-31' },
+      null,
+      'org-a',
+    );
+    assert.equal(noFallbackLot.ok, false);
+
+    const clearedNameLot = buildOcrRecordPayload(
+      'latticeStockLots',
+      { lotCode: 'LOT-1', sku: 'S1', productName: '', qtyOnHand: 10, expiryDate: '2027-12-31' },
+      { lineItems: [{ productName: 'Should Not Overwrite', quantity: 99 }] },
+      'org-a',
+    );
+    assert.equal(clearedNameLot.ok, false);
+
+    // 2. Interactive UI: run OCR on latticeOrders, switch Select -> latticeStockLots, verify fields & edited submit
+    const Page = createDxosParaSettingsPage({ useAPIClient: () => api }, React, AntdStub, { apiClient: api });
+    let tree = render(Page, {});
+    await new Promise((r) => setTimeout(r, 10));
+    tree = render(Page, {});
+
+    await findByTestId(tree, 'dxos-para-ocr-run-btn').props.onClick();
+    tree = render(Page, {});
+
+    // Switch targetCollection to latticeStockLots
+    const targetSelect = findByTestId(tree, 'dxos-para-ocr-target-select');
+    assert.ok(targetSelect);
+    targetSelect.props.onChange('latticeStockLots');
+    tree = render(Page, {});
+
+    const lotCodeInput = findByTestId(tree, 'dxos-para-ocr-field-lotCode');
+    const productNameInput = findByTestId(tree, 'dxos-para-ocr-field-productName');
+    const qtyOnHandInput = findByTestId(tree, 'dxos-para-ocr-field-qtyOnHand');
+    assert.ok(lotCodeInput && productNameInput && qtyOnHandInput, 'latticeStockLots must render lotCode, productName, qtyOnHand inputs');
+    assert.equal(findByTestId(tree, 'dxos-para-ocr-field-code'), null, 'latticeStockLots must not render unrelated code input');
+    assert.equal(lotCodeInput.props.value, '', 'lotCode must remain empty instead of inheriting ORD-OCR-PW-01');
+
+    // Without lotCode, clicking create must fail validation instead of falling back to ORD-OCR-PW-01
+    await findByTestId(tree, 'dxos-para-ocr-create-record-btn').props.onClick();
+    tree = render(Page, {});
+    assert.equal(calls.some((c) => c.url === 'latticeStockLots:create'), false);
+    assert.equal(calls.some((c) => c.url === 'dxosWms:receiveStock'), false);
+
+    // Edit lotCode, productName, and qtyOnHand and submit
+    findByTestId(tree, 'dxos-para-ocr-field-lotCode').props.onChange({ target: { value: 'LOT-PW-99' } });
+    findByTestId(tree, 'dxos-para-ocr-field-productName').props.onChange({ target: { value: 'Vaccine Edited' } });
+    findByTestId(tree, 'dxos-para-ocr-field-qtyOnHand').props.onChange({ target: { value: '45' } });
+    tree = render(Page, {});
+
+    await findByTestId(tree, 'dxos-para-ocr-create-record-btn').props.onClick();
+    tree = render(Page, {});
+
+    assert.equal(
+      calls.some((c) => c.url === 'latticeStockLots:create'),
+      false,
+      'T3-CF-07 regression: latticeStockLots OCR create must NOT call direct latticeStockLots:create',
+    );
+    const receiveStockCall = calls.find((c) => c.url === 'dxosWms:receiveStock');
+    assert.ok(receiveStockCall, 'T3-CF-07 regression: latticeStockLots OCR create must call dxosWms:receiveStock');
+    assert.equal(receiveStockCall.method, 'post');
+    assert.equal(receiveStockCall.data.lotCode, 'LOT-PW-99');
+    assert.equal(receiveStockCall.data.productName, 'Vaccine Edited');
+    assert.equal(receiveStockCall.data.qtyOnHand, 45);
+    assert.equal(receiveStockCall.data.organizationId, 'org-a');
+    const createdAlert = findByTestId(tree, 'dxos-para-ocr-created-alert');
+    assert.ok(createdAlert, 'dxos-para-ocr-created-alert must render after dxosWms:receiveStock succeeds');
+    assert.equal(createdAlert.props.type, 'success');
+    assert.match(String(createdAlert.props.message || ''), /LOT-PW-99/);
+    assert.match(String(createdAlert.props.message || ''), /latticeStockLots/);
+
+    // 3. Switch targetCollection -> latticeServiceTickets, verify description & priority fields + submit
+    findByTestId(tree, 'dxos-para-ocr-target-select').props.onChange('latticeServiceTickets');
+    tree = render(Page, {});
+    assert.ok(findByTestId(tree, 'dxos-para-ocr-field-description'));
+    assert.ok(findByTestId(tree, 'dxos-para-ocr-field-priority'));
+
+    findByTestId(tree, 'dxos-para-ocr-field-code').props.onChange({ target: { value: 'TKT-PW-01' } });
+    findByTestId(tree, 'dxos-para-ocr-field-name').props.onChange({ target: { value: 'Kiểm tra buồng lạnh' } });
+    findByTestId(tree, 'dxos-para-ocr-field-priority').props.onChange({ target: { value: 'high' } });
+    findByTestId(tree, 'dxos-para-ocr-field-description').props.onChange({ target: { value: 'Cửa kho bị hở' } });
+    tree = render(Page, {});
+
+    await findByTestId(tree, 'dxos-para-ocr-create-record-btn').props.onClick();
+    const ticketCreateCall = calls.find((c) => c.url === 'latticeServiceTickets:create');
+    assert.ok(ticketCreateCall, 'latticeServiceTickets:create must be called');
+    assert.equal(ticketCreateCall.data.code, 'TKT-PW-01');
+    assert.equal(ticketCreateCall.data.priority, 'high');
+    assert.match(ticketCreateCall.data.description, /Cửa kho bị hở/);
+  } finally {
+    Module._load = origLoad;
+  }
+});

@@ -168,8 +168,13 @@ function makeInMemoryPaasDb({ dialect = 'postgres', withLedgerRepo = true } = {}
     },
     count: async ({ filter } = {}) => list.filter((r) => match(r, filter)).length,
     create: async ({ values }) => {
-      if (collectionName === 'latticePkiKeys' && list.some((k) => k.organizationId === values.organizationId)) {
-        throw Object.assign(new Error('Unique violation on organizationId'), { name: 'SequelizeUniqueConstraintError' });
+      if (collectionName === 'latticePkiKeys') {
+        if (list.some((k) => k.organizationId === values.organizationId && k.keyId === values.keyId)) {
+          throw Object.assign(new Error('Unique violation on (organizationId, keyId)'), { name: 'SequelizeUniqueConstraintError' });
+        }
+        if (values.active !== false && list.some((k) => k.organizationId === values.organizationId && k.active !== false)) {
+          throw Object.assign(new Error('Unique violation on active organizationId'), { name: 'SequelizeUniqueConstraintError' });
+        }
       }
       if (collectionName === 'latticeCryptoLedger' && list.some((e) => e.organizationId === values.organizationId && Number(e.seq) === Number(values.seq))) {
         throw Object.assign(new Error('Unique violation on (organizationId, seq)'), { name: 'SequelizeUniqueConstraintError' });
@@ -299,7 +304,9 @@ test('collections, migration 20261124000100, and pg-rls define all 3 tables with
     assert.equal(pkiKeysCol.name, 'latticePkiKeys');
     assert.deepEqual(pkiKeysCol.migrationRules, ['schema-only']);
     assert.ok(pkiKeysCol.fields.some((f) => f.name === 'organizationId' && f.unique !== true && f.allowNull === false));
-    assert.ok(pkiKeysCol.indexes.some((i) => i.name === 'uidx_lattice_pki_keys_org' && i.unique === true));
+    assert.ok(pkiKeysCol.fields.some((f) => f.name === 'status' && f.defaultValue === 'active'));
+    assert.ok(pkiKeysCol.fields.some((f) => f.name === 'retiredAt' && f.type === 'date'));
+    assert.ok(pkiKeysCol.indexes.some((i) => i.name === 'uidx_lattice_pki_keys_org_key' && i.unique === true && i.fields.join(',') === 'organizationId,keyId'));
     assert.ok(pkiKeysCol.fields.some((f) => f.name === 'encryptedPrivateKey' && f.type === 'text' && f.allowNull === false));
 
     assert.equal(ledgerCol.name, 'latticeCryptoLedger');
@@ -755,13 +762,37 @@ test('Ed25519 PKI encryption, canonicalJson, hash-chain, binary Merkle verificat
   assert.equal(Number(signDocCtx.body.entry.seq), 4);
   assert.equal(signDocCtx.body.entry.eventType, 'document.signed');
 
+  assert.ok(signDocCtx.body.entry?.payload, 'signDocument must return entry.payload');
+  assert.equal(signDocCtx.body.entry.payload.id, 1);
+  assert.ok(signDocCtx.body.ledgerSignatureBase64, 'signDocument must return ledgerSignatureBase64');
+  assert.equal(signDocCtx.body.ledgerSignatureBase64, signDocCtx.body.entry.signatureBase64);
+  assert.notEqual(signDocCtx.body.signatureBase64, signDocCtx.body.ledgerSignatureBase64);
+
   const verSigCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+    params: {
+      values: {
+        payload: signDocCtx.body.entry.payload,
+        signatureBase64: signDocCtx.body.signatureBase64,
+        keyId: signDocCtx.body.keyId,
+      },
+    },
+  });
+  await ledgerActions.verifySignature(verSigCtx, async () => {});
+  assert.equal(verSigCtx.body.valid, true);
+
+  const verifyAfterSignCtx = makeHttpCtx({ method: 'POST', state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' } });
+  await ledgerActions.verify(verifyAfterSignCtx, async () => {});
+  assert.equal(verifyAfterSignCtx.body.valid, true);
+
+  const verPrevSigCtx = makeHttpCtx({
     method: 'POST',
     state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
     params: { values: { payload: { a: 1, b: 2 }, signatureBase64: signed.signatureBase64 } },
   });
-  await ledgerActions.verifySignature(verSigCtx, async () => {});
-  assert.equal(verSigCtx.body.valid, true);
+  await ledgerActions.verifySignature(verPrevSigCtx, async () => {});
+  assert.equal(verPrevSigCtx.body.valid, true);
 });
 
 test('voucher-lifecycle and record-chatter auto-append immutable entries to latticeCryptoLedger when repo exists', async () => {
@@ -1509,4 +1540,138 @@ test('Task 4: paas-api-keys enforces write scope on default mutating routes for 
     }), async () => {}),
     (err) => err.status === 403 && err.code === 'API_KEY_SCOPE_INSUFFICIENT',
   );
+});
+
+test('P1-05: PKI key rotation migration 20261207000100, expectedKeyId lookup (retired vs revoked), rotateKey, and exportProof', async () => {
+  await withMockedNocobase(async () => {
+    const RotationMig = require('../src/server/migrations/20261207000100-pki-key-rotation-support');
+    const sqlCalls = [];
+    const fakeTx = { id: 'tx-20261206' };
+    const fakeDb = {
+      sequelize: {
+        getDialect: () => 'postgres',
+        transaction: async (cb) => cb(fakeTx),
+        query: async (sql, opts) => {
+          sqlCalls.push({ sql, opts });
+          return [[]];
+        },
+      },
+    };
+    const mig = new RotationMig({ db: fakeDb });
+    assert.equal(mig.on, 'afterSync');
+    await mig.up();
+    const upSql = sqlCalls.map((x) => x.sql).join('\n');
+    assert.match(upSql, /ADD COLUMN IF NOT EXISTS status/);
+    assert.match(upSql, /ADD COLUMN IF NOT EXISTS "retiredAt"/);
+    assert.match(upSql, /DROP INDEX IF EXISTS uidx_lattice_pki_keys_org/);
+    assert.match(upSql, /uidx_lattice_pki_keys_org_key ON "latticePkiKeys" \("organizationId", "keyId"\)/);
+    assert.match(upSql, /uidx_lattice_pki_keys_org_active ON "latticePkiKeys" \("organizationId"\) WHERE active = true/);
+
+    sqlCalls.length = 0;
+    await mig.down();
+    const downSql = sqlCalls.map((x) => x.sql).join('\n');
+    assert.match(downSql, /DROP INDEX IF EXISTS uidx_lattice_pki_keys_org_active/);
+    assert.match(downSql, /DROP INDEX IF EXISTS uidx_lattice_pki_keys_org_key/);
+    assert.match(downSql, /DROP COLUMN IF EXISTS "retiredAt"/);
+  });
+
+  const {
+    signCanonicalPayload,
+    verifyPayloadSignature,
+    appendLedgerEntry,
+    verifyLedgerChain,
+    registerPkiLedger,
+  } = require('../src/server/pki-ledger');
+  const { db, pkiKeys } = makeInMemoryPaasDb({ withLedgerRepo: true });
+  const resources = new Map();
+  const aclAllows = [];
+  registerPkiLedger({
+    db,
+    resourceManager: { define(def) { resources.set(def.name, def.actions); } },
+    acl: { allow(...args) { aclAllows.push(args); } },
+  });
+  const ledgerActions = resources.get('dxosLedger');
+  assert.ok(ledgerActions.rotateKey && ledgerActions.exportProof);
+  assert.ok(aclAllows.some(([res, acts]) => res === 'dxosLedger' && acts.includes('rotateKey') && acts.includes('exportProof')));
+
+  // Sign with key1 before rotation
+  const signed1 = await signCanonicalPayload(db, 'org-a', { doc: 'epod-1', qty: 10 });
+  const e1 = await appendLedgerEntry(db, {
+    organizationId: 'org-a',
+    eventType: 'epod.captured',
+    targetCollection: 'latticeOrders',
+    targetRecordId: '1',
+    actor: { userId: '20', username: 'emp-alice' },
+    payload: { doc: 'epod-1' },
+  });
+  assert.equal(e1.keyId, signed1.keyId);
+
+  // Non-admin employee CANNOT rotate key
+  await assert.rejects(
+    () => ledgerActions.rotateKey(makeHttpCtx({
+      method: 'POST',
+      state: { currentUser: { id: 20, username: 'emp-alice' }, currentRole: 'ldx_employee' },
+    }), async () => {}),
+    (err) => err.status === 403 && err.code === 'LEDGER_ADMIN_REQUIRED',
+  );
+
+  // Admin rotates key -> key1 becomes retired, key2 becomes active
+  const rotCtx = makeHttpCtx({
+    method: 'POST',
+    state: { currentUser: { id: 10, username: 'org-admin' }, currentRole: 'ldx_admin' },
+  });
+  await ledgerActions.rotateKey(rotCtx, async () => {});
+  assert.equal(rotCtx.body.retiredKeyId, signed1.keyId);
+  assert.ok(rotCtx.body.newKeyId && rotCtx.body.newKeyId !== signed1.keyId);
+  assert.equal(pkiKeys.length, 2);
+  const retiredKey = pkiKeys.find((k) => k.keyId === signed1.keyId);
+  const activeKey = pkiKeys.find((k) => k.keyId === rotCtx.body.newKeyId);
+  assert.equal(retiredKey.active, false);
+  assert.equal(retiredKey.status, 'retired');
+  assert.ok(retiredKey.retiredAt);
+  assert.equal(activeKey.active, true);
+  assert.equal(activeKey.status, 'active');
+
+  // Sign with key2 after rotation
+  const signed2 = await signCanonicalPayload(db, 'org-a', { doc: 'epod-2', qty: 20 });
+  assert.equal(signed2.keyId, rotCtx.body.newKeyId);
+
+  // Historical signature signed with retired key1 STILL verifies when expectedKeyId=key1
+  const verRetired = await verifyPayloadSignature(db, 'org-a', { doc: 'epod-1', qty: 10 }, signed1.signatureBase64, signed1.keyId);
+  assert.equal(verRetired.valid, true);
+  assert.equal(verRetired.keyId, signed1.keyId);
+
+  // New signature verifies with key2
+  const verActive = await verifyPayloadSignature(db, 'org-a', { doc: 'epod-2', qty: 20 }, signed2.signatureBase64, signed2.keyId);
+  assert.equal(verActive.valid, true);
+  assert.equal(verActive.keyId, signed2.keyId);
+
+  // Wrong expectedKeyId is rejected
+  const verMismatch = await verifyPayloadSignature(db, 'org-a', { doc: 'epod-1', qty: 10 }, signed1.signatureBase64, signed2.keyId);
+  assert.equal(verMismatch.valid, false);
+
+  // Revoked key fails verification
+  retiredKey.status = 'revoked';
+  const verRevoked = await verifyPayloadSignature(db, 'org-a', { doc: 'epod-1', qty: 10 }, signed1.signatureBase64, signed1.keyId);
+  assert.equal(verRevoked.valid, false);
+  assert.equal(verRevoked.reason, 'KEY_REVOKED');
+  retiredKey.status = 'retired';
+
+  // Full chain verification across rotation entries succeeds
+  const chainReport = await verifyLedgerChain(db, 'org-a');
+  assert.equal(chainReport.valid, true);
+  assert.equal(chainReport.checkedCount, 2);
+
+  // exportProof returns structured Merkle proof without private keys
+  const exportCtx = makeHttpCtx({
+    method: 'GET',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+  });
+  await ledgerActions.exportProof(exportCtx, async () => {});
+  assert.equal(exportCtx.body.organizationId, 'org-a');
+  assert.equal(exportCtx.body.keyId, rotCtx.body.newKeyId);
+  assert.equal(exportCtx.body.chainValid, true);
+  assert.equal(exportCtx.body.publicKeys.length, 2);
+  assert.ok(exportCtx.body.rootHash && exportCtx.body.proof);
+  assert.equal(JSON.stringify(exportCtx.body).includes('encryptedPrivateKey'), false);
 });

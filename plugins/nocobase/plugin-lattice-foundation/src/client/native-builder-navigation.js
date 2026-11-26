@@ -262,7 +262,11 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     }, [api, api?.auth?.role, allowConfigUI]);
 
     React.useEffect(() => {
-      if (allowConfigUI || !isAdminRoot || !navigate) return;
+      if (!isAdminRoot || !navigate) return;
+      if (allowConfigUI) {
+        if (pathname !== WORKSPACE_PATH) navigate(WORKSPACE_PATH, { replace: true });
+        return;
+      }
       if (!api || typeof api.request !== 'function') {
         navigate(WORKSPACE_PATH, { replace: true });
         return;
@@ -327,7 +331,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
       };
     }, [pathname, activeAccessiblePortal, redirectTarget, configMode, workspaceMode, model, loadFallback]);
 
-    if ((!allowConfigUI && isAdminRoot) || redirectTarget) return redirectNotice();
+    if (isAdminRoot || redirectTarget) return redirectNotice();
 
     const ShellModel = isPortalModel(model) ? V2Model : NativeModel;
     const isEmptyEmployeePortal = Boolean(portals !== null && !allowConfigUI && portalMatch && !activeAccessiblePortal);
@@ -420,7 +424,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     React.useEffect(() => {
       if (!isAdminRoot) { setVerified(false); return; }
       if (!api || typeof api.request !== 'function') {
-        if (!syncAllow && navigate) navigate(WORKSPACE_PATH, { replace: true });
+        if (navigate) navigate(WORKSPACE_PATH, { replace: true });
         else setVerified(true);
         return;
       }
@@ -443,6 +447,7 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
         const isBuilder = hasRoleCheck ? Boolean(rData.allowAll || rData.allowConfigure || hasBuilderSnippet) : syncAllow;
         const items = Array.isArray(portalRes?.data?.data) ? portalRes.data.data : [];
         portalManager?.setPermissions?.(isBuilder); portalManager?.setPortals?.(items); portalManager?.ensureDynamicLayoutsRegistered?.(items);
+        if (isBuilder && navigate) { navigate(WORKSPACE_PATH, { replace: true }); return; }
         if (!isBuilder && navigate) { goPortal(landingPath(items), navigate, { replace: true }); return; }
         setVerified(true);
       });

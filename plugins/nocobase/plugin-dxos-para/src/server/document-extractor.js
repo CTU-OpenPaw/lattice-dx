@@ -1611,6 +1611,15 @@ function extractPdfText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) 
   }
 
   const raw = buf.toString('latin1');
+  if (/\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/i.test(raw)) {
+    throw failExtract(
+      'PDF_ENCRYPTED_UNSUPPORTED',
+      400,
+      'Tệp PDF được mã hóa/bảo vệ mật khẩu nên chưa thể trích xuất văn bản. Vui lòng gỡ mật khẩu trước khi tải lên.',
+    );
+  }
+  let hasObjStm = /\/Type\s*\/ObjStm\b/i.test(raw);
+  let hasImageStreams = /\/Subtype\s*\/Image\b/i.test(raw);
   const {
     objToPage,
     toUnicodeStreamIds,
@@ -1676,6 +1685,9 @@ function extractPdfText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) 
     }
 
     cursor = Math.max(nextCursor, streamIdx + 6);
+
+    if (/\/Type\s*\/ObjStm\b/i.test(dictStr)) hasObjStm = true;
+    if (/\/Subtype\s*\/Image\b/i.test(dictStr)) hasImageStreams = true;
 
     if (/\/Subtype\s*\/(?:Image|XML)\b|\/Type\s*\/(?:ObjStm|XRef|Metadata)\b/i.test(dictStr)) {
       continue;
@@ -1765,6 +1777,8 @@ function extractPdfText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) 
     text,
     pageCount: Math.min(MAX_PDF_PAGE_COUNT, Math.max(detectedPageCount, pageTexts.size, 1)),
     corruptStreams,
+    hasObjStm,
+    hasImageStreams,
   };
 }
 
@@ -1775,7 +1789,7 @@ function extractPdfText(buffer, { maxInflatedBytes = MAX_INFLATED_BYTES } = {}) 
  * @param {object} [options]
  * @param {string} [options.filename=''] - Original filename hint.
  * @param {string} [options.mimeType=''] - MIME content type hint.
- * @returns {{text: string, format: string, pageCount: number, sheets?: Array, slides?: Array}}
+ * @returns {{text: string, format: string, pageCount: number, hasObjStm?: boolean, hasImageStreams?: boolean, sheets?: Array, slides?: Array}}
  */
 function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
   const buf = toBuffer(buffer);
@@ -1797,6 +1811,8 @@ function extractTextFromBuffer(buffer, { filename = '', mimeType = '' } = {}) {
       text: pdfRes.text,
       format: 'pdf',
       pageCount: pdfRes.pageCount,
+      hasObjStm: Boolean(pdfRes.hasObjStm),
+      hasImageStreams: Boolean(pdfRes.hasImageStreams),
     };
   }
 
@@ -2483,9 +2499,10 @@ function extractStructuredFormFields(text, { targetCollection = 'latticeOrders',
   const tempMeta = extractTemperatureMetadata(effectiveText, warnings);
 
   if (safeTarget === 'latticeStockLots') {
-    const lotCode = foundCodes.LOT || (explicitCode && /^LOT-/i.test(explicitCode) ? explicitCode : primaryCode);
+    const explicitLotCode = extractLabeledValue(lines, 'Mã\\s*lô|Lot\\s*(?:Code|No\\.?)', warnings, 64);
+    const lotCode = foundCodes.LOT
+      || (explicitLotCode && /^[A-Za-z0-9][A-Za-z0-9_.-]{1,63}$/.test(explicitLotCode) ? explicitLotCode : '');
     if (lotCode) defineSafeField(fields, 'lotCode', lotCode);
-    if (primaryCode) defineSafeField(fields, 'code', primaryCode);
     const firstItem = lineItems[0] || {};
     defineSafeField(fields, 'sku', firstItem.sku || globalSku);
     defineSafeField(fields, 'productName', firstItem.productName || productNameLabel);
@@ -2910,6 +2927,10 @@ async function extractWithMultimodalOcr({
     }
     if (!text) {
       text = extractOfflinePdfMetadataText(buf);
+      if (!text) {
+        if (pdfRes.hasImageStreams) addWarning(extraWarnings, 'PDF_SCANNED_OCR_REQUIRED');
+        if (pdfRes.hasObjStm) addWarning(extraWarnings, 'PDF_OBJSTM_NO_TEXT');
+      }
     }
   } else {
     format = detected.format;

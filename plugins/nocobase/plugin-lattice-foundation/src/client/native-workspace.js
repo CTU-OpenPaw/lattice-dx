@@ -234,16 +234,24 @@ function createNativeWorkspace(client, React, antd, app, router) {
     const matchingApps = applications.filter(item => item.title.toLocaleLowerCase('vi').includes(query) || item.pages.some(page => page.title.toLocaleLowerCase('vi').includes(query)));
     const pages = (appId ? selectedApp?.pages ?? [] : workspacePages(allAccessRoutes).filter(page => page.section === 'reports')).filter(page => page.title.toLocaleLowerCase('vi').includes(query));
     const hasQuickCreate = applications.some(item => item.action);
+    const shouldCheckRoles = hasQuickCreate || applications.length === 0;
     React.useEffect(() => {
-      if (!hasQuickCreate || typeof api.request !== 'function') return;
+      if (!shouldCheckRoles || typeof api.request !== 'function') return;
       let active = true;
       setPermissionResult(null);
       api.request({ url: 'roles:check', method: 'get' }).then(result => {
-        if (active) setPermissionResult({ role, permissions: result.data?.data });
+        if (active) setPermissionResult({ role, permissions: result?.data?.data });
       }).catch(() => {});
       return () => { active = false; };
-    }, [api, role, hasQuickCreate, updated]);
+    }, [api, role, shouldCheckRoles, updated]);
     const catalog = view === 'apps' || view === 'reports';
+    const roleCheckData = permissionResult?.role === role ? permissionResult?.permissions : null;
+    const roleCheckSnippets = Array.isArray(roleCheckData?.snippets) ? roleCheckData.snippets : [];
+    const isAdminUser = Boolean(
+      roleCheckData
+        ? (roleCheckData.allowAll === true || roleCheckData.allowConfigure === true || roleCheckSnippets.includes('pm') || roleCheckSnippets.includes('pm.*'))
+        : (role === 'root' || role === 'admin' || role === 'ldx_admin'),
+    );
     React.useEffect(() => {
       if (catalog || typeof api?.request !== 'function') return undefined;
       let active = true;
@@ -301,10 +309,53 @@ function createNativeWorkspace(client, React, antd, app, router) {
     const catalogPath = view === 'reports' ? WORKSPACE_PATH + '?view=reports' : allAppsPath + (appId ? '&app=' + encodeURIComponent(appId) : '');
     const clearSearch = () => { setTerm(''); navigate(catalogPath); };
     const showPages = view === 'reports' || Boolean(appId), count = showPages ? pages.length : matchingApps.length;
+    const showBlankOnboarding = !busy && !error && !catalog && !query && applications.length === 0 && isAdminUser;
+    const onboardingChecklist = showBlankOnboarding ? h('section', {
+      'data-testid': 'ldx-onboarding-checklist',
+      style: {
+        margin: '12px 0 24px',
+        padding: 20,
+        borderRadius: 12,
+        border: '1px solid #bfdbfe',
+        background: '#f8fbff',
+        display: 'grid',
+        gap: 12,
+      },
+    },
+      h('h2', { style: { margin: 0, fontSize: 18, fontWeight: 700, color: '#142238' } }, 'Hướng dẫn thiết lập hệ thống lần đầu (Blank-Slate Checklist)'),
+      h('p', { style: { margin: 0, fontSize: 13, color: '#475569' } },
+        'Hệ thống đang ở trạng thái trắng (chưa có ứng dụng hoặc cổng nào được cấu hình). Hoàn tất các bước bên dưới để khởi chạy doanh nghiệp:'),
+      h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 } },
+        [
+          { to: '/admin/settings/dxos-studio', title: '1. Control Studio', desc: 'Cấu hình quy trình, DMN, thông báo & biểu mẫu' },
+          { to: '/admin/settings/dxos-ai', title: '2. DX-OS AI Studio & App Builder', desc: 'Tạo ứng dụng đa thực thể & kết nối LLM' },
+          { to: '/admin/settings/multi-portal', title: '3. Quản lý Multi-Portal', desc: 'Tạo cổng làm việc theo vai trò' },
+          { to: '/admin/settings/dxos-studio?tab=forms', title: '4. Biểu mẫu Công khai', desc: 'Xuất bản biểu mẫu tiếp nhận /v/form/:slug' },
+          { to: '/admin/settings/auth/enterprise-mappings', title: '5. Đăng nhập doanh nghiệp SSO', desc: 'Liên kết tài khoản Keycloak với nhân sự' },
+        ].map(step => h(router.Link, {
+          key: step.to,
+          to: step.to,
+          className: 'ldx-native-card',
+          style: { margin: 0 },
+        },
+          h('strong', null, step.title),
+          h('span', { style: { color: '#475569' } }, step.desc),
+          h('span', null, 'Mở thiết lập →'))),
+      ),
+      h('div', {
+        style: {
+          padding: '10px 14px',
+          borderRadius: 8,
+          background: '#eef3fa',
+          fontSize: 13,
+          color: '#243850',
+        },
+      }, '6. Nạp dữ liệu mẫu demo (tùy chọn): đặt LATTICE_SKIP_DEMO_SEED=0 khi khởi động, gọi action dxosStudio:seedShowcaseData hoặc chạy node scripts/seed-v030-demo-showcase.mjs.'),
+    ) : null;
     const cards = busy ? h('p', { role: 'status' }, 'Đang cập nhật danh sách trang…')
       : error ? null : count ? (showPages ? pageCards(pages) : applicationCards(catalog ? matchingApps : matchingApps.slice(0, 6), permissionResult?.role === role ? permissionResult?.permissions : null))
-        : h(antd.Empty, { description: query ? 'Không tìm thấy trang phù hợp.' : view === 'reports' ? 'Chưa có trang báo cáo được cấp quyền.' : appId ? 'Ứng dụng này chưa có trang được cấp quyền.' : 'Chưa có ứng dụng được cấp quyền.' },
-          query ? h(antd.Button, { onClick: clearSearch }, 'Xóa tìm kiếm') : null);
+        : (showBlankOnboarding ? onboardingChecklist : h(antd.Empty, { description: query ? 'Không tìm thấy trang phù hợp.' : view === 'reports' ? 'Chưa có trang báo cáo được cấp quyền.' : appId ? 'Ứng dụng này chưa có trang được cấp quyền.' : 'Chưa có ứng dụng được cấp quyền.' },
+          query ? h(antd.Button, { onClick: clearSearch }, 'Xóa tìm kiếm') : null));
     const inboxSection = (inboxState.items.length > 0 || inboxState.loading || inboxState.error) ? h('section', {
       'data-testid': 'ldx-workspace-dxos-inbox',
       style: { margin: '12px 0 20px', padding: 16, borderRadius: 10, border: '1px solid #dce3ed', background: '#ffffff' },

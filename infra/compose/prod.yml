@@ -692,7 +692,7 @@ services:
       - /bin/sh
       - -ec
       - |
-        node -e 'const fs=require("fs");const u=process.env.MQTT_BRIDGE_USER||"";const p=process.env.MQTT_BRIDGE_PASSWORD||"";if(u&&p){fs.writeFileSync("/data/flows_cred.json",JSON.stringify({"latticedx-mqtt-broker":{user:u,password:p}}),{mode:0o600});}'
+        node -e 'const fs=require("fs"),crypto=require("crypto");const u=process.env.MQTT_BRIDGE_USER||"";const p=process.env.MQTT_BRIDGE_PASSWORD||"";const s=(process.env.NODERED_CREDENTIAL_SECRET||"").trim();if(u&&p){const creds={"latticedx-mqtt-broker":{user:u,password:p}};let out=creds;if(s){const k=crypto.createHash("sha256").update(s).digest();const iv=crypto.randomBytes(16);const c=crypto.createCipheriv("aes-256-ctr",k,iv);const enc=iv.toString("hex")+c.update(JSON.stringify(creds),"utf8","base64")+c.final("base64");out={[String.fromCharCode(36)]:enc};}fs.writeFileSync("/data/flows_cred.json",JSON.stringify(out),{mode:0o600});}'
         exec /usr/src/node-red/entrypoint.sh "$$@"
     environment:
       TZ: Asia/Ho_Chi_Minh
@@ -705,7 +705,8 @@ services:
       DX_IIOT_INGEST_TOKEN: ${DX_IIOT_INGEST_TOKEN:?Set DX_IIOT_INGEST_TOKEN}
       NODERED_CREDENTIAL_SECRET: ${NODERED_CREDENTIAL_SECRET:?Set NODERED_CREDENTIAL_SECRET}
       NODERED_ADMIN_USER: ${NODERED_ADMIN_USER:-nodered_admin}
-      NODERED_ADMIN_PASS_HASH: ${NODERED_ADMIN_PASS_HASH:-}
+      NODERED_ADMIN_PASS_HASH: ${NODERED_ADMIN_PASS_HASH:?Set NODERED_ADMIN_PASS_HASH}
+      NODERED_REQUIRE_ADMIN_AUTH: "true"
     expose:
       - "1880"
     volumes:

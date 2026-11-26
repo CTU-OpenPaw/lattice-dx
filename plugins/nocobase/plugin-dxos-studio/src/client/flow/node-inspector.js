@@ -10,7 +10,7 @@
 
 const { N8N_WEBHOOK_PRESETS } = require('./n8n-setup-modal');
 const { insertVariableAtCursor, buildUpstreamPinnedInputs } = require('./flow-validation');
-const { renderTraceIoView, createWebhookHelperComponent, renderToolsPicker } = require('../flow-inspector-extras');
+const { renderTraceIoView, createWebhookHelperComponent, renderToolsPicker, renderVisualJsonField } = require('../flow-inspector-extras');
 
 function createNodeInspector(React) {
   const h = React.createElement;
@@ -108,6 +108,7 @@ function createNodeInspector(React) {
     const [pinnedMap, setPinnedMap] = React.useState({});
     const [tabSeqRef] = React.useState(() => ({ val: externalTabSeq || 0, nodeId: null }));
     const [cursorRef] = React.useState(() => ({ scopeKey: '', field: null, start: null, end: null }));
+    const [csvBuf] = React.useState(() => new Map());
 
     const ruleKey = rule?.ruleKey || '__draft__';
     const nodeId = node?.id || null;
@@ -280,10 +281,13 @@ function createNodeInspector(React) {
       if (f.type === 'json') {
         const err = bufActive ? jsonBuf.entries[f.name]?.error : null;
         const onRolePick = (r) => r && updateConfigField('roleNames', Array.isArray(val) && val.includes(r) ? val : [...(Array.isArray(val) ? val : []), r]);
+        const textareaEl = h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => { trackCursor(f.name, e); updateJsonFieldText(f.name, e?.target?.value ?? ''); } });
+        const visualEl = renderVisualJsonField(h, { node, field: f, val, updateConfigField, textareaEl, err, S, scopeKey, csvBuf });
+        if (visualEl) return visualEl;
         return h('div', { style: S.grid(4) },
           f.name === 'roleNames' && safeRoles.length ? h('select', { 'data-testid': 'dxos-flow-field-roleNames-picker', value: '', style: S.input, onChange: (e) => onRolePick(e?.target?.value) }, h('option', { value: '' }, '+ Thêm vai trò từ danh mục...'), safeRoles.map((r) => h('option', { key: r, value: r }, r))) : null,
           f.name === 'tools' ? renderToolsPicker(h, { val, catalog, updateConfigField, inputStyle: S.input }) : null,
-          h('textarea', { ...base, rows: 3, placeholder: '{} (tùy chọn)', value: currentJsonFieldText(f.name, schema?.defaultConfig?.[f.name]), style: S.textarea, onChange: (e) => { trackCursor(f.name, e); updateJsonFieldText(f.name, e?.target?.value ?? ''); } }),
+          textareaEl,
           err ? h('span', { style: S.err(10) }, err) : null);
       }
       return h('div', { style: S.grid(4) },

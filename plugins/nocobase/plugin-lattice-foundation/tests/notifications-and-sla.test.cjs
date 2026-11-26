@@ -1661,6 +1661,9 @@ test('Task 16: Notification Bell supports /v/mobile, Topbar variant, authenticat
           unreadCalls += 1;
           return { data: { data: { unreadCount: serverUnread } } };
         }
+        if (url === 'latticePortals:listAccessible') {
+          return { data: { data: [{ uid: 'ldx-portal-incidents', slug: 'incidents', routePath: '/p/incidents', enabled: true }] } };
+        }
         return { data: { data: { items: [], unreadCount: serverUnread } } };
       },
     };
@@ -2420,5 +2423,140 @@ test('notification-center deduplicates channel aliases (partner_webhook/webhook,
   } finally {
     if (prevMaster === undefined) delete process.env.DX_VAULT_MASTER_KEY;
     else process.env.DX_VAULT_MASTER_KEY = prevMaster;
+  }
+});
+
+test('T4-RW-01: Notification Bell checks latticePortals:listAccessible on /p/<slug> routes, falls back to workspace SSE when inaccessible, and reuses cached result', async () => {
+  const { createTopbarNotificationBell } = require('../src/client/notification-bell');
+  const prevWindow = globalThis.window;
+  const prevDocument = globalThis.document;
+  const prevFetch = globalThis.fetch;
+  try {
+    const fetchCalls = [];
+    globalThis.fetch = async (url, init) => {
+      fetchCalls.push({ url, init });
+      return {
+        ok: true,
+        status: 200,
+        body: {
+          getReader: () => ({
+            read: () => new Promise((_, reject) => {
+              init?.signal?.addEventListener?.('abort', () => {
+                reject(Object.assign(new Error('BodyStreamBuffer was aborted'), { name: 'AbortError' }));
+              });
+            }),
+            cancel: async () => undefined,
+          }),
+        },
+      };
+    };
+    globalThis.window = {
+      location: { pathname: '/p/logistics-employee', assign() {} },
+      matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    globalThis.document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+
+    let listAccessibleCalls = 0;
+    let roleName = 'ldx_manager';
+    const api = {
+      auth: {
+        get role() { return roleName; },
+        getToken: () => 'tok-mgr-rw01',
+      },
+      request: async ({ url }) => {
+        if (url === 'latticePortals:listAccessible') {
+          listAccessibleCalls += 1;
+          if (roleName === 'ldx_employee') {
+            return {
+              data: {
+                data: [{ uid: 'ldx-portal-logistics-employee', slug: 'logistics-employee', routePath: '/p/logistics-employee', enabled: true }],
+              },
+            };
+          }
+          return {
+            data: {
+              data: [{ uid: 'ldx-portal-logistics', slug: 'logistics', routePath: '/p/logistics', enabled: true }],
+            },
+          };
+        }
+        if (url === 'latticeNotifications:unreadCount') {
+          return { data: { data: { unreadCount: 1 } } };
+        }
+        return { data: { data: { items: [], unreadCount: 1 } } };
+      },
+    };
+
+    let cursor = 0;
+    const state = [];
+    const effects = [];
+    const cleanups = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState(init) {
+        const idx = cursor++;
+        if (!(idx in state)) state[idx] = typeof init === 'function' ? init() : init;
+        return [state[idx], (v) => { state[idx] = typeof v === 'function' ? v(state[idx]) : v; }];
+      },
+      useEffect(fn, deps) {
+        const idx = cursor++;
+        const prev = state[idx];
+        if (!prev || !deps || deps.some((d, i) => d !== prev.deps[i])) {
+          state[idx] = { deps };
+          effects.push({ idx, fn });
+        }
+      },
+      useCallback: (fn) => fn,
+      useMemo: (fn) => fn(),
+      useRef: (init) => {
+        const idx = cursor++;
+        return state[idx] ?? (state[idx] = { current: init });
+      },
+    };
+
+    const TopbarBell = createTopbarNotificationBell({ useAPIClient: () => api }, React, {}, {});
+    const renderTopbar = (pathname) => {
+      globalThis.window.location.pathname = pathname;
+      cursor = 0;
+      const ui = TopbarBell({ variant: 'topbar', pathname });
+      while (effects.length) {
+        const cln = effects.shift().fn();
+        if (typeof cln === 'function') cleanups.push(cln);
+      }
+      return ui;
+    };
+
+    // 1. ldx_manager visiting /p/logistics-employee (inaccessible) falls back to portalSlug=workspace
+    renderTopbar('/p/logistics-employee');
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(listAccessibleCalls, 1);
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, '/api/dxosAi:surfaceEvents?portalSlug=workspace');
+    assert.equal(
+      fetchCalls.some((c) => c.url.includes('portalSlug=logistics-employee')),
+      false,
+      'Must never open SSE for inaccessible /p/logistics-employee',
+    );
+
+    // 2. Navigating to accessible /p/logistics reuses cached listAccessible result (0 extra listAccessible calls)
+    renderTopbar('/p/logistics');
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(listAccessibleCalls, 1, 'Expected cached accessible portals to be reused for same token+role');
+    assert.equal(fetchCalls.at(-1).url, '/api/dxosAi:surfaceEvents?portalSlug=logistics');
+
+    // 3. Role change invalidates cache and allows /p/logistics-employee for ldx_employee
+    roleName = 'ldx_employee';
+    renderTopbar('/p/logistics-employee');
+    await new Promise((r) => setTimeout(r, 15));
+    assert.equal(listAccessibleCalls, 2, 'Role switch must invalidate accessible portal cache');
+    assert.equal(fetchCalls.at(-1).url, '/api/dxosAi:surfaceEvents?portalSlug=logistics-employee');
+
+    while (cleanups.length) cleanups.pop()();
+  } finally {
+    if (prevWindow === undefined) delete globalThis.window; else globalThis.window = prevWindow;
+    if (prevDocument === undefined) delete globalThis.document; else globalThis.document = prevDocument;
+    if (prevFetch === undefined) delete globalThis.fetch; else globalThis.fetch = prevFetch;
   }
 });

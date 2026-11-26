@@ -6,7 +6,7 @@
  * @see https://github.com/CTU-OpenPaw/lattice-dx
  * SPDX-License-Identifier: Apache-2.0
  */
-import {cp, mkdir, readdir, readFile, writeFile, unlink} from 'node:fs/promises';
+import {cp, mkdir, readdir, readFile, rm, writeFile, unlink} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {join,dirname,resolve,relative} from 'node:path';
@@ -24,6 +24,7 @@ async function check(dir) {
   }
 }
 await check(join(root, 'src'));
+await rm(join(root, 'dist'), {recursive: true, force: true});
 await mkdir(join(root, 'dist'), {recursive: true});
 await writeFile(join(root,'dist/externalVersion.js'),externalVersionSource(['@nocobase/server','@nocobase/database','@nocobase/client','@nocobase/client-v2','@nocobase/plugin-workflow','react','antd']));
 await cp(join(root, 'src'), join(root, 'dist'), {recursive: true});

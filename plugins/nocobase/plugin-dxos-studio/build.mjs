@@ -209,6 +209,7 @@ const bundled = await esbuild.build({
     loader: 'js',
   },
   bundle: true,
+  minify: true,
   write: false,
   format: 'cjs',
   platform: 'browser',

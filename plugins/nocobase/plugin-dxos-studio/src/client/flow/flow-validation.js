@@ -8,6 +8,8 @@
  */
 'use strict';
 
+const { validateFlowClientExtra } = require('../flow-inspector-extras');
+
 function isMissingFieldValue(val) {
   if (val === undefined || val === null) return true;
   if (Array.isArray(val)) return val.length === 0;
@@ -56,6 +58,7 @@ function validateFlowClient(graph, nodeTypes = []) {
   if (!hasTrigger) {
     errors.push({ nodeId: nodes[0]?.id || null, severity: 'error', message: 'Cần ít nhất 1 Trigger node ở đầu quy trình.' });
   }
+  validateFlowClientExtra(nodes, edges, schemaMap, errors);
 
   for (const n of nodes) {
     if (!n || !n.id) continue;

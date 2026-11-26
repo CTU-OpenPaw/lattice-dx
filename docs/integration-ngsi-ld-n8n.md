@@ -169,7 +169,7 @@ Retry đã thử không tạo đơn mới; chưa kết luận cho request đồn
 
 ### Workflow export
 
-- File: [logistics-order-webhook.json](../logistics-order-webhook.json).
+- File: [logistics-order-webhook.json](../infra/config/n8n/logistics-order-webhook.json).
 - Bản đã rà soát có `pinData: {}`, không có `shared` metadata cá nhân và không chứa giá trị token trực tiếp.
 - Credential trong export chỉ là tham chiếu tên/ID; môi trường khác phải tạo/gán credential riêng.
 - Workflow đang `active: false`; mới kiểm chứng URL `/webhook-test/latticedx/logistics/orders`.

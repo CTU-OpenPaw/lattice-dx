@@ -27,6 +27,8 @@ module.exports = defineCollection({
     { name: 'maxDepth', type: 'integer', allowNull: false, defaultValue: 8 },
     { name: 'cooldownSec', type: 'integer', allowNull: false, defaultValue: 0 },
     { name: 'active', type: 'boolean', allowNull: false, defaultValue: true },
+    { name: 'cronExpression', type: 'string', allowNull: true },
+    { name: 'nextRunAt', type: 'date', allowNull: true },
     { name: 'lastTriggeredAt', type: 'date', allowNull: true },
     { name: 'createdBy', type: 'string', allowNull: true },
     { name: 'schemaVersion', type: 'integer', allowNull: false, defaultValue: 1 },

@@ -45,6 +45,8 @@ routes:
       - /api/dxos:asyncapi
       - /api/dxos:manifest
       - /api/dxos:sw.js
+      - /api/dxos:icon-192.png
+      - /api/dxos:icon-512.png
       - /api/dxosWms:publicTrack
       - /api/dxosWms:verifyTrackSignature
       - /api/dxosLedger:verifySignature

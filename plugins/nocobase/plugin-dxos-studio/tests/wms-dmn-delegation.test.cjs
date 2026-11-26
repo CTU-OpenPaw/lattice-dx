@@ -2031,3 +2031,367 @@ test('dmn-engine matches plain unquoted strings, quoted strings, ranges, lists, 
   assert.equal(evaluateDecisionTable(table, { severity: 'medium', tempC: 0 }).outputs.workOrderPriority, 'P3');
   assert.equal(evaluateDecisionTable(table, { severity: 'unknown', tempC: 1 }).outputs.workOrderPriority, 'P4');
 });
+
+test('M5 P0-05/P1-14/P1-15: printVoucher cryptographic ?verify=, verifyTrackSignature public proof, draft guard, releaseLotByQa, and cold-storage GPS fallback', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const harness = makeTestHarness({
+    employees: [
+      { id: 10, userId: 100, organizationId: 'org-a', active: true },
+      { id: 15, userId: 150, organizationId: 'org-a', active: true },
+    ],
+    roles: [
+      { name: 'root', allowAll: true, snippets: ['pm'] },
+      { name: 'ldx_admin', allowConfigure: true, snippets: ['pm'] },
+      { name: 'ldx_driver', allowConfigure: false, snippets: [] },
+      { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+    ],
+    rolesUsers: [
+      { userId: 100, roleName: 'ldx_admin' },
+      { userId: 150, roleName: 'ldx_driver' },
+      { userId: 200, roleName: 'ldx_employee' },
+    ],
+    orders: [
+      { id: 811, organizationId: 'org-a', code: 'ORD-DRAFT-811', name: 'Draft Order', status: 'draft' },
+      { id: 812, organizationId: 'org-a', code: 'ORD-COLD-812', name: 'Cold Storage Order', status: 'in_transit' },
+    ],
+  });
+  harness.stockLots.push(
+    { id: 601, organizationId: 'org-a', lotCode: 'LOT-HOLD-1', sku: 'VAC-1', productName: 'Vaccine', qtyOnHand: 50, qtyReserved: 0, status: 'hold_mkt', holdReason: 'MKT exceeded' },
+    { id: 602, organizationId: 'org-a', lotCode: 'LOT-AVAIL-2', sku: 'VAC-1', productName: 'Vaccine', qtyOnHand: 20, qtyReserved: 0, status: 'available' },
+  );
+  const wms = createDxosWmsActions(harness.db);
+
+  // 1. P1-15: epodCapture rejects null GPS when gpsUnavailable !== true or reason is empty; accepts cold-storage fallback with reason
+  await assert.rejects(
+    () => wms.epodCapture({
+      method: 'POST',
+      state: { currentUser: { id: 150, username: 'drv' }, currentRole: 'ldx_driver' },
+      can: () => true,
+      action: { params: { values: { orderId: 812, recipientName: 'Kho Lanh', deliveredQty: 1, gpsLat: null, gpsLng: null, signatureDataUrl: 'data:image/png;base64,iVBORw0KGgo=' } } },
+    }, async () => {}),
+    (err) => err.status === 400 && err.code === 'EPOD_GPS_INVALID',
+  );
+  await assert.rejects(
+    () => wms.epodCapture({
+      method: 'POST',
+      state: { currentUser: { id: 150, username: 'drv' }, currentRole: 'ldx_driver' },
+      can: () => true,
+      action: { params: { values: { orderId: 812, recipientName: 'Kho Lanh', deliveredQty: 1, gpsLat: null, gpsLng: null, gpsUnavailable: true, gpsUnavailableReason: '   ', signatureDataUrl: 'data:image/png;base64,iVBORw0KGgo=' } } },
+    }, async () => {}),
+    (err) => err.status === 400 && err.code === 'EPOD_GPS_INVALID',
+  );
+
+  const coldEpodCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 150, username: 'drv' }, currentRole: 'ldx_driver' },
+    can: () => true,
+    action: {
+      params: {
+        values: {
+          orderId: 812,
+          recipientName: 'Nguyen Van Kho',
+          recipientPhone: '0909888777',
+          deliveredQty: 10,
+          gpsLat: null,
+          gpsLng: null,
+          gpsUnavailable: true,
+          gpsUnavailableReason: 'Giao nhận tại hầm kho lạnh -20°C mất tín hiệu GPS',
+          signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+        },
+      },
+    },
+  };
+  await wms.epodCapture(coldEpodCtx, async () => {});
+  assert.equal(coldEpodCtx.body.epod.gpsLat, null);
+  assert.equal(coldEpodCtx.body.epod.gpsLng, null);
+  assert.equal(coldEpodCtx.body.epod.gpsUnavailable, true);
+  assert.equal(coldEpodCtx.body.epod.gpsUnavailableReason, 'Giao nhận tại hầm kho lạnh -20°C mất tín hiệu GPS');
+
+  // 2. P1-14: printVoucher rejects draft order with 409 WMS_VOUCHER_DRAFT_ORDER & Vietnamese message
+  await assert.rejects(
+    () => wms.printVoucher({
+      method: 'GET',
+      state: { currentUser: { id: 100, username: 'adm' }, currentRole: 'ldx_admin' },
+      can: () => true,
+      action: { params: { documentType: 'order', orderId: 811 } },
+    }, async () => {}),
+    (err) => err.status === 409 && err.code === 'WMS_VOUCHER_DRAFT_ORDER' && /Bản nháp|draft/i.test(err.message),
+  );
+
+  // 3. P1-14 & P0-05: root calling printVoucher without organizationId resolves org from order/epod and emits cryptographic ?verify=
+  const rootPrintCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 1, username: 'root' }, currentRole: 'root' },
+    can: () => true,
+    action: { params: { documentType: 'epod', epodUid: coldEpodCtx.body.epod.epodUid } },
+  };
+  await wms.printVoucher(rootPrintCtx, async () => {});
+  assert.equal(rootPrintCtx.body.organizationId, 'org-a');
+  const matchVerify = rootPrintCtx.body.qrTrackPath.match(/\?verify=([0-9a-f]+)/i);
+  assert.ok(matchVerify, 'printVoucher QR path must contain ?verify= proof');
+  const verifyProof = matchVerify[1];
+  const predictableSha = createHash('sha256').update(coldEpodCtx.body.trackingCode).digest('hex').slice(0, verifyProof.length);
+  assert.notEqual(verifyProof, predictableSha, 'QR ?verify= must NOT be predictable sha256(trackingCode)');
+
+  // 4. P0-05: GET and POST verifyTrackSignature with ?verify= returns strictly non-PII public ledger proof
+  for (const method of ['GET', 'POST']) {
+    const vCtx = {
+      method,
+      state: {},
+      action: { params: method === 'GET' ? { code: coldEpodCtx.body.trackingCode, verify: verifyProof } : { values: { trackingCode: coldEpodCtx.body.trackingCode, verify: verifyProof } } },
+    };
+    await wms.verifyTrackSignature(vCtx, async () => {});
+    assert.equal(vCtx.body.verified, true);
+    assert.equal(vCtx.body.publicProofOnly, true);
+    assert.equal(vCtx.body.requiresTokenForDetails, true);
+    assert.equal(vCtx.body.trackingCode, coldEpodCtx.body.trackingCode);
+    assert.equal(vCtx.body.epodUid, coldEpodCtx.body.epod.epodUid);
+    assert.ok(vCtx.body.ledgerEntryHash && vCtx.body.keyId && vCtx.body.publicKeyFingerprint);
+    const json = JSON.stringify(vCtx.body);
+    for (const pii of ['Nguyen Van Kho', '0909888777', '888777', 'data:image/png', 'org-a', 'ORD-COLD-812']) {
+      assert.equal(json.includes(pii), false, `verifyTrackSignature ?verify= leaked PII: ${pii}`);
+    }
+  }
+
+  // Forged predictable sha256(trackingCode) rejected 401
+  await assert.rejects(
+    () => wms.verifyTrackSignature({
+      method: 'GET',
+      state: {},
+      action: { params: { trackingCode: coldEpodCtx.body.trackingCode, verify: predictableSha } },
+    }, async () => {}),
+    (err) => err.status === 401 && err.code === 'TRACKING_UNAUTHORIZED',
+  );
+
+  // publicTrack MUST NOT allow ?verify= to bypass trackingToken!
+  await assert.rejects(
+    () => wms.publicTrack({
+      method: 'GET',
+      state: {},
+      action: { params: { trackingCode: coldEpodCtx.body.trackingCode, verify: verifyProof } },
+    }, async () => {}),
+    (err) => err.status === 401 && err.code === 'TRACKING_UNAUTHORIZED',
+  );
+
+  // 5. P1-14: releaseLotByQa releases hold_mkt -> available, blocks unauthorized employee (403) and non-held lot (409)
+  await assert.rejects(
+    () => wms.releaseLotByQa({
+      method: 'POST',
+      state: { currentUser: { id: 200, username: 'emp' }, currentRole: 'ldx_employee' },
+      action: { params: { values: { lotId: 601 } } },
+    }, async () => {}),
+    (err) => err.status === 403,
+  );
+  await assert.rejects(
+    () => wms.releaseLotByQa({
+      method: 'POST',
+      state: { currentUser: { id: 100, username: 'adm' }, currentRole: 'ldx_admin' },
+      can: () => true,
+      action: { params: { values: { lotId: 602 } } },
+    }, async () => {}),
+    (err) => err.status === 409 && err.code === 'WMS_LOT_INVALID_STATE',
+  );
+  const relCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 100, username: 'adm' }, currentRole: 'ldx_admin' },
+    can: () => true,
+    action: { params: { values: { lotId: 601, releaseReason: 'QA re-check passed' } } },
+  };
+  await wms.releaseLotByQa(relCtx, async () => {});
+  assert.equal(relCtx.body.released, true);
+  assert.equal(relCtx.body.lot.status, 'available');
+  assert.ok(harness.ledgerEntries.some((e) => e.eventType === 'wms.lot_qa_released'));
+});
+
+test('M5 P1-03 & P2-01: dmn-engine UNIQUE/PRIORITY hitPolicies, inline draft table simulation, and listTables ACL', async () => {
+  const { createDxosDmnActions, evaluateDecisionTable } = require(path.join(PLUGIN_ROOT, 'src/server/dmn-engine.js'));
+  const harness = makeTestHarness({
+    employees: [
+      { id: 10, userId: 100, organizationId: 'org-a', active: true },
+      { id: 20, userId: 200, organizationId: 'org-a', active: true },
+    ],
+    roles: [
+      { name: 'ldx_admin', allowConfigure: true, snippets: ['pm'] },
+      { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+    ],
+    rolesUsers: [
+      { userId: 100, roleName: 'ldx_admin' },
+      { userId: 200, roleName: 'ldx_employee' },
+    ],
+  });
+  const dmn = createDxosDmnActions(harness.db);
+
+  // P2-01: listTables rejects ldx_employee lacking latticeDecisionTables:view permission
+  await assert.rejects(
+    () => dmn.listTables({
+      method: 'GET',
+      state: { currentUser: { id: 200, username: 'emp' }, currentRole: 'ldx_employee' },
+      action: { params: {} },
+    }, async () => {}),
+    (err) => err.status === 403 && err.code === 'DXOS_ACL_DENIED',
+  );
+  const admListCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 100, username: 'adm' }, currentRole: 'ldx_admin' },
+    action: { params: {} },
+  };
+  await dmn.listTables(admListCtx, async () => {});
+  assert.ok(Array.isArray(admListCtx.body.items));
+
+  // P1-03: UNIQUE throws 409 DMN_UNIQUE_POLICY_VIOLATION when >1 rule matches, succeeds when 1 matches
+  const uniqueTable = {
+    hitPolicy: 'UNIQUE',
+    rulesJson: [
+      { when: { tempC: { op: 'gt', value: 5 } }, then: { tier: 'warn' } },
+      { when: { tempC: { op: 'gt', value: 10 } }, then: { tier: 'crit' } },
+    ],
+  };
+  assert.deepEqual(evaluateDecisionTable(uniqueTable, { tempC: 7 }).outputs, { tier: 'warn' });
+  assert.throws(
+    () => evaluateDecisionTable(uniqueTable, { tempC: 15 }),
+    (err) => err.status === 409 && err.code === 'DMN_UNIQUE_POLICY_VIOLATION',
+  );
+
+  // P1-03: PRIORITY selects highest rule.priority regardless of array order
+  const prioTable = {
+    hitPolicy: 'PRIORITY',
+    rulesJson: [
+      { priority: 10, when: { tempC: { op: 'gt', value: 5 } }, then: { tier: 'low-prio' } },
+      { priority: 90, when: { tempC: { op: 'gt', value: 5 } }, then: { tier: 'high-prio' } },
+      { priority: 50, when: { tempC: { op: 'gt', value: 5 } }, then: { tier: 'mid-prio' } },
+    ],
+  };
+  const prioRes = evaluateDecisionTable(prioTable, { tempC: 12 });
+  assert.equal(prioRes.matched, true);
+  assert.equal(prioRes.matchedRuleIndex, 1);
+  assert.deepEqual(prioRes.result, { tier: 'high-prio' });
+
+  // P1-03: inline draft params.table simulation works without saving to DB
+  const draftCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 100, username: 'adm' }, currentRole: 'ldx_admin' },
+    action: {
+      params: {
+        values: {
+          context: { tempC: 12 },
+          table: {
+            tableKey: 'unsaved-draft',
+            hitPolicy: 'PRIORITY',
+            rulesJson: prioTable.rulesJson,
+          },
+        },
+      },
+    },
+  };
+  await dmn.evaluate(draftCtx, async () => {});
+  assert.equal(draftCtx.body.simulated, true);
+  assert.equal(draftCtx.body.tableKey, 'unsaved-draft');
+  assert.deepEqual(draftCtx.body.result, { tier: 'high-prio' });
+  assert.equal(harness.decisionTables.length, 0);
+});
+
+test('P0-05 fail-closed secret: resolveTrackVerifySecret throws 500 WMS_TRACK_VERIFY_SECRET_REQUIRED in production when keys are unset', async () => {
+  const { createDxosWmsActions, resolveTrackVerifySecret } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const prevNodeEnv = process.env.NODE_ENV;
+  const prevTrackSecret = process.env.LATTICE_TRACK_VERIFY_SECRET;
+  const prevEncKey = process.env.ENCRYPTION_FIELD_KEY;
+  const prevAppKey = process.env.APP_KEY;
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.LATTICE_TRACK_VERIFY_SECRET;
+    delete process.env.ENCRYPTION_FIELD_KEY;
+    delete process.env.APP_KEY;
+
+    assert.throws(
+      () => resolveTrackVerifySecret(),
+      (err) => err.status === 500 && err.code === 'WMS_TRACK_VERIFY_SECRET_REQUIRED',
+    );
+
+    const harness = makeTestHarness({
+      employees: [{ id: 10, userId: 100, organizationId: 'org-a', active: true }],
+      orders: [{ id: 820, organizationId: 'org-a', code: 'ORD-PROD-820', name: 'Prod Order', status: 'in_transit' }],
+    });
+    const wms = createDxosWmsActions(harness.db);
+    await assert.rejects(
+      () => wms.printVoucher({
+        method: 'GET',
+        state: { currentUser: { id: 100, username: 'adm' }, currentRole: 'ldx_admin' },
+        can: () => true,
+        action: { params: { documentType: 'order', orderId: 820 } },
+      }, async () => {}),
+      (err) => err.status === 500 && err.code === 'WMS_TRACK_VERIFY_SECRET_REQUIRED',
+    );
+
+    process.env.APP_KEY = 'prod-app-key-123';
+    assert.equal(resolveTrackVerifySecret(), 'prod-app-key-123');
+
+    process.env.NODE_ENV = 'test';
+    delete process.env.APP_KEY;
+    assert.equal(resolveTrackVerifySecret(), 'latticedx-track-verify-dev-secret');
+  } finally {
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV; else process.env.NODE_ENV = prevNodeEnv;
+    if (prevTrackSecret === undefined) delete process.env.LATTICE_TRACK_VERIFY_SECRET; else process.env.LATTICE_TRACK_VERIFY_SECRET = prevTrackSecret;
+    if (prevEncKey === undefined) delete process.env.ENCRYPTION_FIELD_KEY; else process.env.ENCRYPTION_FIELD_KEY = prevEncKey;
+    if (prevAppKey === undefined) delete process.env.APP_KEY; else process.env.APP_KEY = prevAppKey;
+  }
+});
+
+test('T2-MOBILE-02 regression: epodCapture rejects unknown or cross-org orderCode with 404 WMS_ORDER_NOT_FOUND while keeping standalone ePOD working', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const harness = makeTestHarness({
+    employees: [
+      { id: 15, userId: 150, organizationId: 'org-a', active: true },
+      { id: 25, userId: 250, organizationId: 'org-b', active: true },
+    ],
+    orders: [
+      { id: 801, code: 'ORD-A-801', name: 'Org A Order', organizationId: 'org-a', status: 'in_transit' },
+      { id: 901, code: 'ORD-B-901', name: 'Org B Order', organizationId: 'org-b', status: 'in_transit' },
+    ],
+  });
+  const wms = createDxosWmsActions(harness.db);
+
+  const makeEpodCtx = (extraValues) => ({
+    method: 'POST',
+    state: { currentUser: { id: 150, username: 'drv-a' }, currentRole: 'ldx_driver' },
+    can: () => true,
+    action: {
+      params: {
+        values: {
+          recipientName: 'Nguyen Van Giao',
+          deliveredQty: 4,
+          gpsLat: 10.0452,
+          gpsLng: 105.7469,
+          signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+          ...extraValues,
+        },
+      },
+    },
+  });
+
+  // 1. Explicit non-existent orderCode without orderId -> 404 WMS_ORDER_NOT_FOUND
+  await assert.rejects(
+    () => wms.epodCapture(makeEpodCtx({ orderCode: 'ORD-404-NOT-FOUND', orderId: '' }), async () => {}),
+    (err) => err.status === 404 && err.code === 'WMS_ORDER_NOT_FOUND',
+  );
+  assert.equal(harness.epodRecords.length, 0);
+
+  // 2. Cross-org orderCode -> 404 WMS_ORDER_NOT_FOUND
+  await assert.rejects(
+    () => wms.epodCapture(makeEpodCtx({ orderCode: 'ORD-B-901' }), async () => {}),
+    (err) => err.status === 404 && err.code === 'WMS_ORDER_NOT_FOUND',
+  );
+  assert.equal(harness.epodRecords.length, 0);
+
+  // 3. Standalone ePOD without orderId or orderCode -> still succeeds
+  const standaloneCtx = makeEpodCtx({ orderCode: '   ' });
+  await wms.epodCapture(standaloneCtx, async () => {});
+  assert.equal(standaloneCtx.body.epod.orderId, null);
+  assert.equal(harness.epodRecords.length, 1);
+
+  // 4. Matching orderCode in caller's org -> resolves orderId and succeeds
+  const matchedCtx = makeEpodCtx({ orderCode: 'ORD-A-801' });
+  await wms.epodCapture(matchedCtx, async () => {});
+  assert.equal(matchedCtx.body.epod.orderId, 801);
+  assert.equal(matchedCtx.body.epod.orderCode, 'ORD-A-801');
+  assert.equal(harness.epodRecords.length, 2);
+});

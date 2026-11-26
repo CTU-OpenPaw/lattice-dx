@@ -1363,3 +1363,49 @@ test('Task 16: portal-composer and flow/architect allow custom non-ldx_ business
     assert.equal(catalog.roles.includes(blocked), false);
   }
 });
+
+test('M5 P2-07: outboxDlqList supports state=all + payloadJson and outboxDlqPurge removes matched items', async () => {
+  const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+  const rows = [
+    { id: 1, eventId: 'evt-1', entityId: 'urn:a:1', organizationId: 'org-a', state: 'failed', attempts: 3, errorCode: 'ERR_1', lastError: 'Timeout', payloadJson: { tempC: 12 }, updatedAt: '2026-11-26T00:00:00Z' },
+    { id: 2, eventId: 'evt-2', entityId: 'urn:a:2', organizationId: 'org-a', state: 'delivered', attempts: 1, errorCode: null, payloadJson: { tempC: 4 }, updatedAt: '2026-11-26T00:01:00Z' },
+  ];
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeContextOutbox') {
+        return {
+          findAndCount: async ({ filter }) => {
+            const matched = rows.filter((r) => (!filter?.state || r.state === filter.state) && (!filter?.organizationId || r.organizationId === filter.organizationId));
+            return [matched, matched.length];
+          },
+          find: async ({ filter }) => rows.filter((r) => (!filter?.state || r.state === filter.state) && (!filter?.organizationId || r.organizationId === filter.organizationId)),
+          count: async ({ filter }) => rows.filter((r) => !filter?.state || r.state === filter.state).length,
+          destroy: async ({ filter }) => {
+            const ids = filter?.id?.$in || [];
+            let count = 0;
+            for (let i = rows.length - 1; i >= 0; i -= 1) {
+              if (ids.includes(rows[i].id)) {
+                rows.splice(i, 1);
+                count += 1;
+              }
+            }
+            return count;
+          },
+        };
+      }
+      return null;
+    },
+  };
+  const actions = createDxosStudioActions(db);
+  const allCtx = { method: 'GET', state: { currentUser: { id: 1 }, currentRoles: ['root'] }, action: { params: { state: 'all' } } };
+  await actions.outboxDlqList(allCtx, async () => {});
+  assert.equal(allCtx.body.items.length, 2);
+  assert.deepEqual(allCtx.body.items[0].payloadJson, { tempC: 12 });
+  assert.equal(allCtx.body.items[0].lastError, 'Timeout');
+
+  const purgeCtx = { method: 'POST', state: { currentUser: { id: 1 }, currentRoles: ['root'] }, action: { params: { values: { state: 'failed' } } } };
+  await actions.outboxDlqPurge(purgeCtx, async () => {});
+  assert.equal(purgeCtx.body.purgedCount, 1);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].eventId, 'evt-2');
+});

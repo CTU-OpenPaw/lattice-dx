@@ -20,7 +20,7 @@ const { createNodeInspector } = require('./node-inspector');
 const { createFlowListView } = require('./flow-list-view');
 const { createN8nSetupModal } = require('./n8n-setup-modal');
 const { renderVersionStatusBadge, renderVersionsModal, createVersionLifecycleHandlers } = require('../flow-version-ui');
-
+const { renderFlowForbiddenCard, resolveFlowUiAccess } = require('../flow-inspector-extras');
 const freshDoc = (seed) => makeFreshDoc(seed, makeBlankFlow);
 
 function createFlowStudioApp(client, React, _antd, app, opts = {}) {
@@ -30,6 +30,10 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
 
   return function FlowStudioApp(props = {}) {
     const api = props.api || useApi();
+    const uiPerms = typeof client?.useUIConfigurationPermissions === 'function' ? client.useUIConfigurationPermissions() : null;
+    const userCtx = typeof client?.useCurrentUserContext === 'function' ? client.useCurrentUserContext() : null;
+    const { uiDenied, isAdminRole } = resolveFlowUiAccess({ uiPerms, userCtx, api, app });
+    const [forbidden, setForbidden] = React.useState(false);
     const pinStorage = props.pinStorage || opts.pinStorage || null;
     const [urlInit] = React.useState(() => { try { const p = new URLSearchParams(window?.location?.search || ''); return { org: p.get('organizationId') || '', ruleKey: p.get('ruleKey') || '' }; } catch { return { org: '', ruleKey: '' }; } });
     const defaultView = (props.ruleKey || urlInit.ruleKey || props.initialView === 'editor') ? 'editor' : 'list';
@@ -39,7 +43,7 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
     React.useEffect(() => { setOrgOverride(null); }, [props.selectedOrg]);
     const orgList = Array.isArray(props.organizations) && props.organizations.length ? props.organizations : discoveredOrgs;
     const effectiveOrg = String(orgOverride !== null ? orgOverride : (props.selectedOrg || urlInit.org || orgList[0] || '')).trim();
-    const waitOrgProbe = !effectiveOrg && orgOverride === null && !props.selectedOrg && !(Array.isArray(props.organizations) && props.organizations.length) && !orgProbeDone;
+    const waitOrgProbe = isAdminRole && !effectiveOrg && orgOverride === null && !props.selectedOrg && !(Array.isArray(props.organizations) && props.organizations.length) && !orgProbeDone;
     const orgPayload = effectiveOrg ? { organizationId: effectiveOrg } : {};
     const [doc, setDoc] = React.useState(() => freshDoc(effectiveOrg || 1));
     const [data, setData] = React.useState(FRESH_DATA);
@@ -73,14 +77,16 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
 
     const loadAll = React.useCallback(() => {
       const cApi = refs.api;
+      if (uiDenied) { setData((s) => ({ ...s, loading: false })); return; }
       if (!cApi?.request) return;
       const [seq, reqOrg, reqEpoch] = [(refs.loadSeq += 1), effectiveOrg, refs.actionEpoch];
       const isFresh = () => seq === refs.loadSeq && reqOrg === refs.activeOrg && reqOrg === refs.latestOrg && reqEpoch === refs.actionEpoch;
       const patchD = (p) => setData((s) => ({ ...s, ...p }));
+      const onAuthErr = (e, cb) => { const st = Number(e?.response?.status ?? e?.status); if (st === 403 || st === 401) setForbidden(true); else cb?.(e); };
       const get = (u, ok, err, fin) => cApi.request({ url: u, method: 'get', ...(u.endsWith('listEmployees') ? {} : { params: { ...orgPayload } }), skipNotify: true })
-        .then((res) => isFresh() && ok(unwrap(res))).catch((e) => isFresh() && err?.(e)).finally(() => isFresh() && fin?.());
+        .then((res) => isFresh() && ok(unwrap(res))).catch((e) => isFresh() && (err === false ? null : onAuthErr(e, err))).finally(() => isFresh() && fin?.());
       patchD({ loading: true });
-      if (!props.selectedOrg && !props.organizations?.length && !discoveredOrgs.length) get('dxosStudio:listEmployees', (d) => Array.isArray(d?.organizations) && d.organizations.length && setDiscoveredOrgs(d.organizations), null, () => setOrgProbeDone(true));
+      if (isAdminRole && !props.selectedOrg && !props.organizations?.length && !discoveredOrgs.length) get('dxosStudio:listEmployees', (d) => Array.isArray(d?.organizations) && d.organizations.length && setDiscoveredOrgs(d.organizations), false, () => setOrgProbeDone(true));
       if (waitOrgProbe) return;
       get('dxosAutomations:builderCatalog', (d) => patchD({ catalog: d || null }), () => patchD({ catalog: null }));
       get('dxosAutomations:nodeRegistry', (d) => Array.isArray(d.nodeTypes) && patchD({ regTypes: d.nodeTypes }));
@@ -98,7 +104,7 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
           return pick ? { ...s, selectedRun: pick, idx: Math.max(0, getRunTraces(pick).length - 1) } : s;
         });
       });
-    }, [effectiveOrg, waitOrgProbe, Boolean(api?.request)]);
+    }, [effectiveOrg, waitOrgProbe, Boolean(api?.request), uiDenied, isAdminRole]);
 
     React.useEffect(() => { loadAll(); }, [loadAll]);
     React.useEffect(() => {
@@ -341,7 +347,7 @@ function createFlowStudioApp(client, React, _antd, app, opts = {}) {
       ['dxos-flow-publish-btn', `Publish v${Math.max(0, Number(doc.rule?.publishedVersion || 0)) + 1}`, handlePublish, 'pri', data.loading || Boolean(ui.busy.publish), 'Xuất bản phiên bản mới'],
       ['dxos-flow-run-now-btn', '⚡ Chạy', () => handleRunNow(), 'run', Boolean(ui.busy.runNow), 'Chạy ngay quy trình'],
     ];
-
+    if (forbidden || uiDenied) return renderFlowForbiddenCard(h, { testId: 'dxos-flow-studio-forbidden', title: '403 — Chỉ Quản trị viên mới truy cập được LatticeFlow Automation Studio', description: 'Tài khoản hiện tại không có quyền xem hoặc cấu hình quy trình tự động hóa.', onBack: () => openRoute('/admin/lattice-workspace') });
     return h('div', { 'data-testid': 'dxos-flow-studio-app', style: { height: props.embedded ? 640 : 'calc(100vh - 196px)', minHeight: 540, display: 'flex', flexDirection: 'column', background: '#f8fafc', overflow: 'hidden', position: 'relative' } },
       ui.view === 'list' ? h(React.Fragment, null, fbBar, h(FlowListView, { rules: data.rules, runs: data.runs, blueprints, loading: data.loading, runBusy: Boolean(ui.busy.runNow), deleteBusy: Boolean(ui.busy.delete), effectiveOrg, orgList, onOrgChange: setOrgOverride, bpOpen: ui.bpOpen, onToggleBlueprints: (force) => setUi((u) => ({ ...u, bpOpen: typeof force === 'boolean' ? force : !u.bpOpen })), onLoadBlueprint: loadBlueprint, onOpenRule: openRuleInEditor, onRunNow: (r) => handleRunNow(r), onNewFlow: handleNewFlow, onOpenN8nSetup: () => setUi((u) => ({ ...u, n8nOpen: true })), onOpenRoute: openRoute, onToggleRuleActive: handleToggleRuleActive, onDuplicateRule: handleDuplicateRule, onDeleteRule: handleDeleteRule }))
         : h(React.Fragment, null,

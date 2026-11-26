@@ -61,7 +61,8 @@ function parseTrackParams(locationLike) {
   const trackingCode = match ? sanitizeTrackCode(match[1]) : '';
   const query = parseQueryString(loc.search || '');
   const token = sanitizeTrackToken(query.token || query.trackingToken || '');
-  return { trackingCode, token };
+  const verify = sanitizeTrackToken(query.verify || '');
+  return { trackingCode, token, ...(verify ? { verify } : {}) };
 }
 
 function resolveLegacyTrackRedirect(winLike) {
@@ -129,12 +130,20 @@ function createPublicTrackPage(client, React, app) {
     const initialParams = parseTrackParams(props?.location);
     const propCode = props?.trackingCode ? sanitizeTrackCode(props.trackingCode) : '';
     const propToken = props?.token ? sanitizeTrackToken(props.token) : '';
+    const propVerify = props?.verify ? sanitizeTrackToken(props.verify) : '';
     const effectiveCode = propCode || initialParams.trackingCode;
     const effectiveToken = propToken || initialParams.token;
+    const effectiveVerify = propVerify || initialParams.verify || '';
 
+    const [codeInput, setCodeInput] = React.useState(effectiveCode);
+    const [tokenInput, setTokenInput] = React.useState(effectiveToken);
+    const [activeCode, setActiveCode] = React.useState(effectiveCode);
+    const [activeToken, setActiveToken] = React.useState(effectiveToken);
+    const [showToken, setShowToken] = React.useState(false);
     const [loading, setLoading] = React.useState(false);
     const [errorMsg, setErrorMsg] = React.useState('');
     const [trackData, setTrackData] = React.useState(null);
+    const [proofData, setProofData] = React.useState(null);
     const [verifying, setVerifying] = React.useState(false);
     const [verifyResult, setVerifyResult] = React.useState(null);
     const [verifyError, setVerifyError] = React.useState('');
@@ -169,37 +178,73 @@ function createPublicTrackPage(client, React, app) {
 
     React.useEffect(() => {
       let active = true;
-      if (!effectiveCode || !effectiveToken) {
-        setTrackData(null);
-        setErrorMsg('Thiếu mã vận đơn hợp lệ hoặc mã xác thực (?token=...) để tra cứu công khai.');
-        setLoading(false);
+      if (activeCode && activeToken) {
+        setLoading(true);
+        setErrorMsg('');
+        setProofData(null);
+        setVerifyResult(null);
+        setVerifyError('');
+        callEndpoint('dxosWms:publicTrack', {
+          method: 'GET',
+          params: { trackingCode: activeCode, token: activeToken },
+        })
+          .then((payload) => {
+            if (!active) return;
+            setTrackData(projectZeroPiiPayload(payload));
+            setLoading(false);
+          })
+          .catch((err) => {
+            if (!active) return;
+            const info = extractApiError(err, 'Không thể tải trạng thái vận đơn công khai.');
+            setTrackData(null);
+            setErrorMsg(info.message);
+            setLoading(false);
+          });
         return () => { active = false; };
       }
-      setLoading(true);
-      setErrorMsg('');
-      setVerifyResult(null);
-      setVerifyError('');
-      callEndpoint('dxosWms:publicTrack', {
-        method: 'GET',
-        params: { trackingCode: effectiveCode, token: effectiveToken },
-      })
-        .then((payload) => {
-          if (!active) return;
-          setTrackData(projectZeroPiiPayload(payload));
-          setLoading(false);
+      if (activeCode && effectiveVerify) {
+        setLoading(true);
+        setErrorMsg('');
+        setTrackData(null);
+        callEndpoint('dxosWms:verifyTrackSignature', {
+          method: 'POST',
+          data: { code: activeCode, trackingCode: activeCode, verify: effectiveVerify },
         })
-        .catch((err) => {
-          if (!active) return;
-          const info = extractApiError(err, 'Không thể tải trạng thái vận đơn công khai.');
-          setTrackData(null);
-          setErrorMsg(info.message);
-          setLoading(false);
-        });
+          .then((res) => {
+            if (!active) return;
+            setProofData(res || null);
+            setLoading(false);
+          })
+          .catch((err) => {
+            if (!active) return;
+            const info = extractApiError(err, 'Không thể xác thực mã QR công khai.');
+            setProofData(null);
+            setErrorMsg(info.message);
+            setLoading(false);
+          });
+        return () => { active = false; };
+      }
+      setTrackData(null);
+      setProofData(null);
+      setLoading(false);
       return () => { active = false; };
-    }, [effectiveCode, effectiveToken]);
+    }, [activeCode, activeToken, effectiveVerify]);
+
+    function handleLookupSubmit(evt) {
+      if (evt && typeof evt.preventDefault === 'function') evt.preventDefault();
+      const nextCode = sanitizeTrackCode(codeInput);
+      const nextToken = sanitizeTrackToken(tokenInput);
+      if (!nextCode || !nextToken) {
+        setErrorMsg('Vui lòng nhập đầy đủ mã vận đơn và mã xác thực (Tracking Token).');
+        return;
+      }
+      setErrorMsg('');
+      setActiveCode(nextCode);
+      setActiveToken(nextToken);
+    }
 
     async function handleVerifySignature() {
-      if (!trackData?.trackingCode || !effectiveToken) {
+      if (!trackData?.trackingCode || !activeToken) {
         setVerifyError('Thiếu mã vận đơn hoặc mã xác thực để kiểm định chữ ký.');
         return;
       }
@@ -215,7 +260,7 @@ function createPublicTrackPage(client, React, app) {
           method: 'POST',
           data: {
             code: trackData.trackingCode,
-            token: effectiveToken,
+            token: activeToken,
           },
         });
         const verified = Boolean(res?.verified);
@@ -259,11 +304,81 @@ function createPublicTrackPage(client, React, app) {
         h('div', { style: { fontSize: 12, fontWeight: 700, color: '#0284c7', textTransform: 'uppercase' } }, 'LatticeDX Cold-Chain Trust · Zero-PII'),
         h('h1', { style: { margin: '4px 0 0', fontSize: 22, fontWeight: 700 } }, 'Tra cứu Vận đơn & Xác thực Chuỗi ký số Ed25519'),
       ),
+      h(
+        'form',
+        {
+          'data-testid': 'public-track-lookup-form',
+          noValidate: true,
+          onSubmit: handleLookupSubmit,
+          style: { background: '#ffffff', padding: 16, borderRadius: 10, border: '1px solid #cbd5e1', marginBottom: 16 },
+        },
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 12, marginBottom: 12 } },
+          h('div', null,
+            h('label', { style: { display: 'block', fontWeight: 600, fontSize: 13, marginBottom: 6 } }, 'Mã vận đơn (Tracking Code) *'),
+            h('input', {
+              type: 'text',
+              name: 'trackingCode',
+              'data-testid': 'public-track-code-input',
+              value: codeInput,
+              onChange: (e) => { setCodeInput(e?.target?.value ?? ''); if (errorMsg) setErrorMsg(''); },
+              placeholder: 'VD: LDX-TRK-001',
+              style: { width: '100%', minHeight: 44, padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 14, boxSizing: 'border-box' },
+            }),
+          ),
+          h('div', null,
+            h('label', { style: { display: 'block', fontWeight: 600, fontSize: 13, marginBottom: 6 } }, 'Mã xác thực (Tracking Token) *'),
+            h('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
+              h('input', {
+                type: showToken ? 'text' : 'password',
+                name: 'token',
+                'data-testid': 'public-track-token-input',
+                value: tokenInput,
+                onChange: (e) => { setTokenInput(e?.target?.value ?? ''); if (errorMsg) setErrorMsg(''); },
+                placeholder: 'Nhập Tracking Token (?token=...)',
+                style: { flex: 1, minWidth: 0, minHeight: 44, padding: '8px 10px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 14, boxSizing: 'border-box' },
+              }),
+              h('button', {
+                type: 'button',
+                'data-testid': 'public-track-token-toggle',
+                'aria-label': 'Hiện/ẩn mã xác thực',
+                'aria-pressed': String(showToken),
+                onClick: () => setShowToken((v) => !v),
+                style: { minHeight: 44, minWidth: 44, flexShrink: 0, padding: '8px 12px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', color: '#334155', fontSize: 12, fontWeight: 600, cursor: 'pointer' },
+              }, showToken ? 'Ẩn' : 'Hiện'),
+            ),
+          ),
+        ),
+        h('button', {
+          type: 'submit',
+          'data-testid': 'public-track-lookup-btn',
+          disabled: loading,
+          style: { minHeight: 44, minWidth: 44, padding: '9px 16px', borderRadius: 6, border: '1px solid #0284c7', background: '#0284c7', color: '#ffffff', fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer' },
+        }, loading ? 'Đang tra cứu...' : 'Tra cứu vận đơn'),
+      ),
       loading
         ? h('div', { 'data-testid': 'public-track-loading', role: 'status', style: { padding: 16, background: '#e0f2fe', borderRadius: 8 } }, 'Đang tải thông tin vận đơn...')
         : null,
       errorMsg
         ? h('div', { 'data-testid': 'public-track-error', role: 'alert', style: { padding: 16, background: '#fee2e2', color: '#991b1b', borderRadius: 8, marginBottom: 16 } }, errorMsg)
+        : null,
+      proofData && !trackData
+        ? h('section', {
+          'data-testid': 'public-track-proof-card',
+          style: { background: '#ffffff', padding: 20, borderRadius: 10, border: '1px solid #cbd5e1', marginBottom: 16 },
+        },
+        h('div', { style: { fontWeight: 700, fontSize: 15, marginBottom: 8 } },
+          proofData.verified ? 'Chứng thực Sổ cái công khai Ed25519 hợp lệ' : 'Không xác thực được chứng thực công khai'),
+        h('div', { style: { fontSize: 14, marginBottom: 4 } }, `Mã vận đơn: ${proofData.trackingCode || activeCode}`),
+        proofData.keyId ? h('div', { style: { fontSize: 13, color: '#475569', marginBottom: 4 } }, `Khóa ký số: ${proofData.keyId}`) : null,
+        (proofData.ledgerEntryHash || proofData.entryHash)
+          ? h('div', { style: { fontSize: 12, fontFamily: 'monospace', wordBreak: 'break-all', marginBottom: 4 } }, `Ledger Hash: ${proofData.ledgerEntryHash || proofData.entryHash}`)
+          : null,
+        (proofData.signedAt || proofData.verifiedAt)
+          ? h('div', { style: { fontSize: 13, color: '#475569', marginBottom: 8 } }, `Thời điểm ký: ${proofData.signedAt || proofData.verifiedAt}`)
+          : null,
+        h('div', { style: { padding: 10, borderRadius: 8, background: '#e0f2fe', color: '#075985', fontSize: 13 } },
+          'Chế độ xác thực công khai (Zero-PII). Vui lòng nhập Mã xác thực (Tracking Token) ở trên để xem chi tiết ePOD và nhật ký giao nhận.'),
+        )
         : null,
       trackData
         ? h(
@@ -303,6 +418,8 @@ function createPublicTrackPage(client, React, app) {
                 disabled: verifying,
                 onClick: handleVerifySignature,
                 style: {
+                  minHeight: 44,
+                  minWidth: 44,
                   padding: '8px 14px',
                   borderRadius: 6,
                   border: '1px solid #0284c7',

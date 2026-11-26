@@ -580,7 +580,7 @@ async function ensureBelongsToManyJoinCollection(db, organizationId, { sourceCol
   const fk = String(field.foreignKey || '').trim();
   const ok = String(field.otherKey || '').trim();
   const joinFieldsSpec = [
-    { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, defaultValue: organizationId, index: true, uiSchema: { type: 'string', title: 'Mã tổ chức' } },
+    { name: 'organizationId', type: 'string', interface: 'input', allowNull: false, index: true, uiSchema: { type: 'string', title: 'Mã tổ chức' } },
     { name: fk, type: 'bigInt', interface: 'integer', allowNull: false, index: true, uiSchema: { type: 'number', title: fk } },
     { name: ok, type: 'bigInt', interface: 'integer', allowNull: false, index: true, uiSchema: { type: 'number', title: ok } },
   ];
@@ -649,6 +649,14 @@ async function ensureBelongsToManyJoinCollection(db, organizationId, { sourceCol
   };
 }
 
+function stableFieldJson(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v !== 'object') return JSON.stringify(v);
+  if (Array.isArray(v)) return `[${v.map(stableFieldJson).join(',')}]`;
+  const keys = Object.keys(v).filter((k) => v[k] !== undefined).sort();
+  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableFieldJson(v[k])}`).join(',')}}`;
+}
+
 async function ensureCollectionAndFields(db, organizationId, { collectionName, collectionTitle, fields = [] }) {
   if (isProtectedCollection(collectionName)) {
     throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép sửa bảng hệ thống "${collectionName}".`);
@@ -656,13 +664,20 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
   if (!CUSTOM_COLLECTION_RE.test(collectionName)) {
     throw failBuild('COLLECTION_NAME_INVALID', 400, 'Collection mới phải theo mẫu latticeCustom<TenVietHoa>.');
   }
-  const normalizedFields = fields.map((f) => normalizeOrchestratorField(f, collectionName));
+  const normalizedFields = fields.map((f) => {
+    const nf = normalizeOrchestratorField(f, collectionName);
+    if (nf.name === 'organizationId' && Object.prototype.hasOwnProperty.call(nf, 'defaultValue')) {
+      const { defaultValue: _ignoredDefault, ...rest } = nf;
+      return rest;
+    }
+    return nf;
+  });
   const hasFieldName = (name) => normalizedFields.some((f) => f.name === name);
   if (!hasFieldName('status')) normalizedFields.unshift({ name: 'status', type: 'string', interface: 'input', defaultValue: 'draft', uiSchema: { type: 'string', title: 'Trạng thái' } });
   if (!hasFieldName('name')) normalizedFields.unshift({ name: 'name', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Tên hồ sơ' } });
   if (!hasFieldName('code')) normalizedFields.unshift({ name: 'code', type: 'string', interface: 'input', uiSchema: { type: 'string', title: 'Mã hồ sơ' } });
   if (!hasFieldName('organizationId')) {
-    normalizedFields.unshift({ name: 'organizationId', type: 'string', interface: 'input', allowNull: false, defaultValue: organizationId, uiSchema: { type: 'string', title: 'Mã tổ chức' } });
+    normalizedFields.unshift({ name: 'organizationId', type: 'string', interface: 'input', allowNull: false, uiSchema: { type: 'string', title: 'Mã tổ chức' } });
   }
 
   // Provision belongsToMany join collections BEFORE syncing main collection
@@ -680,6 +695,7 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
   const colsRepo = db?.getRepository?.('collections');
   if (!colsRepo) throw failBuild('SCHEMA_REPO_UNAVAILABLE', 503, 'Repository collections chưa sẵn sàng.');
   const existing = await colsRepo.findOne({ filter: { name: collectionName }, appends: ['fields'] });
+  let schemaMutated = !existing;
   if (!existing) {
     const created = await colsRepo.create({
       values: {
@@ -700,40 +716,67 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
       for (const f of normalizedFields) {
         const exField = existingFieldMap.get(f.name);
         if (!exField) {
+          schemaMutated = true;
           const cf = await fieldsRepo.create({ values: { ...f, collectionName } });
           if (typeof cf?.load === 'function') await cf.load();
         } else {
+          // Treat organizationId as immutable once created to avoid PG16 RLS policy column DDL alterations
+          if (f.name === 'organizationId') {
+            continue;
+          }
           // Non-destructive metadata sync: preserve deprecation when f.deprecated === true; clear when re-enabled
-          const prevUi = val(exField, 'uiSchema') && typeof val(exField, 'uiSchema') === 'object' ? { ...val(exField, 'uiSchema') } : {};
-          const prevOpts = val(exField, 'options') && typeof val(exField, 'options') === 'object' ? { ...val(exField, 'options') } : {};
+          const rawPrevUi = val(exField, 'uiSchema');
+          const rawPrevOpts = val(exField, 'options');
+          const prevUi = rawPrevUi && typeof rawPrevUi === 'object' ? { ...rawPrevUi } : {};
+          const prevOpts = rawPrevOpts && typeof rawPrevOpts === 'object' ? { ...rawPrevOpts } : {};
+          const exType = val(exField, 'type');
+          const typeMatches = exType === f.type;
           let metaPatch;
           if (f.deprecated === true) {
             const depAt = f.deprecatedAt || f.uiSchema?.deprecatedAt || prevUi.deprecatedAt || prevOpts.deprecatedAt || new Date().toISOString();
             const depReason = f.deprecatedReason || f.uiSchema?.deprecatedReason || prevUi.deprecatedReason || prevOpts.deprecatedReason || null;
-            metaPatch = {
-              ...f,
+            const nextOpts = {
+              ...prevOpts,
+              ...(f.options || {}),
               deprecated: true,
               deprecatedAt: depAt,
               ...(depReason ? { deprecatedReason: depReason } : {}),
               readOnly: true,
-              options: {
-                ...prevOpts,
-                ...(f.options || {}),
-                deprecated: true,
-                deprecatedAt: depAt,
-                ...(depReason ? { deprecatedReason: depReason } : {}),
-                readOnly: true,
-              },
-              uiSchema: {
-                ...prevUi,
-                ...(f.uiSchema || {}),
-                deprecated: true,
-                deprecatedAt: depAt,
-                ...(depReason ? { deprecatedReason: depReason } : {}),
-                'x-hidden': true,
-                readOnly: true,
-              },
             };
+            const nextUi = {
+              ...prevUi,
+              ...(f.uiSchema || {}),
+              deprecated: true,
+              deprecatedAt: depAt,
+              ...(depReason ? { deprecatedReason: depReason } : {}),
+              'x-hidden': true,
+              readOnly: true,
+            };
+            if (typeMatches) {
+              const uiChanged = stableFieldJson(rawPrevUi || {}) !== stableFieldJson(nextUi);
+              const optsChanged = stableFieldJson(rawPrevOpts || {}) !== stableFieldJson(nextOpts);
+              const depChanged = val(exField, 'deprecated') !== true;
+              if (!uiChanged && !optsChanged && !depChanged) continue;
+              metaPatch = {
+                deprecated: true,
+                deprecatedAt: depAt,
+                ...(depReason ? { deprecatedReason: depReason } : {}),
+                readOnly: true,
+                options: nextOpts,
+                uiSchema: nextUi,
+              };
+            } else {
+              schemaMutated = true;
+              metaPatch = {
+                ...f,
+                deprecated: true,
+                deprecatedAt: depAt,
+                ...(depReason ? { deprecatedReason: depReason } : {}),
+                readOnly: true,
+                options: nextOpts,
+                uiSchema: nextUi,
+              };
+            }
           } else {
             delete prevUi.deprecated;
             delete prevUi.deprecatedAt;
@@ -744,15 +787,39 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
             delete prevOpts.deprecatedAt;
             delete prevOpts.deprecatedReason;
             if (!f.readOnly) delete prevOpts.readOnly;
-            metaPatch = {
-              ...f,
-              deprecated: undefined,
-              deprecatedAt: undefined,
-              deprecatedReason: undefined,
-              ...(!f.readOnly ? { readOnly: undefined } : {}),
-              options: { ...prevOpts, ...(f.options || {}) },
-              uiSchema: { ...prevUi, ...(f.uiSchema || {}) },
-            };
+            const nextOpts = { ...prevOpts, ...(f.options || {}) };
+            const nextUi = { ...prevUi, ...(f.uiSchema || {}) };
+            if (typeMatches) {
+              const uiChanged = stableFieldJson(rawPrevUi || {}) !== stableFieldJson(nextUi);
+              const optsChanged = stableFieldJson(rawPrevOpts || {}) !== stableFieldJson(nextOpts);
+              const depChanged = Boolean(
+                val(exField, 'deprecated') === true
+                || rawPrevUi?.deprecated === true
+                || rawPrevOpts?.deprecated === true,
+              );
+              if (!uiChanged && !optsChanged && !depChanged) continue;
+              metaPatch = {
+                ...(depChanged ? {
+                  deprecated: undefined,
+                  deprecatedAt: undefined,
+                  deprecatedReason: undefined,
+                  ...(!f.readOnly ? { readOnly: undefined } : {}),
+                } : {}),
+                ...(optsChanged ? { options: nextOpts } : {}),
+                ...(uiChanged ? { uiSchema: nextUi } : {}),
+              };
+            } else {
+              schemaMutated = true;
+              metaPatch = {
+                ...f,
+                deprecated: undefined,
+                deprecatedAt: undefined,
+                deprecatedReason: undefined,
+                ...(!f.readOnly ? { readOnly: undefined } : {}),
+                options: nextOpts,
+                uiSchema: nextUi,
+              };
+            }
           }
           if (typeof exField.update === 'function') {
             await exField.update(metaPatch);
@@ -765,9 +832,11 @@ async function ensureCollectionAndFields(db, organizationId, { collectionName, c
     if (typeof existing.load === 'function') await existing.load({ resetFields: true });
   }
 
-  const colInst = db.getCollection?.(collectionName);
-  if (colInst && typeof colInst.sync === 'function') await colInst.sync({ force: false, alter: { drop: false } });
-  else if (typeof db.sync === 'function') await db.sync();
+  if (schemaMutated) {
+    const colInst = db.getCollection?.(collectionName);
+    if (colInst && typeof colInst.sync === 'function') await colInst.sync({ force: false, alter: { drop: false } });
+    else if (typeof db.sync === 'function') await db.sync();
+  }
 
   const createdIndexes = [];
   if (typeof db?.sequelize?.query === 'function') {
@@ -957,10 +1026,21 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
   if (resolved.grid?.uid && resolved.flowModelsRepo?.upsertModel) {
     const existingGridBlocks = extractGridBlockUids(resolved.grid).ordered;
     const subMap = new Map((Array.isArray(resolved.grid?.subModels?.items) ? resolved.grid.subModels.items : []).map((m) => [m.uid, m]));
-    const existingUses = new Set();
+    const extractBlockCollection = (model) => String(
+      model?.stepParams?.dxosBlockSettings?.config?.collection
+      || model?.props?.collection
+      || model?.config?.collection
+      || model?.collection
+      || '',
+    ).trim();
+    const blockDedupKey = (use, col) => `${String(use || '').trim()}::${String(col || '').trim()}`;
+    const existingBlockKeys = new Set();
+    const existingUidSet = new Set(existingGridBlocks.map(String));
     for (const uid of existingGridBlocks) {
       const m = resolved.flowModelsRepo.findModelById ? await resolved.flowModelsRepo.findModelById(uid) : subMap.get(uid);
-      if (m?.use) existingUses.add(m.use);
+      if (m?.use) {
+        existingBlockKeys.add(blockDedupKey(m.use, extractBlockCollection(m)));
+      }
     }
 
     const requestedBlocks = Array.isArray(blocks) && blocks.length
@@ -977,7 +1057,6 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
       if (!ORCHESTRATOR_ALLOWED_BLOCKS.has(blockUse)) {
         throw failBuild('BLOCK_MODEL_FORBIDDEN', 400, `BlockModel "${blockUse}" không nằm trong danh sách cho phép.`);
       }
-      if (existingUses.has(blockUse) && specItem?.allowDuplicate !== true) continue;
       const flatAliasCfg = {};
       for (const aliasKey of [
         'collection', 'statusField', 'dateField', 'titleField', 'latField', 'lngField', 'labelField',
@@ -988,6 +1067,8 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
         }
       }
       let cfg = { title: specItem?.title || pageTitle, collection: collectionName, ...flatAliasCfg, ...(specItem?.config || {}) };
+      const dedupKey = blockDedupKey(blockUse, cfg.collection);
+      if (existingBlockKeys.has(dedupKey) && specItem?.allowDuplicate !== true) continue;
       if (cfg.collection && isProtectedCollection(cfg.collection)) {
         throw failBuild('SYSTEM_COLLECTION_FORBIDDEN', 403, `Không được phép gắn block vào bảng hệ thống "${cfg.collection}".`);
       }
@@ -996,7 +1077,13 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
         const cleanBp = sanitizeCreativeBlueprintPayload({ ...recBp, title: cfg.title, theme: creativeTheme });
         cfg = { ...cfg, blueprintJson: JSON.stringify(cleanBp) };
       }
-      const uid = `dxos-app-${portalSlug}-${Date.now().toString(36)}-${i}`;
+      let uid = `dxos-app-${portalSlug}-${Date.now().toString(36)}-${i}`;
+      let uidSeq = 1;
+      while (existingUidSet.has(uid)) {
+        uid = `dxos-app-${portalSlug}-${Date.now().toString(36)}-${i}-${uidSeq++}`;
+      }
+      existingUidSet.add(uid);
+      existingBlockKeys.add(dedupKey);
       await resolved.flowModelsRepo.upsertModel({
         uid,
         use: blockUse,
@@ -1006,7 +1093,17 @@ async function ensurePortalAndBlocks(ctx, db, actor, {
         props: cfg,
         stepParams: { dxosBlockSettings: { config: cfg } },
       });
-      await placeBesideOrInsertBlock(resolved.flowModelsRepo, resolved.grid, uid, null, failBuild);
+      const placeRes = await placeBesideOrInsertBlock(resolved.flowModelsRepo, resolved.grid, uid, null, failBuild);
+      if (placeRes?.nextLayout) {
+        resolved.grid = {
+          ...resolved.grid,
+          props: { ...(resolved.grid.props || {}), ...placeRes.nextLayout },
+          stepParams: {
+            ...(resolved.grid.stepParams || {}),
+            gridSettings: { ...(resolved.grid.stepParams?.gridSettings || {}), grid: placeRes.nextLayout },
+          },
+        };
+      }
       attachedBlocks.push({ uid, use: blockUse, title: cfg.title });
     }
   }
@@ -2234,6 +2331,7 @@ async function orchestrateEnterpriseAppBuild(ctx, db, actor, spec = {}, deps = {
 
   for (const pRes of portalResults) {
     bumpSurfaceRevision(pRes.portalSlug, {
+      organizationId,
       pageTitle: pRes.pageTitle,
       message: `App Builder đã dựng phân hệ "${pRes.pageTitle}" (${verification.ok ? 'PASS' : 'NEEDS_REVIEW'})`,
     });
@@ -2558,7 +2656,50 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
   const flowRuleKeys = Array.isArray(refs.flowRuleKeys) ? refs.flowRuleKeys : [];
   const n8nWorkflowIds = Array.isArray(refs.n8nWorkflowIds) ? refs.n8nWorkflowIds : [];
 
-  // 1. Remove UI block flowModels & portal role bindings
+  // Collect cross-org & cross-app ownership via system RLS bypass BEFORE any destructive action
+  const BUILTIN_PROTECTED_ROLES = new Set([
+    'root', 'admin', 'member', 'anonymous',
+    'ldx_admin', 'ldx_manager', 'ldx_employee', 'ldx_operator',
+    'ldx_viewer', 'ldx_driver', 'ldx_executive', 'ldx_auditor',
+    'ldx_engineer', 'ldx_sysadmin', 'ldx_connector',
+  ]);
+  const sharedCollections = new Set();
+  const sharedRoles = new Set();
+  const sharedPortalPages = new Set();
+  if (typeof repo.find === 'function') {
+    const allApps = (await withOptionalSystemRls(db, (transaction) => repo.find({
+      limit: 1000,
+      ...(transaction ? { transaction } : {}),
+    }))) || [];
+    for (const other of allApps) {
+      const otherOrg = val(other, 'organizationId');
+      const otherKey = val(other, 'appKey');
+      if (otherOrg === organizationId && String(otherKey || '') === String(appKey || '')) continue;
+      const otherStatus = val(other, 'status');
+      const otherLastVer = val(other, 'lastVerificationJson') || {};
+      const otherRefs = val(other, 'artifactRefsJson') || {};
+      const keepsData = otherStatus !== 'torndown' || (otherOrg !== organizationId && otherLastVer?.keepData === true);
+      if (keepsData) {
+        const otherCols = [
+          ...(Array.isArray(otherRefs.collections) ? otherRefs.collections : []),
+          ...(Array.isArray(otherRefs.joinCollections) ? otherRefs.joinCollections : []),
+        ];
+        for (const oc of otherCols) sharedCollections.add(oc);
+      }
+      if (otherStatus !== 'torndown') {
+        for (const r of (Array.isArray(otherRefs.roles) ? otherRefs.roles : [])) {
+          if (r) sharedRoles.add(r);
+        }
+        for (const p of (Array.isArray(otherRefs.portals) ? otherRefs.portals : [])) {
+          if (p?.portalSlug) {
+            sharedPortalPages.add(`${String(p.portalSlug).trim().toLowerCase()}::${String(p.pageTitle || '').trim().toLowerCase()}`);
+          }
+        }
+      }
+    }
+  }
+
+  // 1. Remove UI block flowModels & portal role bindings (+ exclusive desktopRoutes / layouts)
   let removedBlocks = 0;
   const flowModelsRepo = db?.getRepository?.('flowModels');
   const blockUids = [...new Set(portals.flatMap((p) => (Array.isArray(p?.blockUids) ? p.blockUids : [])).filter(Boolean))];
@@ -2587,14 +2728,39 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
   }
 
   const rolesRoutesRepo = db?.getRepository?.('rolesDesktopRoutes');
-  if (rolesRoutesRepo && typeof rolesRoutesRepo.destroy === 'function' && roles.length) {
-    for (const p of portals) {
-      if (!p?.portalSlug) continue;
-      const pSet = await collectPortalRouteSet(db, p.portalSlug);
-      const pRoutes = resolvePortalRoutes(pSet.routes, pSet.links, p.layoutUid || `ldx-portal-${p.portalSlug}`, val);
-      const rIds = pRoutes.map((r) => val(r, 'id')).filter((id) => id != null);
-      if (rIds.length) {
-        await rolesRoutesRepo.destroy({ filter: { desktopRouteId: { $in: rIds }, roleName: { $in: roles } } });
+  const linksRepo = db?.getRepository?.('desktopRoutesUiLayouts');
+  const routesRepo = db?.getRepository?.('desktopRoutes');
+  const removableRoles = roles.filter((r) => r && !sharedRoles.has(r));
+  for (const p of portals) {
+    if (!p?.portalSlug) continue;
+    const pSet = await collectPortalRouteSet(db, p.portalSlug);
+    const pRoutes = resolvePortalRoutes(pSet.routes, pSet.links, p.layoutUid || `ldx-portal-${p.portalSlug}`, val);
+    const rIds = pRoutes.map((r) => val(r, 'id')).filter((id) => id != null);
+    if (rolesRoutesRepo && typeof rolesRoutesRepo.destroy === 'function' && removableRoles.length && rIds.length) {
+      await rolesRoutesRepo.destroy({ filter: { desktopRouteId: { $in: rIds }, roleName: { $in: removableRoles } } });
+    }
+    const pageKey = `${String(p.portalSlug).trim().toLowerCase()}::${String(p.pageTitle || '').trim().toLowerCase()}`;
+    if (!sharedPortalPages.has(pageKey) && routesRepo && typeof routesRepo.destroy === 'function') {
+      const resolvedPage = await resolvePageGrid(db, p.portalSlug, p.pageTitle, val);
+      const remainingOnGrid = resolvedPage.grid ? extractGridBlockUids(resolvedPage.grid).ordered.length : 0;
+      if (resolvedPage.pageRoute && remainingOnGrid === 0) {
+        const pageId = val(resolvedPage.pageRoute, 'id');
+        const parentGroupId = val(resolvedPage.pageRoute, 'parentId');
+        const tabId = resolvedPage.tabRoute ? val(resolvedPage.tabRoute, 'id') : null;
+        const exclusiveRouteIds = [tabId, pageId].filter((id) => id != null);
+        if (parentGroupId != null) {
+          const siblings = pSet.routes.filter((r) => String(val(r, 'parentId')) === String(parentGroupId) && !exclusiveRouteIds.map(String).includes(String(val(r, 'id'))));
+          if (siblings.length === 0) exclusiveRouteIds.push(parentGroupId);
+        }
+        if (exclusiveRouteIds.length) {
+          if (rolesRoutesRepo && typeof rolesRoutesRepo.destroy === 'function') {
+            await rolesRoutesRepo.destroy({ filter: { desktopRouteId: { $in: exclusiveRouteIds } } });
+          }
+          if (linksRepo && typeof linksRepo.destroy === 'function') {
+            await linksRepo.destroy({ filter: { desktopRouteId: { $in: exclusiveRouteIds } } });
+          }
+          await routesRepo.destroy({ filter: { id: { $in: exclusiveRouteIds } } });
+        }
       }
     }
   }
@@ -2670,50 +2836,77 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
     }
   }
 
-  // 5. Data preservation vs explicit reverse-topological drop (preserving collections shared by other active apps)
+  // 5. Data preservation vs explicit reverse-topological drop (preserving collections shared across apps or tenants)
   const joinCollections = Array.isArray(refs.joinCollections) ? refs.joinCollections : [];
-  const sharedCollections = new Set();
-  if (typeof repo.find === 'function') {
-    const otherRows = (await withOptionalTenantRls(db, organizationId, (transaction) => repo.find({
-      filter: { organizationId },
-      limit: 500,
-      ...(transaction ? { transaction } : {}),
-    }))) || [];
-    for (const other of otherRows) {
-      if (val(other, 'organizationId') !== organizationId) continue;
-      if (val(other, 'appKey') === appKey) continue;
-      if (val(other, 'status') === 'torndown') continue;
-      const otherRefs = val(other, 'artifactRefsJson') || {};
-      const otherCols = [
-        ...(Array.isArray(otherRefs.collections) ? otherRefs.collections : []),
-        ...(Array.isArray(otherRefs.joinCollections) ? otherRefs.joinCollections : []),
-      ];
-      for (const oc of otherCols) sharedCollections.add(oc);
-    }
-  }
-
   const dropOrderList = [...new Set([...[...joinCollections].reverse(), ...[...collections].reverse()])];
   const droppedCollections = [];
   const preservedCollections = [];
+  const partialCleanedCollections = [];
+  const removedRoles = [];
   if (!keepData) {
     const resRepo = db?.getRepository?.('dataSourcesRolesResources');
+    const rolesColsRepo = db?.getRepository?.('rolesCollections');
     const fieldsRepo = db?.getRepository?.('fields');
     const colsRepo = db?.getRepository?.('collections');
     for (const colName of dropOrderList) {
       if (!CUSTOM_COLLECTION_RE.test(colName) || isProtectedCollection(colName)) continue;
-      if (sharedCollections.has(colName)) {
-        if (resRepo && typeof resRepo.destroy === 'function' && roles.length) {
-          await resRepo.destroy({ filter: { name: colName, roleName: { $in: roles } } });
+
+      let hasForeignRows = false;
+      if (!sharedCollections.has(colName) && typeof db?.sequelize?.query === 'function') {
+        try {
+          const existsRes = await withOptionalSystemRls(db, (transaction) => db.sequelize.query(
+            `SELECT EXISTS (SELECT 1 FROM "${colName}" WHERE "organizationId" IS DISTINCT FROM :organizationId) AS "hasForeignRows";`,
+            {
+              replacements: { organizationId },
+              ...(transaction ? { transaction } : {}),
+            },
+          ));
+          const rows = Array.isArray(existsRes?.[0]) ? existsRes[0] : (Array.isArray(existsRes) ? existsRes : []);
+          const firstRow = rows[0];
+          hasForeignRows = Boolean(firstRow && (
+            firstRow.hasForeignRows === true
+            || firstRow.hasForeignRows === 1
+            || firstRow.hasForeignRows === 't'
+            || firstRow.hasForeignRows === 'true'
+          ));
+        } catch (err) {
+          const pgCode = err?.parent?.code || err?.original?.code || err?.code;
+          if (pgCode && pgCode !== '42P01' && pgCode !== '42703') {
+            throw err;
+          }
+        }
+      }
+
+      if (sharedCollections.has(colName) || hasForeignRows) {
+        if (typeof db?.sequelize?.query === 'function') {
+          await withOptionalTenantRls(db, organizationId, (transaction) => db.sequelize.query(
+            `DELETE FROM "${colName}" WHERE "organizationId" = :organizationId;`,
+            {
+              replacements: { organizationId },
+              ...(transaction ? { transaction } : {}),
+            },
+          ));
+        }
+        if (resRepo && typeof resRepo.destroy === 'function' && removableRoles.length) {
+          await resRepo.destroy({ filter: { name: colName, roleName: { $in: removableRoles } } });
+        }
+        if (rolesColsRepo && typeof rolesColsRepo.destroy === 'function' && removableRoles.length) {
+          await rolesColsRepo.destroy({ filter: { collectionName: colName, roleName: { $in: removableRoles } } });
         }
         preservedCollections.push(colName);
+        partialCleanedCollections.push(colName);
         continue;
       }
+
       // Drop physical table FIRST (reverse topological order: Join & Child before Parent); do not swallow DDL errors
       if (typeof db?.sequelize?.query === 'function') {
         await db.sequelize.query(`DROP TABLE IF EXISTS "${colName}";`);
       }
       if (resRepo && typeof resRepo.destroy === 'function') {
         await resRepo.destroy({ filter: roles.length ? { name: colName, roleName: { $in: roles } } : { name: colName } });
+      }
+      if (rolesColsRepo && typeof rolesColsRepo.destroy === 'function') {
+        await rolesColsRepo.destroy({ filter: roles.length ? { collectionName: colName, roleName: { $in: roles } } : { collectionName: colName } });
       }
       const liveCol = db?.getCollection?.(colName);
       if (liveCol?.options && liveCol.options.uiManageable) {
@@ -2737,10 +2930,40 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
       if (colsRepo && typeof colsRepo.destroy === 'function') {
         await colsRepo.destroy({ filter: { name: colName } });
       }
+      if (typeof db?.removeCollection === 'function') {
+        await db.removeCollection(colName);
+      }
       droppedCollections.push(colName);
     }
   } else {
     preservedCollections.push(...collections, ...joinCollections);
+  }
+
+  // Clean unused custom ldx_* roles (never built-in or shared across apps/orgs or assigned to users)
+  const rolesRepo = db?.getRepository?.('roles');
+  const rolesUsersRepo = db?.getRepository?.('rolesUsers');
+  const dsRolesRepo = db?.getRepository?.('dataSourcesRoles');
+  const resRepoForRoles = db?.getRepository?.('dataSourcesRolesResources');
+  if (!keepData && rolesRepo && typeof rolesRepo.destroy === 'function') {
+    for (const rName of removableRoles) {
+      if (!LDX_ROLE_RE.test(rName) || BUILTIN_PROTECTED_ROLES.has(rName)) continue;
+      if (rolesUsersRepo && typeof rolesUsersRepo.findOne === 'function') {
+        const assigned = await rolesUsersRepo.findOne({ filter: { roleName: rName } });
+        if (assigned) continue;
+      }
+      if (resRepoForRoles && typeof resRepoForRoles.findOne === 'function') {
+        const remainingGrant = await resRepoForRoles.findOne({ filter: { roleName: rName } });
+        if (remainingGrant) continue;
+      }
+      if (dsRolesRepo && typeof dsRolesRepo.destroy === 'function') {
+        await dsRolesRepo.destroy({ filter: { roleName: rName } });
+      }
+      if (rolesRoutesRepo && typeof rolesRoutesRepo.destroy === 'function') {
+        await rolesRoutesRepo.destroy({ filter: { roleName: rName } });
+      }
+      await rolesRepo.destroy({ filter: { name: rName } });
+      removedRoles.push(rName);
+    }
   }
 
   // 6. Update latticeBuiltApps status
@@ -2764,7 +2987,7 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
     toolName: 'dxos_provision_role_workspace',
     argsSummary: { operation: 'teardown_built_app', appKey, keepData },
     status: 'allowed',
-    resultSummary: `Torn down ${appKey} (keepData=${keepData}, dropped=${droppedCollections.length})`,
+    resultSummary: `Torn down ${appKey} (keepData=${keepData}, dropped=${droppedCollections.length}, partial=${partialCleanedCollections.length})`,
     ...(transaction ? { transaction } : {}),
   }));
 
@@ -2774,7 +2997,9 @@ async function teardownBuiltApp(ctx, db, actor, opts = {}, deps = {}) {
     organizationId,
     keepData,
     preservedCollections,
+    partialCleanedCollections,
     droppedCollections,
+    removedRoles,
     removedBlocks,
     deactivatedFlows,
     deactivatedDmn,
@@ -3300,10 +3525,27 @@ async function rollbackEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
     if (lastRbac) roleResults.push(lastRbac);
   }
 
-  // 3. Restore UI via restorePageSnapshot + reconcile post-target flowModels
+  // 3. Restore UI via restorePageSnapshot (strictly scoped to this app's blockUids) + reconcile post-target flowModels
   const targetPortalUidsMap = targetSnap.uiSnapshotUidsByPortal && typeof targetSnap.uiSnapshotUidsByPortal === 'object'
     ? targetSnap.uiSnapshotUidsByPortal
     : {};
+  const ownedBlockUidsByPortal = new Map();
+  const collectOwnedFromPortals = (pList) => {
+    for (const p of (Array.isArray(pList) ? pList : [])) {
+      if (!p?.portalSlug) continue;
+      if (!ownedBlockUidsByPortal.has(p.portalSlug)) ownedBlockUidsByPortal.set(p.portalSlug, new Set());
+      const set = ownedBlockUidsByPortal.get(p.portalSlug);
+      for (const u of (Array.isArray(p?.blockUids) ? p.blockUids : [])) {
+        if (u) set.add(u);
+      }
+    }
+  };
+  collectOwnedFromPortals(currentRefs.portals);
+  collectOwnedFromPortals(targetRefs.portals);
+  for (const hEntry of history) {
+    collectOwnedFromPortals(hEntry?.artifactRefsJson?.portals);
+  }
+
   const targetPortalBlockSet = new Set(
     (Array.isArray(targetRefs.portals) ? targetRefs.portals : []).flatMap((p) => (Array.isArray(p?.blockUids) ? p.blockUids : [])),
   );
@@ -3313,6 +3555,7 @@ async function rollbackEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
 
   for (const pSpec of targetValidated.normalizedPortals) {
     const snapUid = targetPortalUidsMap[pSpec.portalSlug] || targetSnap.uiSnapshotUid || '';
+    const scopedBlockUids = [...(ownedBlockUidsByPortal.get(pSpec.portalSlug) || [])];
     if (snapUid) {
       await restorePageSnapshot(db, {
         portalSlug: pSpec.portalSlug,
@@ -3320,6 +3563,7 @@ async function rollbackEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
         snapshotUid: snapUid,
         organizationId,
         allowCrossOrg: Boolean(actor?.isRoot),
+        scopedBlockUids,
       }, val);
     }
   }
@@ -3390,7 +3634,9 @@ async function rollbackEnterpriseApp(ctx, db, actor, params = {}, deps = {}) {
   const restoredPortals = [];
   for (const pSpec of targetValidated.normalizedPortals) {
     const resolved = await resolvePageGrid(db, pSpec.portalSlug, pSpec.pageTitle, val);
-    const orderedUids = resolved.grid ? extractGridBlockUids(resolved.grid).ordered : [];
+    const allGridUids = resolved.grid ? extractGridBlockUids(resolved.grid).ordered : [];
+    const ownedSet = ownedBlockUidsByPortal.get(pSpec.portalSlug);
+    const orderedUids = ownedSet && ownedSet.size ? allGridUids.filter((u) => ownedSet.has(u)) : allGridUids;
     restoredPortals.push({
       portalSlug: pSpec.portalSlug,
       layoutUid: resolved.layoutUid || `ldx-portal-${pSpec.portalSlug}`,
@@ -3488,6 +3734,8 @@ module.exports = {
   SYSTEM_PROTECTED_COLLECTIONS,
   isProtectedCollection,
   topologicalSortCollections,
+  ensureCollectionAndFields,
+  ensurePortalAndBlocks,
   orchestrateEnterpriseAppBuild,
   verifyEnterpriseApp,
   listBuiltApps,

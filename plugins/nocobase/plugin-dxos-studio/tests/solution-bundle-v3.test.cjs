@@ -1282,3 +1282,167 @@ test('Task 7: Solution Bundle v3 exports, validates, imports, and rolls back Dxo
   await rollbackLastSolutionBundle(db, { organizationId: 'org-a', snapshotUid: applied.snapshotUid });
   assert.equal(flowModels.find((m) => m.uid === 'dxos-ov-logistics-wms-ops').props.defaultTab, 'fefo');
 });
+
+test('M5 P0-06, P1-06 & P1-17: self-roundtrip normalizes legacy ldx_admin SLA, exports sanitized connectors, diff details, rollback enableWorkflows, snapshot org & RLS', async () => {
+  const {
+    exportSolutionBundle,
+    validateSolutionBundle,
+    diffSolutionBundle,
+    importSolutionBundle,
+    rollbackLastSolutionBundle,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/solution-bundle.js'));
+  const { provisionTenantAction } = require(path.join(PLUGIN_ROOT, 'src/server/domain-tenant-provisioner.js'));
+
+  const h = makeV3Harness();
+  // Seed legacy ldx_admin SLA row + connector with secrets to test normalization & stripping
+  h.slaPolicies.push({
+    id: 901,
+    organizationId: 'org-a',
+    targetCollection: 'latticeServiceTickets',
+    priority: 'normal',
+    warnAfterMinutes: 480,
+    breachAfterMinutes: 1440,
+    escalateToRole: 'ldx_admin',
+    notifyChannels: ['in_app'],
+    active: true,
+  });
+  const connectors = [
+    {
+      id: 701,
+      organizationId: 'org-a',
+      connectorKey: 'slack-ops',
+      name: 'Slack Ops',
+      connectorType: 'slack',
+      baseUrl: 'https://slack.com/api',
+      authType: 'oauth2',
+      secretVersion: 2,
+      encryptedSecretsJson: 'CIPHER_SECRET_MUST_NEVER_EXPORT',
+      oauthAccessTokenEnc: 'OAUTH_ACCESS_ENC',
+      oauthRefreshTokenEnc: 'OAUTH_REFRESH_ENC',
+      n8nCredentialId: 'cred-99',
+      oauthConfigJson: { clientId: 'cid-1', clientSecret: 'SHOULD_STRIP' },
+      active: true,
+    },
+  ];
+  const origGetRepo = h.db.getRepository.bind(h.db);
+  const origHasCol = h.db.hasCollection.bind(h.db);
+  h.db.hasCollection = (name) => name === 'latticeConnectors' || origHasCol(name);
+  h.db.getRepository = (name) => {
+    if (name === 'latticeConnectors') {
+      return {
+        find: async ({ filter } = {}) => connectors.filter((c) => !filter?.organizationId || c.organizationId === filter.organizationId),
+        findOne: async ({ filter } = {}) => connectors.find((c) => (!filter?.organizationId || c.organizationId === filter.organizationId) && (!filter?.connectorKey || c.connectorKey === filter.connectorKey)) || null,
+        create: async ({ values }) => { const row = { id: 700 + connectors.length + 1, ...structuredClone(values) }; connectors.push(row); return row; },
+        update: async ({ filter, values }) => {
+          const hit = connectors.find((c) => c.organizationId === filter.organizationId && c.connectorKey === filter.connectorKey);
+          if (hit) Object.assign(hit, structuredClone(values));
+          return hit ? 1 : 0;
+        },
+      };
+    }
+    return origGetRepo(name);
+  };
+
+  // 1. P0-06: domain-tenant-provisioner seeds ldx_manager (not forbidden ldx_admin)
+  const slaCreated = [];
+  const provOrgs = [];
+  const provDepts = [];
+  const provLocs = [];
+  const provUsers = [{ id: 1, username: 'root' }];
+  const provRolesUsers = [{ userId: 1, roleName: 'root' }];
+  const provDb = {
+    getRepository(name) {
+      if (name === 'latticeOrganizations') return { findOne: async () => null, create: async ({ values }) => { provOrgs.push(values); return values; } };
+      if (name === 'latticeDepartments') return { findOne: async () => null, create: async ({ values }) => { provDepts.push(values); return values; } };
+      if (name === 'latticeLocations') return { findOne: async () => null, create: async ({ values }) => { provLocs.push(values); return values; } };
+      if (name === 'latticePkiKeys') return { findOne: async () => null, find: async () => [], create: async ({ values }) => values };
+      if (name === 'users') return { findOne: async ({ filter }) => provUsers.find((u) => u.username === filter?.username) || null, create: async ({ values }) => { const r = { id: 2, ...values }; provUsers.push(r); return r; } };
+      if (name === 'rolesUsers') return { find: async ({ filter }) => provRolesUsers.filter((ru) => ru.userId === filter?.userId), findOne: async () => null, create: async ({ values }) => { provRolesUsers.push(values); return values; } };
+      if (name === 'roles') return { findOne: async () => ({ name: 'ldx_admin' }) };
+      if (name === 'latticeEmployees') return { findOne: async () => null, create: async ({ values }) => values };
+      if (name === 'latticeSlaPolicies') {
+        return {
+          findOne: async () => null,
+          create: async ({ values }) => { slaCreated.push(values); return values; },
+        };
+      }
+      return null;
+    },
+  };
+  await provisionTenantAction(
+    provDb,
+    {
+      method: 'POST',
+      state: { currentUser: { id: 1, username: 'root' }, currentRole: 'root' },
+      action: { params: { organizationId: 'org-new', name: 'Org New', adminUsername: 'orgnew_adm', adminPassword: 'StrongTempPassword123!' } },
+    },
+    async () => {},
+    { foundation: {}, requireBuilderAdmin: async () => ({ organizationId: 'org-new', actor: { userId: 1, username: 'root' } }) },
+  );
+  assert.equal(slaCreated.length, 4);
+  assert.equal(slaCreated.some((s) => s.escalateToRole === 'ldx_admin'), false);
+  assert.ok(slaCreated.every((s) => s.escalateToRole === 'ldx_manager'));
+
+  // 2. P0-06 + P1-06: Export normalizes legacy ldx_admin -> ldx_manager with warning, exports secret-free connectors
+  const exported = await exportSolutionBundle(h.db, { organizationId: 'org-a' });
+  const normSla = exported.governance.slaPolicies.find((s) => s.targetCollection === 'latticeServiceTickets' && s.priority === 'normal');
+  assert.equal(normSla.escalateToRole, 'ldx_manager');
+  assert.ok(Array.isArray(exported.metadata.warnings) && exported.metadata.warnings.some((w) => w.includes('ldx_admin')));
+  assert.equal(exported.connectors.length, 1);
+  assert.equal(exported.connectors[0].connectorKey, 'slack-ops');
+  assert.equal(exported.connectors[0].requiresSecretConfig, true);
+  assert.equal(JSON.stringify(exported).includes('CIPHER_SECRET_MUST_NEVER_EXPORT'), false);
+  assert.equal(JSON.stringify(exported).includes('OAUTH_ACCESS_ENC'), false);
+  assert.equal(JSON.stringify(exported).includes('SHOULD_STRIP'), false);
+  assert.equal(validateSolutionBundle(exported).valid, true);
+
+  // 3. P1-06: dryRun emits connector/secret warnings, diff returns item-level details
+  const incoming = structuredClone(exported);
+  incoming.connectors.push({
+    organizationId: 'org-a',
+    connectorKey: 'new-webhook',
+    name: 'Partner Hook',
+    connectorType: 'webhook',
+    baseUrl: 'https://hooks.example.com/events',
+    authType: 'hmac',
+    active: true,
+    requiresSecretConfig: true,
+  });
+  const diff = diffSolutionBundle(exported, incoming);
+  assert.deepEqual(diff.sections.connectors.added, ['org-a::new-webhook']);
+  assert.ok(diff.details.connectors['org-a::new-webhook']?.action === 'add');
+
+  const dryRes = await importSolutionBundle(h.db, incoming, { dryRun: true, organizationId: 'org-a' });
+  assert.equal(dryRes.valid, true);
+  assert.ok(Array.isArray(dryRes.warnings) && dryRes.warnings.some((w) => w.includes('slack-ops')));
+
+  // 4. P1-17: apply persists organizationId on latticeUiSnapshots inside withTenantRlsContext; rollback forwards enableWorkflows: false
+  const rlsSql = [];
+  h.db.sequelize = {
+    getDialect: () => 'postgres',
+    transaction: async (fn) => fn({ id: 'tx-bundle-rls' }),
+    query: async (sql, opts) => { rlsSql.push({ sql: String(sql), org: opts?.replacements?.orgId }); return [[]]; },
+  };
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  process.env.DX_PG_RLS_SESSION = 'true';
+  try {
+    const appRes = await importSolutionBundle(h.db, incoming, { dryRun: false, organizationId: 'org-a', enableWorkflows: true });
+    assert.equal(appRes.applied.connectorsUpserted, 2);
+    // Existing connector preserves encryptedSecretsJson; new connector starts inactive pending secret config
+    assert.equal(connectors[0].encryptedSecretsJson, 'CIPHER_SECRET_MUST_NEVER_EXPORT');
+    assert.equal(connectors[1].connectorKey, 'new-webhook');
+    assert.equal(connectors[1].active, false);
+    assert.equal(h.uiSnapshots[0].organizationId, 'org-a');
+    assert.ok(rlsSql.some((q) => q.sql.includes("set_config('app.current_org'") && q.org === 'org-a'));
+
+    rlsSql.length = 0;
+    const rbRes = await rollbackLastSolutionBundle(h.db, { organizationId: 'org-a', snapshotUid: appRes.snapshotUid, enableWorkflows: false });
+    assert.equal(rbRes.rolledBack, true);
+    assert.ok(rlsSql.some((q) => q.sql.includes("set_config('app.current_org'") && q.org === 'org-a'));
+    const wfRows = await h.db.getRepository('workflows').find({});
+    assert.equal(wfRows.find((w) => w.key === 'wf-org-a').enabled, false, 'rollback must respect enableWorkflows: false');
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
+});

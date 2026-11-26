@@ -84,3 +84,130 @@ test('20261129000100-sync-role-presets migration idempotently backfills missing 
   assert.equal(rows.length,8);
   assert.equal(rows.some(r=>r.name==='ldx_operator'),true);
 });
+test('T1-AISTUDIO-04: installIncidentManagerActionGrants and 20261208000200 migration grant create/update on latticeIncidentCases to ldx_manager and ldx_admin only', async () => {
+  const { installIncidentManagerActionGrants } = require('../src/server/native-roles');
+  const roles = ['ldx_manager', 'ldx_admin', 'ldx_employee', 'ldx_driver', 'ldx_director'];
+  const resources = [
+    { name: 'latticeIncidentCases', roleName: 'ldx_manager', dataSourceKey: 'main', usingActionsConfig: true, actions: [{ name: 'view', fields: ['id', 'code'] }] },
+    { name: 'latticeIncidentCases', roleName: 'ldx_employee', dataSourceKey: 'main', usingActionsConfig: true, actions: [{ name: 'view', fields: ['id'] }] },
+  ];
+  const db = {
+    sequelize: { transaction: (cb) => cb({}) },
+    getRepository(name) {
+      if (name === 'roles') return { findOne: async ({ filter }) => (roles.includes(filter.name) ? { name: filter.name } : null) };
+      if (name === 'dataSourcesRolesResources') {
+        return {
+          findOne: async ({ filter }) => resources.find((row) => Object.entries(filter).every(([k, v]) => row[k] === v)) || null,
+          create: async ({ values }) => { resources.push(values); return values; },
+          update: async ({ filter, values }) => {
+            const idx = resources.findIndex((row) => Object.entries(filter).every(([k, v]) => row[k] === v));
+            if (idx >= 0) resources[idx] = { ...resources[idx], ...values };
+            return [resources[idx]];
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  await installIncidentManagerActionGrants(db);
+  await installIncidentManagerActionGrants(db);
+
+  const mgrRes = resources.find((r) => r.roleName === 'ldx_manager' && r.name === 'latticeIncidentCases');
+  const admRes = resources.find((r) => r.roleName === 'ldx_admin' && r.name === 'latticeIncidentCases');
+  const empRes = resources.find((r) => r.roleName === 'ldx_employee' && r.name === 'latticeIncidentCases');
+  const drvRes = resources.find((r) => r.roleName === 'ldx_driver' && r.name === 'latticeIncidentCases');
+
+  assert.deepEqual(mgrRes.actions.map((a) => a.name), ['view', 'create', 'update']);
+  assert.deepEqual(admRes.actions.map((a) => a.name), ['view', 'create', 'update']);
+  assert.equal(mgrRes.actions.find((a) => a.name === 'create').fields.includes('organizationId'), false);
+  assert.deepEqual(empRes.actions.map((a) => a.name), ['view']);
+  assert.equal(drvRes, undefined);
+
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  class MockMigration { constructor(ctx) { this.context = ctx; } }
+  Module._load = function (req, parent, isMain) {
+    if (req === '@nocobase/server') return { Migration: MockMigration };
+    return origLoad.call(this, req, parent, isMain);
+  };
+  let Mig;
+  try {
+    Mig = require('../src/server/migrations/20261208000200-incident-manager-create-grant');
+  } finally {
+    Module._load = origLoad;
+  }
+  const mig = new Mig({ db });
+  assert.equal(mig.on, 'afterSync');
+  await mig.up();
+});
+
+test('LatticeFoundationPlugin ensures incident manager action grants safely on afterStart, start, and afterEnable', async () => {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  class MockPlugin {
+    constructor(app, options = {}) {
+      this.app = app;
+      this.db = app?.db;
+      this.options = options;
+    }
+  }
+  const Gateway = { registerRequestHandler() {}, unregisterRequestHandler() {} };
+  Module._load = function (req, parent, isMain) {
+    if (req === '@nocobase/server') return { Plugin: MockPlugin, Gateway };
+    if (req === '@nocobase/database') return { defineCollection: (def) => def };
+    return origLoad.call(this, req, parent, isMain);
+  };
+  try {
+    delete require.cache[require.resolve('../src/server/index')];
+    const PluginCls = require('../src/server/index');
+    const roles = ['ldx_manager', 'ldx_admin'];
+    const resources = [
+      { id: 10, name: 'latticeIncidentCases', roleName: 'ldx_manager', dataSourceKey: 'main', usingActionsConfig: true, actions: [{ name: 'view', fields: ['id'] }] },
+    ];
+    const listeners = {};
+    const mockDb = {
+      sequelize: { getDialect: () => 'sqlite', query: async () => [[]], transaction: (cb) => cb({}) },
+      getRepository(name) {
+        if (name === 'roles') return { findOne: async ({ filter }) => (roles.includes(filter.name) ? { name: filter.name } : null) };
+        if (name === 'dataSourcesRolesResources') {
+          return {
+            findOne: async ({ filter }) => resources.find((row) => Object.entries(filter).every(([k, v]) => row[k] === v)) || null,
+            create: async ({ values }) => { resources.push(values); return values; },
+            update: async ({ filter, values }) => {
+              const idx = resources.findIndex((row) => Object.entries(filter).every(([k, v]) => row[k] === v));
+              if (idx >= 0) resources[idx] = { ...resources[idx], ...values };
+              return [resources[idx]];
+            },
+          };
+        }
+        return null;
+      },
+      on() {},
+    };
+    const mockApp = {
+      db: mockDb,
+      once(evt, fn) { (listeners[evt] = listeners[evt] || []).push(fn); },
+      resourceManager: { define() {}, use() {} },
+      acl: { allow() {}, use() {}, registerSnippet() {} },
+      pubSubManager: { subscribe() {}, publish() {} },
+    };
+    const plugin = new PluginCls(mockApp, {});
+    await plugin.load();
+    assert.equal((listeners.afterStart || []).length, 1);
+    for (const fn of listeners.afterStart) fn();
+    await new Promise((r) => setTimeout(r, 20));
+
+    const mgr = resources.find((r) => r.roleName === 'ldx_manager');
+    const adm = resources.find((r) => r.roleName === 'ldx_admin');
+    assert.deepEqual(mgr.actions.map((a) => a.name), ['view', 'create', 'update']);
+    assert.deepEqual(adm.actions.map((a) => a.name), ['view', 'create', 'update']);
+
+    // start() and afterEnable() also succeed safely
+    await plugin.start();
+    await plugin.afterEnable();
+    await plugin.unload();
+  } finally {
+    Module._load = origLoad;
+  }
+});

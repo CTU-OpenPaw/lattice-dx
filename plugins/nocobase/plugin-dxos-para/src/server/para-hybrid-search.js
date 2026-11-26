@@ -24,6 +24,12 @@ const readField = (row, key, fallback) => {
   return v === undefined ? fallback : v;
 };
 
+function isDocStatusActive(row) {
+  const st = readField(row, 'status', null);
+  if (st == null || String(st).trim() === '') return true;
+  return String(st).trim().toLowerCase() === 'active';
+}
+
 function stripVietnameseDiacritics(input) {
   return String(input || '')
     .normalize('NFD')
@@ -346,16 +352,30 @@ function extractDocumentSearchText(doc) {
   ].filter(Boolean).join(' '));
 }
 
+function escapeSearchRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function lexicalOverlapScore(queryNorm, queryTokens, hayNorm, titleNorm) {
   if (!queryNorm) return 1;
+  const hayText = String(hayNorm || '');
+  const titleText = String(titleNorm || '');
+  const hayTokens = new Set(hayText.split(/[\s/_.-]+/).filter(Boolean));
+  const titleTokens = new Set(titleText.split(/[\s/_.-]+/).filter(Boolean));
   let score = 0;
-  if (hayNorm.includes(queryNorm)) score += 6;
-  if (titleNorm.includes(queryNorm)) score += 4;
+  if (queryTokens.length <= 1 && !/[\s/_.-]/.test(queryNorm)) {
+    if (hayTokens.has(queryNorm)) score += 6;
+    if (titleTokens.has(queryNorm)) score += 4;
+  } else {
+    const phraseRe = new RegExp(`(?:^|[\\s/_.-])${escapeSearchRegExp(queryNorm)}(?:$|[\\s/_.-])`);
+    if (phraseRe.test(hayText)) score += 6;
+    if (phraseRe.test(titleText)) score += 4;
+  }
   let matched = 0;
   for (const tok of queryTokens) {
-    if (hayNorm.includes(tok)) {
+    if (hayTokens.has(tok)) {
       matched += 1;
-      score += titleNorm.includes(tok) ? 2.5 : 1.5;
+      score += titleTokens.has(tok) ? 2.5 : 1.5;
     }
   }
   if (queryTokens.length > 0 && matched === queryTokens.length) score += 3;
@@ -396,7 +416,7 @@ function scoreRrfEntries(entries, queryNorm, cap, k = 60) {
     return out;
   }
 
-  const filtered = entries.filter((e) => e.lex > 0 || e.sem >= 0.18);
+  const filtered = entries.filter((e) => e.lex > 0 || (e.embeddingEngine === 'neural' && e.sem >= 0.18));
   const byLex = [...filtered].sort((a, b) => b.lex - a.lex);
   const bySem = [...filtered].sort((a, b) => b.sem - a.sem);
   const lexRank = new Map(byLex.map((e, i) => [e, e.lex > 0 ? i + 1 : filtered.length + 50]));
@@ -540,7 +560,9 @@ function buildChunkCandidate(chunk, docById, query, queryNorm, queryTokens, quer
 }
 
 function rankHybridDocuments(query, docs = [], { limit = 10, k = 60 } = {}) {
-  const list = Array.isArray(docs) ? docs : [];
+  const list = (Array.isArray(docs) ? docs : []).filter((doc) => (
+    readField(doc, 'active', true) !== false && isDocStatusActive(doc)
+  ));
   const cap = Math.max(1, Math.min(30, Number(limit) || 10));
   const queryNorm = normalizeSearchText(query);
   const queryTokens = tokenizeVietnamese(query);
@@ -596,6 +618,11 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
              AND "embeddingDim" = :dim
              AND (:org::text IS NULL OR "organizationId" = :org)
              AND (:paraSpace::text IS NULL OR "paraSpace" = :paraSpace)
+             AND NOT EXISTS (
+               SELECT 1 FROM "latticeParaDocuments" d
+               WHERE d.id = "latticeParaChunks"."documentId"
+                 AND (d.active = false OR (d.status IS NOT NULL AND d.status <> 'active'))
+             )
            ORDER BY embedding <=> CAST(:vec AS vector) ASC
            LIMIT 200`,
           {
@@ -622,6 +649,11 @@ async function fetchChunkCandidates(db, { organizationId, paraSpace, queryNorm, 
          WHERE active = true
            AND (:org::text IS NULL OR "organizationId" = :org)
            AND (:paraSpace::text IS NULL OR "paraSpace" = :paraSpace)
+           AND NOT EXISTS (
+             SELECT 1 FROM "latticeParaDocuments" d
+             WHERE d.id = "latticeParaChunks"."documentId"
+               AND (d.active = false OR (d.status IS NOT NULL AND d.status <> 'active'))
+           )
            AND ("searchVector" @@ plainto_tsquery('simple', :qNorm) OR "searchVector" @@ plainto_tsquery('simple', :qRaw))
          ORDER BY "pgTsRank" DESC
          LIMIT 200`,
@@ -675,7 +707,7 @@ async function executeHybridSearch(db, {
     ? queryEmb.vector
     : computeDeterministicEmbedding(queryNorm);
 
-  const { chunkRows, docRows } = await runParaRlsOp(db, organizationId, async (transaction) => {
+  const { chunkRows, docRows, inactiveDocIds } = await runParaRlsOp(db, organizationId, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
     const fetchedChunks = await fetchChunkCandidates(db, {
       organizationId,
@@ -686,23 +718,31 @@ async function executeHybridSearch(db, {
       transaction,
     });
     const docFilter = {
-      active: true,
       ...(organizationId ? { organizationId } : {}),
-      ...(paraSpace ? { paraSpace } : {}),
     };
     const rawDocRows = docRepo && typeof docRepo.find === 'function'
-      ? ((await docRepo.find({ filter: docFilter, limit: 500, sort: ['-id'], ...txOpt })) || [])
+      ? ((await docRepo.find({ filter: docFilter, limit: 1000, sort: ['-id'], ...txOpt })) || [])
       : [];
-    const filteredDocs = rawDocRows.filter((d) => (
-      (!organizationId || readField(d, 'organizationId', null) === organizationId)
-      && (!paraSpace || readField(d, 'paraSpace', null) === paraSpace)
-      && readField(d, 'active', true) !== false
-    ));
+    const inactiveIds = new Set();
+    const filteredDocs = [];
+    for (const d of rawDocRows) {
+      const did = readField(d, 'id', null);
+      if (readField(d, 'active', true) === false || !isDocStatusActive(d)) {
+        if (did != null) inactiveIds.add(String(did));
+        continue;
+      }
+      if (organizationId && readField(d, 'organizationId', null) !== organizationId) continue;
+      if (paraSpace && readField(d, 'paraSpace', null) !== paraSpace) {
+        if (did != null) inactiveIds.add(String(did));
+        continue;
+      }
+      filteredDocs.push(d);
+    }
 
     if (db?.sequelize?.query && queryNorm && filteredDocs.length) {
       try {
         const [tsRows] = await runParaSavepoint(db, (spTx) => db.sequelize.query(
-          'SELECT id, ts_rank_cd("searchVector", plainto_tsquery(\'simple\', :q)) AS rank FROM "latticeParaDocuments" WHERE active = true AND (:org::text IS NULL OR "organizationId" = :org) AND "searchVector" @@ plainto_tsquery(\'simple\', :q) LIMIT 100',
+          'SELECT id, ts_rank_cd("searchVector", plainto_tsquery(\'simple\', :q)) AS rank FROM "latticeParaDocuments" WHERE active = true AND (status IS NULL OR status = \'active\') AND (:org::text IS NULL OR "organizationId" = :org) AND "searchVector" @@ plainto_tsquery(\'simple\', :q) LIMIT 100',
           {
             replacements: { q: queryNorm, org: organizationId || null },
             ...((spTx || transaction) ? { transaction: spTx || transaction } : {}),
@@ -720,7 +760,7 @@ async function executeHybridSearch(db, {
       }
     }
 
-    return { chunkRows: fetchedChunks, docRows: filteredDocs };
+    return { chunkRows: fetchedChunks, docRows: filteredDocs, inactiveDocIds: inactiveIds };
   });
 
   const docById = new Map();
@@ -733,6 +773,9 @@ async function executeHybridSearch(db, {
   const candidates = [];
   for (const chunk of chunkRows) {
     const did = readField(chunk, 'documentId', null);
+    if (did != null && inactiveDocIds.has(String(did))) continue;
+    const parentDoc = did != null ? docById.get(String(did)) || null : null;
+    if (parentDoc && !isDocStatusActive(parentDoc)) continue;
     if (did != null) chunkedDocIds.add(String(did));
     candidates.push(buildChunkCandidate(chunk, docById, query, queryNorm, queryTokens, queryEmb, detQueryVec));
   }

@@ -571,18 +571,18 @@ function buildInitialSimContext(table) {
 
 function editorStyles() {
   return {
-    root: { display: 'grid', gap: 12, padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff' },
+    root: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 12, padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff' },
     header: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10, alignItems: 'end' },
     toolbar: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between' },
     label: { display: 'block', fontSize: 11, fontWeight: 600, color: '#475569', marginBottom: 4 },
     input: { width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
-    cellInput: { width: '100%', minWidth: 130, padding: '5px 7px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, fontFamily: 'monospace', boxSizing: 'border-box', background: '#ffffff' },
+    cellInput: { width: '100%', minWidth: 112, padding: '4px 6px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, fontFamily: 'monospace', boxSizing: 'border-box', background: '#ffffff' },
     tableWrap: { width: '100%', maxWidth: '100%', overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 },
     table: { width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 12 },
-    thInput: { textAlign: 'left', padding: '7px 8px', background: '#eff6ff', borderBottom: '2px solid #bfdbfe', color: '#1e3a8a', minWidth: 210 },
-    thOutput: { textAlign: 'left', padding: '7px 8px', background: '#f0fdf4', borderBottom: '2px solid #bbf7d0', color: '#14532d', minWidth: 170 },
-    thMeta: { textAlign: 'left', padding: '7px 8px', background: '#f8fafc', borderBottom: '2px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' },
-    td: { padding: '6px 8px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'middle', minWidth: 155 },
+    thInput: { textAlign: 'left', padding: '6px 6px', background: '#eff6ff', borderBottom: '2px solid #bfdbfe', color: '#1e3a8a', minWidth: 175 },
+    thOutput: { textAlign: 'left', padding: '6px 6px', background: '#f0fdf4', borderBottom: '2px solid #bbf7d0', color: '#14532d', minWidth: 148 },
+    thMeta: { textAlign: 'left', padding: '6px 6px', background: '#f8fafc', borderBottom: '2px solid #e2e8f0', color: '#475569', whiteSpace: 'nowrap' },
+    td: { padding: '5px 6px', borderBottom: '1px solid #f1f5f9', verticalAlign: 'middle', minWidth: 120 },
     btn: (primary = false, danger = false, disabled = false) => ({
       padding: '6px 11px',
       borderRadius: 6,
@@ -743,6 +743,15 @@ function createDmnVisualEditor(ReactLib, antdLib) {
               ...(props.organizationId ? { organizationId: props.organizationId } : {}),
               tableKey: table.tableKey,
               context: evalCtx,
+              table: {
+                tableKey: table.tableKey,
+                name: table.name,
+                description: table.description,
+                hitPolicy: table.hitPolicy,
+                inputsJson: table.inputsJson,
+                outputsJson: table.outputsJson,
+                rulesJson: table.rulesJson,
+              },
             },
           });
           res = unwrapData(apiRes);
@@ -914,23 +923,24 @@ function createDmnVisualEditor(ReactLib, antdLib) {
                     value: col.name,
                     title: col.name,
                     onChange: (e) => commitTable((p) => updateOutputColumn(p, idx, { name: e.target.value })),
-                    style: { ...S.cellInput, minWidth: 125, flex: '1 1 125px', fontWeight: 700, color: '#14532d' },
+                    style: { ...S.cellInput, minWidth: 120, flex: '1 1 120px', fontWeight: 700, color: '#14532d' },
                   }),
                   table.outputsJson.length > 1 ? h('button', {
                     type: 'button',
                     'data-testid': `dmn-remove-output-${idx}`,
                     onClick: () => commitTable((p) => removeOutputColumn(p, idx)),
-                    style: { ...S.btn(false, true), flexShrink: 0 },
+                    style: { ...S.btn(false, true), padding: '4px 8px', flexShrink: 0 },
                   }, '×') : null,
                 ),
               )),
-              h('th', { style: { ...S.thMeta, minWidth: 160 } }, 'Mô tả'),
-              h('th', { style: { ...S.thMeta, minWidth: 64 } }, 'Xóa'),
+              table.hitPolicy === 'PRIORITY' ? h('th', { style: { ...S.thMeta, minWidth: 82 } }, 'Độ ưu tiên') : null,
+              h('th', { style: { ...S.thMeta, minWidth: 140 } }, 'Mô tả'),
+              h('th', { style: { ...S.thMeta, minWidth: 56 } }, 'Xóa'),
             ),
           ),
           h('tbody', null,
             table.rulesJson.length === 0
-              ? h('tr', null, h('td', { colSpan: table.inputsJson.length + table.outputsJson.length + 3, style: { ...S.td, color: '#64748b' } }, 'Chưa có luật nào. Nhấn "+ Thêm Luật" để tạo.'))
+              ? h('tr', null, h('td', { colSpan: table.inputsJson.length + table.outputsJson.length + (table.hitPolicy === 'PRIORITY' ? 4 : 3), style: { ...S.td, color: '#64748b' } }, 'Chưa có luật nào. Nhấn "+ Thêm Luật" để tạo.'))
               : table.rulesJson.map((rule, rIdx) => {
                 const isMatched = matchedSet.has(rIdx);
                 const rowStyle = isMatched ? { background: '#dcfce7', outline: '2px solid #16a34a' } : undefined;
@@ -977,14 +987,27 @@ function createDmnVisualEditor(ReactLib, antdLib) {
                       }),
                     );
                   }),
-                  h('td', { style: { ...S.td, minWidth: 160 } },
+                  table.hitPolicy === 'PRIORITY' ? h('td', { style: { ...S.td, minWidth: 88 } },
+                    h('input', {
+                      'data-testid': `dmn-rule-priority-${rIdx}`,
+                      type: 'number',
+                      value: Number.isFinite(Number(rule.priority)) ? String(rule.priority) : '0',
+                      onChange: (e) => {
+                        const raw = e?.target?.value;
+                        const num = Number(raw);
+                        commitTable((p) => updateRuleMeta(p, rIdx, { priority: Number.isFinite(num) ? num : 0 }));
+                      },
+                      style: { ...S.input, minWidth: 74 },
+                    }),
+                  ) : null,
+                  h('td', { style: { ...S.td, minWidth: 140 } },
                     h('input', {
                       'data-testid': `dmn-rule-desc-${rIdx}`,
                       type: 'text',
                       value: rule.description || '',
                       placeholder: 'Ghi chú luật',
                       onChange: (e) => commitTable((p) => updateRuleMeta(p, rIdx, { description: e.target.value })),
-                      style: { ...S.input, minWidth: 160 },
+                      style: { ...S.input, minWidth: 140 },
                     }),
                   ),
                   h('td', { style: S.td },

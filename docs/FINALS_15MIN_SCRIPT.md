@@ -31,7 +31,7 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
   - **Đội ngũ Logistics 5 bước:** `native.lab.manager@example.invalid`, `native.lab.worker@example.invalid`, `native.lab.dispatcher@example.invalid`, `native.lab.driver@example.invalid` (mật khẩu chung `NativeLab-2026!`)
 - **Các Tab Trình duyệt Chuẩn bị sẵn:**
   1. `http://localhost:13014/admin/settings/dxos-ai` (Trung tâm 6 Phân hệ, AI Workforce & HITL)
-  2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **9 Tabs**, 6 Governance Consoles & GitOps Bundle v3) & `http://localhost:13014/admin/settings/workflow/automation` (**Workflow -> Workflow Automation**: LatticeFlow v2 Canvas-First Studio — 24 node types, HITL Pause/Resume & **Agent Chat gốc `dxos-architect`** đồng bộ SSE)
+  2. `http://localhost:13014/admin/settings/dxos-studio` (Control Studio **11 Tabs**, 6 Governance Consoles & GitOps Bundle v3) & `http://localhost:13014/admin/settings/workflow/automation` (**Workflow -> Workflow Automation**: LatticeFlow v2 Canvas-First Studio — 24 node types, HITL Pause/Resume & **Agent Chat gốc `dxos-architect`** đồng bộ SSE)
   3. `http://localhost:13014/p/logistics` (Logistics 5 bước, **`DxosWmsOpsBlockModel`**, Kanban/Schedule, PKI, In chứng từ **QR ISO SVG** & `/v/track/:code` Ed25519)
   4. `http://localhost:13014/p/incidents` (**WebGIS MapLibre**, IIoT Digital Twin & GraphRAG Enterprise Agent)
   5. `http://localhost:13014/p/cmms` & `http://localhost:13014/p/partner-claims` (CMMS & Partner Settlement `CLM-V100-001` từ Business Packs 1-nhấp)
@@ -84,11 +84,11 @@ NOCOBASE_ADMIN_PASSWORD="<admin-password>" pnpm seed:v100-showcase -- --origin=h
      curl -s http://localhost:13014/api/dxos:openapi | head -n 30
      pnpm acceptance:headless-paas -- --origin=http://localhost:13014
      pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
-     pnpm acceptance:broker-automation -- --origin=http://localhost:13014
+     pnpm acceptance:broker-automation-builder -- --origin=http://localhost:13014
      pnpm release:sbom -- --check
      pnpm pof:check
      ```
-     - Nêu rõ: **Headless PaaS (QR SVG + Ed25519 + Delegation), AI/MCP (17 Tools + App Builder + HITL) & Broker/n8n/PKCE PASS**; `/api/dxos:openapi` phản chiếu sống cả `latticeCustomWorkOrders` & `latticeCustomPartnerClaims`; **SBOM CycloneDX 1.5** (`257` components: `workspace=12, npm=226, oci=19`, `257/257` resolved (`fsevents@2.3.3 = MIT`, 0 `NONE`, 0 BSL-1.1)); **PoF `PASS`**.
+     - Nêu rõ: **Headless PaaS (QR SVG + Ed25519 + Delegation), AI/MCP (20 Tools + App Builder + HITL) & Broker/n8n/PKCE PASS**; `/api/dxos:openapi` phản chiếu sống cả `latticeCustomWorkOrders` & `latticeCustomPartnerClaims`; **SBOM CycloneDX 1.5** (`257` components: `workspace=12, npm=226, oci=19`, `257/257` resolved (`fsevents@2.3.3 = MIT`, 0 `NONE`, 0 BSL-1.1)); **PoF `PASS`**.
 
 ### 13:15 – 15:00 · Chứng minh Negative RBAC (`403`) & Kết luận
 - **Màn hình:** Đăng xuất `admin@nocobase.com` -> đăng nhập **`native.lab.employee@example.invalid` / `NativeLab-2026!`**.
@@ -109,7 +109,7 @@ pnpm pof:check
 pnpm release:sbom -- --check
 node --test scripts/tests/oss-pof-audit.test.mjs scripts/tests/generate-sbom.test.mjs scripts/tests/infra-compose-security.test.mjs
 
-# 2. Chứng minh AI Intent Router + App Builder + Security Refusal + GraphRAG + Flow Architect offline (112/112 ca)
+# 2. Chứng minh AI Intent Router + App Builder + Security Refusal + GraphRAG + Flow Architect offline (163/163 ca)
 node scripts/eval-vietnamese-nl-agent.mjs --min-pass=95
 
 # 3. Chứng minh toàn bộ unit & integration tests của 7 plugin (không cần LLM API key)
@@ -129,7 +129,7 @@ pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
 2. **Hỏi: Tại sao hệ thống không dùng ThingsBoard, EMQX hay các dịch vụ cache nguồn hạn chế cho phần IIoT và session/rate-limit?**
    - **Đáp:** ThingsBoard (bản mới), EMQX Enterprise và các bản cache nguồn đóng/hạn chế không đạt chuẩn OSI. Để bảo đảm **100% Pure-OSI License Purity**, CTU-OpenPaw sử dụng **Valkey `8.1` (`valkey/valkey:8.1-alpine`, `BSD-3-Clause`, tương thích giao thức `PUBSUB_ADAPTER=redis`)**, **Eclipse Mosquitto `2.0.21` Dynamic Security (`EPL-2.0 OR BSD-3-Clause`)**, **Node-RED `4.0.9` (`Apache-2.0`)**, lưu chuỗi thời gian IIoT trực tiếp trên **PostgreSQL `16` (`latticeTelemetryPoints`, không cần container `timescaledb` tách rời)**, cùng **Prometheus `v3.3.0` (`Apache-2.0`)** và **OTel Collector `0.123.0` (`Apache-2.0`)**, có `scripts/generate-sbom.mjs` tự động chặn cứng từ khóa `BSL-1.1`/`thingsboard`/`emqx`.
 3. **Hỏi: Nếu một lập trình viên quên lọc `organizationId` ở tầng plugin thì dữ liệu đa công ty có rò rỉ không?**
-   - **Đáp:** Hệ thống áp dụng **phòng thủ nhiều tầng (Defense-in-Depth)**: ngoài middleware scope `before: 'latticeNativeScope'` ở tầng ứng dụng, PostgreSQL chạy qua vai trò không đặc quyền superuser **`nocobase_app`** và bật **`FORCE ROW LEVEL SECURITY` (`lattice_tenant_isolation`, `20261127000100`) trên cả 42 bảng `lattice*` + mọi bảng động `latticeCustom*`** (`pg-rls.js` + `AsyncLocalStorage` transaction bridge với `set_config('app.current_org', ..., true)` fail-closed và kiểm chứng `pg_class.relrowsecurity` trong `domain-builder.js`), chặn triệt để rò rỉ chéo tổ chức ngay tại tầng CSDL.
+   - **Đáp:** Hệ thống áp dụng **phòng thủ nhiều tầng (Defense-in-Depth)**: ngoài middleware scope `before: 'latticeNativeScope'` ở tầng ứng dụng, PostgreSQL chạy qua vai trò không đặc quyền superuser **`nocobase_app`** và bật **`FORCE ROW LEVEL SECURITY` (`lattice_tenant_isolation`, `20261127000100`) trên cả 56 bảng tĩnh `lattice*` + mọi bảng động `latticeCustom*`** (`pg-rls.js` + `AsyncLocalStorage` transaction bridge với `set_config('app.current_org', ..., true)` fail-closed và kiểm chứng `pg_class.relrowsecurity` trong `domain-builder.js`), chặn triệt để rò rỉ chéo tổ chức ngay tại tầng CSDL.
 4. **Hỏi: AI Agent có thể tự ý sửa nhiệt độ kho lạnh hay tự phê duyệt đơn hàng do ảo giác (hallucination) không?**
    - **Đáp:** Không thể. Mọi tool ghi/điều khiển (`dxos_execute_record_action`, `dxos_alarm_action`, `dxos_twin_set_desired`, `dxos_wms_hold_lot`) bị khóa sau **Hàng chờ HITL (`latticeAiApprovalQueue`)** và kiểm tra chống tự duyệt (`requesterUserId !== approver`). Riêng Digital Twin tự động chặn cứng mọi thay đổi setpoint lệch **`> 2.0°C`** để bắt buộc con người có quyền ACL xác nhận trước khi Node-RED phát lệnh MQTT downlink. Mọi tham số và đầu ra đều qua bộ che PII Việt Nam và kiểm soát hạn mức PostgreSQL.
 5. **Hỏi: Tài xế mất sóng 4G trong hầm kho lạnh thì thao tác ePOD trên `/v/mobile` xử lý thế nào?**

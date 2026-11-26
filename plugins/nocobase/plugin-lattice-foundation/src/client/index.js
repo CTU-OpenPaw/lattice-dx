@@ -28,7 +28,7 @@
   const {createNativeBuilderNavigation}=require('./native-builder-navigation');
   const {createNativePortalManager, resolveLegacyMobileRedirect}=require('./native-portal-manager');
   const {createIncidentEvidence}=require('./native-incident-evidence');
-  const {createBrandLogo, registerSignInLogo}=require('./native-branding');
+  const {createBrandLogo, registerSignInLogo, installSignInApiGuards}=require('./native-branding');
   const {createNotificationBellProvider}=require('./notification-bell');
   function useLatticeFormAction(manifest, blockId) {
     const apiClient = client.useAPIClient();
@@ -88,6 +88,7 @@
         return;
       }
       const BrandLogo=createBrandLogo(client,React);
+      installSignInApiGuards(this.app);
       registerSignInLogo(this.app,React,BrandLogo);
       const portalManager=createNativePortalManager(client,React,antd,this.app,router,icons,{clientV2});
       await portalManager?.preloadPortals?.();
@@ -202,8 +203,8 @@
           }, []);
           return React.createElement('div', { role: 'status', style: { padding: 32, textAlign: 'center', color: '#64748b' } }, 'Đang chuyển đến Cổng Di động...');
         };
-        this.app.router.add('lattice-mobile-v2', { path: '/mobile', Component: MobileV2Redirect });
-        this.app.router.add('lattice-mobile-v2-sub', { path: '/mobile/*', Component: MobileV2Redirect });
+        this.app.router.add('lattice-mobile-v2', { path: '/mobile', Component: MobileV2Redirect, skipAuthCheck: true });
+        this.app.router.add('lattice-mobile-v2-sub', { path: '/mobile/*', Component: MobileV2Redirect, skipAuthCheck: true });
       }
       if (typeof window !== 'undefined' && window.__nocobase_app_client_entry_mode__ === 'legacy-default' && typeof this.app.router?.add === 'function') {
         const TrackV2Redirect = () => {

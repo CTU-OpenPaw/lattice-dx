@@ -86,6 +86,8 @@ const TENANT_RLS_TABLES = Object.freeze([
   'latticeApprovalRequests',
   'latticePublicForms',
   'latticePublicFormSubmissions',
+  'latticeAiQuotaPolicies',
+  'latticeUiSnapshots',
   'lattice_native_request_attachments',
   'lattice_native_request_uploads',
 ]);

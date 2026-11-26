@@ -8,6 +8,7 @@
  */
 'use strict';
 
+const dns = require('node:dns');
 const fs = require('node:fs');
 const net = require('node:net');
 const { recordAiAuditLog, resolveDefaultOrganizationId } = require('./ai-schemas');
@@ -112,11 +113,172 @@ const QUICK_CONNECT_PROVIDER_PRESETS = Object.freeze({
 });
 
 const QUICK_CONNECT_LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', 'host.docker.internal']);
+const QUICK_CONNECT_LOCAL_CAPABLE_PROVIDERS = new Set(['ollama', '9router', 'openai-completions']);
+const DEFAULT_LOCAL_LLM_PORTS = new Set([11434, 20128, 1234, 8000]);
 const QUICK_CONNECT_SERVICE_RE = /^[a-z0-9][a-z0-9_-]{1,62}$/;
 const QUICK_CONNECT_PRIVATE_IPV4_RE = /^(?:0\.\d+\.\d+\.\d+|10\.\d+\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|127\.\d+\.\d+\.\d+|169\.254\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+|192\.168\.\d+\.\d+)$/;
 const QUICK_CONNECT_META_HOSTS = new Set(['metadata.google.internal', 'metadata.azure.com', '169.254.169.254', '100.100.100.200']);
 
-function validateQuickConnectBaseUrl(rawUrl) {
+function resolveAllowedLocalLlmPorts(env = process.env) {
+  const ports = new Set(DEFAULT_LOCAL_LLM_PORTS);
+  const raw = String(env?.DXOS_LOCAL_LLM_PORTS || '').trim();
+  if (raw) {
+    for (const token of raw.split(',')) {
+      const n = Number.parseInt(token.trim(), 10);
+      if (Number.isInteger(n) && n >= 1 && n <= 65535) {
+        ports.add(n);
+      }
+    }
+  }
+  return ports;
+}
+
+function isPrivateOrReservedIpv4(ip) {
+  if (!net.isIPv4(ip)) return false;
+  if (QUICK_CONNECT_PRIVATE_IPV4_RE.test(ip)) return true;
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => !Number.isInteger(p) || p < 0 || p > 255)) return true;
+  const [a, b] = parts;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a >= 224) return true;
+  return false;
+}
+
+function parseIpv6Hextets(rawIp) {
+  const ip = String(rawIp || '').trim().toLowerCase().split('%')[0].replace(/^\[|\]$/g, '');
+  if (!ip || !net.isIPv6(ip)) return null;
+  const dblIdx = ip.indexOf('::');
+  if (dblIdx !== -1 && ip.indexOf('::', dblIdx + 2) !== -1) return null;
+
+  const parseSide = (side, allowIpv4Tail) => {
+    if (!side) return [];
+    const parts = side.split(':');
+    const out = [];
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      if (!part) return null;
+      if (part.includes('.')) {
+        if (!allowIpv4Tail || i !== parts.length - 1 || !net.isIPv4(part)) return null;
+        const octets = part.split('.').map(Number);
+        if (octets.length !== 4 || octets.some((o) => !Number.isInteger(o) || o < 0 || o > 255)) return null;
+        out.push(((octets[0] << 8) | octets[1]) & 0xffff);
+        out.push(((octets[2] << 8) | octets[3]) & 0xffff);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/.test(part)) return null;
+        out.push(parseInt(part, 16) & 0xffff);
+      }
+    }
+    return out;
+  };
+
+  if (dblIdx === -1) {
+    const hextets = parseSide(ip, true);
+    return hextets && hextets.length === 8 ? hextets : null;
+  }
+
+  const leftStr = ip.slice(0, dblIdx);
+  const rightStr = ip.slice(dblIdx + 2);
+  const left = parseSide(leftStr, !rightStr);
+  const right = parseSide(rightStr, true);
+  if (!left || !right) return null;
+  const missing = 8 - (left.length + right.length);
+  if (missing < 1) return null;
+  return [...left, ...new Array(missing).fill(0), ...right];
+}
+
+function hextetsToIpv4(hi, lo) {
+  return `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+}
+
+function isPrivateOrReservedIp(rawIp) {
+  const ip = String(rawIp || '').trim().toLowerCase().split('%')[0].replace(/^\[|\]$/g, '');
+  if (!ip) return true;
+  if (net.isIPv4(ip)) return isPrivateOrReservedIpv4(ip);
+  if (net.isIPv6(ip)) {
+    const h = parseIpv6Hextets(ip);
+    if (!h) return true;
+    // ::/128 (unspecified / all zeros)
+    if (h.every((x) => x === 0)) return true;
+    // ::1/128 (loopback)
+    if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0 && h[6] === 0 && h[7] === 1) return true;
+    // ::ffff:0:0/96 (IPv4-mapped IPv6)
+    if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0xffff) {
+      return isPrivateOrReservedIpv4(hextetsToIpv4(h[6], h[7]));
+    }
+    // ::/96 (legacy IPv4-compatible IPv6)
+    if (h[0] === 0 && h[1] === 0 && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+      return isPrivateOrReservedIpv4(hextetsToIpv4(h[6], h[7]));
+    }
+    // 64:ff9b::/96 (NAT64 well-known prefix)
+    if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0 && h[3] === 0 && h[4] === 0 && h[5] === 0) {
+      return isPrivateOrReservedIpv4(hextetsToIpv4(h[6], h[7]));
+    }
+    // 100::/64 (discard-only)
+    if (h[0] === 0x0100 && h[1] === 0 && h[2] === 0 && h[3] === 0) return true;
+    // 2001:db8::/32 (documentation)
+    if (h[0] === 0x2001 && h[1] === 0x0db8) return true;
+    // 2002::/16 (6to4 if embedded IPv4 is private/reserved)
+    if (h[0] === 0x2002) {
+      return isPrivateOrReservedIpv4(hextetsToIpv4(h[1], h[2]));
+    }
+    // fc00::/7 (ULA)
+    if ((h[0] & 0xfe00) === 0xfc00) return true;
+    // fe80::/10 (link-local, fe80..febf)
+    if ((h[0] & 0xffc0) === 0xfe80) return true;
+    // fec0::/10 (deprecated site-local)
+    if ((h[0] & 0xffc0) === 0xfec0) return true;
+    // ff00::/8 (multicast)
+    if ((h[0] & 0xff00) === 0xff00) return true;
+    return false;
+  }
+  return true;
+}
+
+async function assertSafeLlmProbeUrl(rawUrl, { provider = '', env = process.env, lookupImpl, allowDnsLookup = true } = {}) {
+  const cleanUrl = validateQuickConnectBaseUrl(rawUrl, { provider, env });
+  const parsed = new URL(cleanUrl);
+  const bare = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (QUICK_CONNECT_LOCAL_HOSTS.has(bare)) {
+    return cleanUrl;
+  }
+  if (net.isIP(bare)) {
+    if (isPrivateOrReservedIp(bare)) {
+      throw failTool('LLM_URL_UNSAFE', 400, `Địa chỉ IP nội bộ/không công khai "${bare}" bị chặn bởi chính sách SSRF.`);
+    }
+    return cleanUrl;
+  }
+  if (!allowDnsLookup) {
+    return cleanUrl;
+  }
+  const doLookup = typeof lookupImpl === 'function'
+    ? lookupImpl
+    : (dns?.promises?.lookup ? dns.promises.lookup.bind(dns.promises) : null);
+  if (typeof doLookup === 'function') {
+    let resolved;
+    try {
+      resolved = await doLookup(bare, { all: true });
+    } catch (err) {
+      throw failTool('LLM_URL_UNSAFE', 400, `Không phân giải được DNS an toàn cho "${bare}": ${err?.code || err?.message || 'DNS error'}`);
+    }
+    const records = Array.isArray(resolved) ? resolved : (resolved ? [resolved] : []);
+    if (!records.length) {
+      throw failTool('LLM_URL_UNSAFE', 400, `Không có bản ghi DNS hợp lệ cho "${bare}".`);
+    }
+    for (const rec of records) {
+      const addr = typeof rec === 'string' ? rec : rec?.address;
+      if (!addr || isPrivateOrReservedIp(addr)) {
+        throw failTool('LLM_URL_UNSAFE', 400, `Tên miền "${bare}" phân giải về địa chỉ IP nội bộ/metadata bị chặn (SSRF).`);
+      }
+    }
+  }
+  return cleanUrl;
+}
+
+function validateQuickConnectBaseUrl(rawUrl, { provider = '', env = process.env } = {}) {
   const str = typeof rawUrl === 'string' ? rawUrl.trim() : '';
   if (!str || str.length > 2048 || /[\u0000-\u001f\u007f\s]/.test(str)) {
     throw failTool('LLM_URL_UNSAFE', 400, 'baseURL không hợp lệ.');
@@ -149,7 +311,30 @@ function validateQuickConnectBaseUrl(rawUrl) {
   if (QUICK_CONNECT_META_HOSTS.has(bare) || QUICK_CONNECT_META_HOSTS.has(rawBare) || /^169\.254\./.test(bare)) {
     throw failTool('LLM_URL_UNSAFE', 400, 'Chặn truy cập địa chỉ metadata nội bộ.');
   }
-  const isLocalAllowed = QUICK_CONNECT_LOCAL_HOSTS.has(bare);
+  const isLocalHost = QUICK_CONNECT_LOCAL_HOSTS.has(bare);
+  let isLocalAllowed = false;
+  if (isLocalHost) {
+    const normalizedProvider = String(provider || '').trim().toLowerCase();
+    if (!QUICK_CONNECT_LOCAL_CAPABLE_PROVIDERS.has(normalizedProvider)) {
+      throw failTool(
+        'SSRF_TARGET_FORBIDDEN',
+        400,
+        `Nhà cung cấp "${normalizedProvider || '(không xác định)'}" không được phép kết nối tới địa chỉ nội bộ/loopback (SSRF).`,
+      );
+    }
+    const portNum = parsed.port
+      ? Number.parseInt(parsed.port, 10)
+      : (parsed.protocol === 'https:' ? 443 : 80);
+    const allowedPorts = resolveAllowedLocalLlmPorts(env);
+    if (!Number.isInteger(portNum) || !allowedPorts.has(portNum)) {
+      throw failTool(
+        'SSRF_TARGET_FORBIDDEN',
+        400,
+        `Cổng "${portNum}" trên địa chỉ nội bộ "${bare}" không nằm trong danh sách cổng suy luận LLM được phép (SSRF).`,
+      );
+    }
+    isLocalAllowed = true;
+  }
   if (!isLocalAllowed) {
     if (bare.endsWith('.localhost') || bare.endsWith('.local') || bare.endsWith('.internal')) {
       throw failTool('LLM_URL_UNSAFE', 400, `Tên miền nội bộ "${bare}" bị chặn bởi chính sách SSRF.`);
@@ -157,8 +342,8 @@ function validateQuickConnectBaseUrl(rawUrl) {
     if (bare.includes(':')) {
       throw failTool('LLM_URL_UNSAFE', 400, 'Địa chỉ IPv6 nội bộ/không công khai bị chặn.');
     }
-    if (net.isIPv4(bare) && QUICK_CONNECT_PRIVATE_IPV4_RE.test(bare)) {
-      throw failTool('LLM_URL_UNSAFE', 400, `Địa chỉ IP nội bộ "${bare}" bị chặn bởi chính sách SSRF.`);
+    if (net.isIPv4(bare) && isPrivateOrReservedIpv4(bare)) {
+      throw failTool('LLM_URL_UNSAFE', 400, `Địa chỉ IP nội bộ/không công khai "${bare}" bị chặn bởi chính sách SSRF.`);
     }
     if (!bare.includes('.')) {
       throw failTool('LLM_URL_UNSAFE', 400, 'Hostname không đầy đủ (non-FQDN) bị chặn.');
@@ -208,7 +393,7 @@ function buildLlmProbeTarget(provider, rawBase, apiKey) {
   };
 }
 
-async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = false, llmServiceName = '', modelName = '', verifyCompletion = false } = {}) {
+async function probeLlmHealth(db, { env = process.env, fetchImpl, lookupImpl, isAdmin = false, llmServiceName = '', modelName = '', verifyCompletion = false } = {}) {
   const resultBase = (fields) => ({
     ok: Boolean(fields.ok),
     status: Number(fields.status) || 503,
@@ -366,7 +551,12 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
     });
   }
   try {
-    validateQuickConnectBaseUrl(target.baseURL);
+    await assertSafeLlmProbeUrl(target.baseURL, {
+      provider,
+      env,
+      lookupImpl,
+      allowDnsLookup: !fetchImpl || typeof lookupImpl === 'function',
+    });
   } catch (err) {
     return resultBase({
       ok: false,
@@ -416,8 +606,21 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
     const res = await doFetch(target.probeUrl, {
       method: 'GET',
       headers: target.headers,
+      redirect: 'error',
       ...(modelsTimeout.signal ? { signal: modelsTimeout.signal } : {}),
     });
+    if (res?.redirected || (Number(res?.status) >= 300 && Number(res?.status) < 400)) {
+      return resultBase({
+        ok: false,
+        status: 400,
+        code: 'LLM_URL_UNSAFE',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL: target.baseURL,
+        message: `Dịch vụ LLM "${serviceName}" chuyển hướng HTTP không được phép (SSRF redirect blocked).`,
+      });
+    }
     const status = Number(res?.status) || (res?.ok ? 200 : 503);
     if (!res?.ok) {
       return classifyHttpFailure(status, { serviceName, boundModel, provider, baseURL: target.baseURL });
@@ -472,8 +675,22 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
         method: 'POST',
         headers: { ...target.headers, 'content-type': 'application/json' },
         body: JSON.stringify(compBody),
+        redirect: 'error',
         ...(compTimeout.signal ? { signal: compTimeout.signal } : {}),
       });
+      if (compRes?.redirected || (Number(compRes?.status) >= 300 && Number(compRes?.status) < 400)) {
+        return resultBase({
+          ok: false,
+          status: 400,
+          code: 'LLM_URL_UNSAFE',
+          llmService: serviceName,
+          modelName: boundModel,
+          provider,
+          baseURL: target.baseURL,
+          completionChecked: true,
+          message: `Dịch vụ LLM "${serviceName}" chuyển hướng HTTP không được phép (SSRF redirect blocked).`,
+        });
+      }
       const compStatus = Number(compRes?.status) || (compRes?.ok ? 200 : 503);
       if (!compRes?.ok) {
         return classifyHttpFailure(compStatus, {
@@ -508,6 +725,21 @@ async function probeLlmHealth(db, { env = process.env, fetchImpl, isAdmin = fals
       message: `Dịch vụ LLM "${serviceName}" sẵn sàng.`,
     });
   } catch (err) {
+    const msgChain = `${err?.message || ''} ${err?.cause?.message || ''}`;
+    const isRedirectErr = /redirect/i.test(msgChain) || err?.code === 'LLM_URL_UNSAFE';
+    if (isRedirectErr) {
+      return resultBase({
+        ok: false,
+        status: 400,
+        code: 'LLM_URL_UNSAFE',
+        llmService: serviceName,
+        modelName: boundModel,
+        provider,
+        baseURL: target.baseURL,
+        ...(completionProbeStarted ? { completionChecked: true } : {}),
+        message: `Chuyển hướng HTTP hoặc đích mạng không an toàn khi kiểm tra LLM "${serviceName}".`,
+      });
+    }
     const isTimeout = err?.name === 'TimeoutError' || err?.name === 'AbortError' || /timeout|aborted/i.test(String(err?.message || ''));
     return resultBase({
       ok: false,
@@ -559,7 +791,7 @@ async function runQuickConnectLlm(targetDb, ctx, { env = process.env, fetchImpl,
     ? (String(env?.AGENT_BASE_URL || '').trim() || dockerAwareDefault)
     : preset.defaultBaseURL;
   const rawBase = String(payload.baseURL || payload.baseUrl || fallbackBase).trim();
-  const baseURL = validateQuickConnectBaseUrl(rawBase);
+  const baseURL = validateQuickConnectBaseUrl(rawBase, { provider: rawProvider, env });
 
   const serviceName = String(payload.serviceName || preset.defaultServiceName).trim().toLowerCase();
   if (!QUICK_CONNECT_SERVICE_RE.test(serviceName)) {
@@ -670,11 +902,243 @@ async function runQuickConnectLlm(targetDb, ctx, { env = process.env, fetchImpl,
   };
 }
 
+function maskApiKey(rawKey) {
+  const s = String(rawKey || '').trim();
+  if (!s) return '';
+  if (s.length <= 4) return '****';
+  return `****${s.slice(-4)}`;
+}
+
+async function listLlmServices(targetDb) {
+  const llmRepo = targetDb?.getRepository?.('llmServices');
+  if (!llmRepo || typeof llmRepo.find !== 'function') {
+    return { services: [], activeService: null, activeModel: null };
+  }
+  let rows = [];
+  let activeService = '';
+  let activeModel = '';
+  await runWithSystemRlsBypass(targetDb, async () => {
+    rows = (await llmRepo.find({ sort: ['id'], limit: 200 }).catch(() => [])) || [];
+    const profRepo = targetDb?.getRepository?.('latticeAiProfiles');
+    const archProf = profRepo && typeof profRepo.findOne === 'function'
+      ? await profRepo.findOne({ filter: { username: 'dxos-architect' } }).catch(() => null)
+      : null;
+    if (archProf) {
+      activeService = String(val(archProf, 'llmService') || '').trim();
+      activeModel = String(val(archProf, 'modelName') || '').trim();
+    }
+    if (!activeService || !activeModel) {
+      const empRepo = targetDb?.getRepository?.('aiEmployees');
+      const archEmp = empRepo && typeof empRepo.findOne === 'function'
+        ? await empRepo.findOne({ filter: { username: 'dxos-architect' } }).catch(() => null)
+        : null;
+      const empModel = Array.isArray(val(archEmp, 'modelSettings')?.models) ? val(archEmp, 'modelSettings').models[0] : null;
+      if (!activeService) activeService = String(empModel?.llmService || '').trim();
+      if (!activeModel) activeModel = String(empModel?.model || '').trim();
+    }
+  });
+
+  const services = rows.map((row) => {
+    const name = String(val(row, 'name') || '').trim();
+    const title = String(val(row, 'title') || name).trim();
+    const provider = String(val(row, 'provider') || val(row, 'type') || 'openai-completions').trim();
+    const options = val(row, 'options') && typeof val(row, 'options') === 'object' ? val(row, 'options') : {};
+    const baseURL = String(options.baseURL || val(row, 'baseURL') || '').trim();
+    const rawKey = String(options.apiKey || val(row, 'apiKey') || '').trim();
+    const enabledModelsObj = val(row, 'enabledModels') && typeof val(row, 'enabledModels') === 'object' ? val(row, 'enabledModels') : {};
+    const rawModels = Array.isArray(enabledModelsObj.models) ? enabledModelsObj.models : [];
+    const models = rawModels
+      .map((m) => (typeof m === 'string'
+        ? { label: m, value: m }
+        : { label: String(m?.label || m?.value || m?.model || '').trim(), value: String(m?.value || m?.model || '').trim() }))
+      .filter((m) => m.value);
+    const isArchitectDefault = Boolean(activeService && name && activeService === name);
+    return {
+      id: val(row, 'id') ?? null,
+      name,
+      title,
+      provider,
+      baseURL,
+      enabled: val(row, 'enabled') !== false,
+      hasApiKey: Boolean(rawKey),
+      maskedApiKey: maskApiKey(rawKey),
+      models,
+      defaultModel: (isArchitectDefault && activeModel) ? activeModel : (models[0]?.value || ''),
+      isArchitectDefault,
+    };
+  });
+
+  return {
+    services,
+    activeService: activeService || null,
+    activeModel: activeModel || null,
+  };
+}
+
+async function deleteLlmService(targetDb, ctx, { name, env = process.env } = {}) {
+  const serviceName = String(name || '').trim().toLowerCase();
+  if (!QUICK_CONNECT_SERVICE_RE.test(serviceName)) {
+    throw failTool('LLM_SERVICE_NAME_INVALID', 400, 'serviceName không hợp lệ.');
+  }
+  const llmRepo = targetDb?.getRepository?.('llmServices');
+  if (!llmRepo) {
+    throw failTool('NO_LLM_SERVICE', 503, 'Repository llmServices chưa sẵn sàng.');
+  }
+  const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
+  const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
+  const organizationId = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: '' });
+
+  let existing = null;
+  await runWithSystemRlsBypass(targetDb, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    existing = typeof llmRepo.findOne === 'function'
+      ? await llmRepo.findOne({ filter: { name: serviceName }, ...txOpt }).catch(() => null)
+      : null;
+    if (!existing) {
+      throw failTool('LLM_SERVICE_NOT_FOUND', 404, `Không tìm thấy dịch vụ LLM "${serviceName}".`);
+    }
+    if (typeof existing.destroy === 'function') {
+      await existing.destroy(txOpt);
+    } else if (typeof llmRepo.destroy === 'function') {
+      await llmRepo.destroy({ filter: { name: serviceName }, ...txOpt });
+    }
+  });
+
+  await runWithSystemRlsBypass(targetDb, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const profRepo = targetDb?.getRepository?.('latticeAiProfiles');
+    if (profRepo && typeof profRepo.find === 'function') {
+      const boundProfs = (await profRepo.find({ filter: { llmService: serviceName }, limit: 200, ...txOpt }).catch(() => [])) || [];
+      for (const p of boundProfs) {
+        if (typeof p?.update === 'function') {
+          await p.update({ llmService: null, modelName: null }, txOpt);
+        }
+      }
+    }
+    const empRepo = targetDb?.getRepository?.('aiEmployees');
+    if (empRepo && typeof empRepo.find === 'function') {
+      const allEmps = (await empRepo.find({ limit: 200, ...txOpt }).catch(() => [])) || [];
+      for (const emp of allEmps) {
+        const ms = val(emp, 'modelSettings');
+        const models = Array.isArray(ms?.models) ? ms.models : [];
+        if (models.some((m) => m?.llmService === serviceName)) {
+          const remaining = models.filter((m) => m?.llmService !== serviceName);
+          if (typeof emp?.update === 'function') {
+            await emp.update({ modelSettings: { ...(ms || {}), models: remaining } }, txOpt);
+          }
+        }
+      }
+    }
+  });
+
+  await recordAiAuditLog(targetDb, {
+    actorUserId: val(actorUser, 'id') ?? null,
+    actorUsername: val(actorUser, 'username') || null,
+    organizationId: organizationId || null,
+    channel: 'studio-sync',
+    aiEmployee: 'dxos-architect',
+    toolName: 'dxosAi:deleteLlmService',
+    argsSummary: { serviceName },
+    status: 'allowed',
+    resultSummary: `Deleted LLM service ${serviceName}`,
+  });
+
+  return { deleted: true, name: serviceName };
+}
+
+async function switchLlmServiceModel(targetDb, ctx, { name, modelName, env = process.env } = {}) {
+  const serviceName = String(name || '').trim().toLowerCase();
+  const nextModel = String(modelName || '').trim();
+  if (!QUICK_CONNECT_SERVICE_RE.test(serviceName)) {
+    throw failTool('LLM_SERVICE_NAME_INVALID', 400, 'serviceName không hợp lệ.');
+  }
+  if (!nextModel || nextModel.length > 120) {
+    throw failTool('LLM_MODEL_REQUIRED', 400, 'Cần modelName hợp lệ (<= 120 ký tự).');
+  }
+  const llmRepo = targetDb?.getRepository?.('llmServices');
+  if (!llmRepo) {
+    throw failTool('NO_LLM_SERVICE', 503, 'Repository llmServices chưa sẵn sàng.');
+  }
+  const actorUser = ctx?.state?.currentUser || ctx?.auth?.user;
+  const actorScope = await resolveActorScope(ctx, targetDb).catch(() => null);
+  const organizationId = await resolveDefaultOrganizationId(targetDb, { actor: actorScope, ctx, env, fallback: '' });
+
+  await runWithSystemRlsBypass(targetDb, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const existing = typeof llmRepo.findOne === 'function'
+      ? await llmRepo.findOne({ filter: { name: serviceName }, ...txOpt }).catch(() => null)
+      : null;
+    if (!existing) {
+      throw failTool('LLM_SERVICE_NOT_FOUND', 404, `Không tìm thấy dịch vụ LLM "${serviceName}".`);
+    }
+    const serviceTitle = String(val(existing, 'title') || serviceName).trim();
+    const prevEnabled = val(existing, 'enabledModels') && typeof val(existing, 'enabledModels') === 'object'
+      ? val(existing, 'enabledModels')
+      : {};
+    const prevModels = Array.isArray(prevEnabled.models) ? prevEnabled.models : [];
+    const seen = new Set();
+    const mergedModels = [];
+    for (const m of [{ label: `${nextModel} (${serviceTitle})`, value: nextModel }, ...prevModels]) {
+      const mv = typeof m === 'string' ? m.trim() : String(m?.value || m?.model || '').trim();
+      if (!mv || seen.has(mv)) continue;
+      seen.add(mv);
+      mergedModels.push(typeof m === 'string' ? { label: mv, value: mv } : { label: String(m?.label || mv), value: mv });
+    }
+    const patch = {
+      enabled: true,
+      enabledModels: {
+        ...prevEnabled,
+        mode: prevEnabled.mode || 'custom',
+        models: mergedModels,
+      },
+    };
+    if (typeof existing.update === 'function') {
+      await existing.update(patch, txOpt);
+    } else if (typeof llmRepo.update === 'function') {
+      await llmRepo.update({ filter: { name: serviceName }, values: patch, ...txOpt });
+    }
+  });
+
+  const rebindRes = await rebindStarterAgentsToService(targetDb, {
+    llmService: serviceName,
+    modelName: nextModel,
+    actorUser,
+    defaultOrigin: env?.NOCOBASE_INTERNAL_URL || '',
+    preserveActiveArchitect: false,
+    adminToolNames: ADMIN_BUILDER_TOOL_NAMES,
+  });
+
+  await recordAiAuditLog(targetDb, {
+    actorUserId: val(actorUser, 'id') ?? null,
+    actorUsername: val(actorUser, 'username') || null,
+    organizationId: organizationId || null,
+    channel: 'studio-sync',
+    aiEmployee: 'dxos-architect',
+    toolName: 'dxosAi:switchLlmServiceModel',
+    argsSummary: { serviceName, modelName: nextModel },
+    status: 'allowed',
+    resultSummary: `Switched active LLM to ${serviceName}/${nextModel}; rebound ${rebindRes.reboundAgents.length} starter agents`,
+  });
+
+  return {
+    switched: true,
+    serviceName,
+    modelName: nextModel,
+    reboundAgents: rebindRes.reboundAgents,
+  };
+}
+
 module.exports = {
   QUICK_CONNECT_PROVIDER_PRESETS,
   ensureLocalLlmServiceRecord,
+  isPrivateOrReservedIp,
+  assertSafeLlmProbeUrl,
   validateQuickConnectBaseUrl,
   buildLlmProbeTarget,
   probeLlmHealth,
   runQuickConnectLlm,
+  maskApiKey,
+  listLlmServices,
+  deleteLlmService,
+  switchLlmServiceModel,
 };

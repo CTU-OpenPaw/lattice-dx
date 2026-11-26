@@ -159,6 +159,10 @@ function createFlowCanvas(React, vendor = {}) {
       const category = schema?.category || inferCategory(n.type);
       const catMeta = CATEGORY_META[category] || CATEGORY_META.integration;
       const ports = inferPorts(n.type);
+      const baseOuts = Array.isArray(schema?.outputs) && schema.outputs.length ? schema.outputs : ports.outputs;
+      const switchOuts = n.type === 'control.switch' && Array.isArray(n.config?.cases) && n.config.cases.length
+        ? [...new Set([...n.config.cases.map((c, ci) => String(c?.port || `case_${ci}`).trim()).filter(Boolean), ...baseOuts, 'default', 'error'])]
+        : null;
       const isSelected = n.id === selectedNodeId;
       const pos = n.position && Number.isFinite(Number(n.position.x)) && Number.isFinite(Number(n.position.y)) ? { x: Number(n.position.x), y: Number(n.position.y) } : { x: 80 + idx * 280, y: 180 };
       return {
@@ -169,7 +173,7 @@ function createFlowCanvas(React, vendor = {}) {
           trace: nodeStates[n.id] || null, selected: isSelected, isPlaybackCurrent: activeNodeId === n.id,
           issues: Array.isArray(validationByNodeId?.[n.id]) ? validationByNodeId[n.id] : null,
           inputs: Array.isArray(schema?.inputs) ? schema.inputs : ports.inputs,
-          outputs: Array.isArray(schema?.outputs) && schema.outputs.length ? schema.outputs : ports.outputs,
+          outputs: switchOuts || baseOuts,
           appendMenuOpen: appendMenuNodeId === n.id,
         },
       };

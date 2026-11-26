@@ -42,6 +42,11 @@ test('ci.yml includes check, dependency-audit (moderate+), compose-validate (all
     assert.ok(ci.includes(composeFile), `compose-validate missing ${composeFile}`);
   }
   assert.match(ci, /--env-file\s+infra\/compose\/prod\.env\.example\s+-f\s+infra\/compose\/prod\.yml\s+--profile\s+observability\s+--profile\s+pdf\s+config\s+--quiet/);
+  assert.doesNotMatch(ci, /feat\/\*\*|feat\/v1\.0\.0-olp-championship/);
+  assert.match(ci, /actions\/checkout@v5/);
+  assert.match(ci, /actions\/setup-node@v5/);
+  const vitestMatches = ci.match(/vitest run/g) || [];
+  assert.equal(vitestMatches.length, 0, 'ci.yml should not run a redundant vitest run step after pnpm check');
 });
 
 test('codeql.yml runs CodeQL javascript-typescript analysis with required security-events permissions', () => {
@@ -50,9 +55,11 @@ test('codeql.yml runs CodeQL javascript-typescript analysis with required securi
   assert.match(codeql, /SPDX-License-Identifier:\s*Apache-2\.0/);
   assert.match(codeql, /security-events:\s*write/);
   assert.match(codeql, /schedule:/);
-  assert.match(codeql, /github\/codeql-action\/init@v3/);
+  assert.doesNotMatch(codeql, /feat\/\*\*|feat\/v1\.0\.0-olp-championship/);
+  assert.match(codeql, /actions\/checkout@v5/);
+  assert.match(codeql, /github\/codeql-action\/init@v4/);
   assert.match(codeql, /javascript-typescript/);
-  assert.match(codeql, /github\/codeql-action\/analyze@v3/);
+  assert.match(codeql, /github\/codeql-action\/analyze@v4/);
   assert.match(codeql, /upload:\s*\$\{\{/);
   assert.match(codeql, /actions\/upload-artifact@v4/);
 });

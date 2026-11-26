@@ -1036,13 +1036,24 @@ async function runProactiveIncidentTriage(db, {
             proposedArgs: rec.proposedArgs,
             diffPreview: rec.diffPreview,
             riskLevel: rec.riskLevel,
+            ...(transaction ? { transaction } : {}),
           });
           return { duplicated: false, created };
         };
 
-        const outcome = typeof db?.sequelize?.transaction === 'function'
-          ? await db.sequelize.transaction(enqueueTx)
-          : await enqueueTx(null);
+        const pgRlsForEnqueue = loadFoundationPgRls();
+        const canUsePgRlsTx = Boolean(
+          pgRlsForEnqueue
+          && typeof pgRlsForEnqueue.canUsePgRlsSession === 'function'
+          && pgRlsForEnqueue.canUsePgRlsSession(db)
+          && ORG_ID_RE.test(String(orgId || ''))
+          && typeof pgRlsForEnqueue.withTenantRlsContext === 'function',
+        );
+        const outcome = canUsePgRlsTx
+          ? await runWithOptionalTenantRls(db, orgId, enqueueTx)
+          : (typeof db?.sequelize?.transaction === 'function'
+            ? await db.sequelize.transaction(enqueueTx)
+            : await enqueueTx(null));
 
         if (rec.mode === 'llm') {
           const llmCostUsd = estimateCostUsd(rec.usage.promptTokens, rec.usage.completionTokens, rec.model || '', env);

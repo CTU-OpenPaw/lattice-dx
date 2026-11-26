@@ -13,7 +13,7 @@ const { createDxosAutomationsActions } = require('./automation-engine');
 const { seedBusinessPackSamples } = require('./domain-packs');
 const { composePortals } = require('./portal-composer');
 const { resolveServiceActor } = require('./service-scope');
-const { ORG_ID_RE, runWithOptionalRls, runWithSystemRlsBypass } = require('./wms-dmn-shared');
+const { ORG_ID_RE, defaultFoundation, runWithOptionalRls, runWithSystemRlsBypass } = require('./wms-dmn-shared');
 const {
   exportSolutionBundle,
   diffSolutionBundle,
@@ -435,16 +435,20 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       if ((ctx.method || 'GET') !== 'GET') throw fail('METHOD_NOT_ALLOWED', 405);
       await requireAdmin(ctx);
       const params = readParams(ctx);
-      const stateFilter = params.state ? String(params.state).trim() : 'failed';
+      const rawState = params.state ? String(params.state).trim().toLowerCase() : 'failed';
+      const stateFilter = rawState === 'all' ? '' : rawState;
       const orgFilter = params.organizationId ? String(params.organizationId).trim() : '';
       const page = Math.max(1, Number(params.page) || 1);
       const pageSize = Math.max(1, Math.min(100, Number(params.pageSize) || 50));
       const repo = db.getRepository?.('latticeContextOutbox');
       if (!repo) {
-        ctx.body = { items: [], total: 0, summary: { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 } };
+        ctx.body = { items: [], total: 0, page, pageSize, summary: { pending: 0, retry: 0, processing: 0, failed: 0, delivered: 0 } };
         return next();
       }
-      const filter = { state: stateFilter, ...(orgFilter ? { organizationId: orgFilter } : {}) };
+      const filter = {
+        ...(stateFilter ? { state: stateFilter } : {}),
+        ...(orgFilter ? { organizationId: orgFilter } : {}),
+      };
       let rows = [];
       let total = 0;
       if (typeof repo.findAndCount === 'function') {
@@ -478,6 +482,8 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
           state: val(r, 'state'),
           attempts: val(r, 'attempts'),
           errorCode: val(r, 'errorCode'),
+          lastError: val(r, 'lastError') ?? val(r, 'errorMessage') ?? null,
+          payloadJson: val(r, 'payloadJson') ?? null,
           nextAttemptAt: val(r, 'nextAttemptAt'),
           lockedAt: val(r, 'lockedAt'),
           updatedAt: val(r, 'updatedAt'),
@@ -487,6 +493,51 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
         pageSize,
         summary,
       };
+      return next();
+    },
+
+    outboxDlqPurge: async (ctx, next) => {
+      if ((ctx.method || 'POST') !== 'POST') throw fail('METHOD_NOT_ALLOWED', 405);
+      await requireAdmin(ctx);
+      const params = readParams(ctx);
+      const orgFilter = params.organizationId ? String(params.organizationId).trim() : '';
+      const rawState = params.state ? String(params.state).trim().toLowerCase() : 'failed';
+      const allowedPurgeStates = new Set(['failed', 'delivered', 'retry', 'all']);
+      if (!allowedPurgeStates.has(rawState)) {
+        throw fail('OUTBOX_PURGE_STATE_INVALID', 400, 'Chỉ được dọn dẹp trạng thái failed, delivered, retry hoặc all.');
+      }
+      const rawIds = Array.isArray(params.eventIds) ? params.eventIds : params.eventId ? [params.eventId] : [];
+      const eventIds = rawIds.map((x) => String(x || '').trim()).filter(Boolean);
+      const limit = Math.max(1, Math.min(500, Number(params.limit) || 500));
+      const repo = db.getRepository?.('latticeContextOutbox');
+      if (!repo) {
+        ctx.body = { purgedCount: 0, state: rawState };
+        return next();
+      }
+      const filter = {
+        ...(rawState !== 'all' ? { state: rawState } : {}),
+        ...(orgFilter ? { organizationId: orgFilter } : {}),
+        ...(eventIds.length ? { eventId: { $in: eventIds } } : {}),
+      };
+      let purgedCount = 0;
+      if (typeof repo.find === 'function') {
+        const matched = (await repo.find({ filter, limit })) || [];
+        const matchedIds = matched.map((r) => val(r, 'id')).filter((id) => id != null);
+        if (matched.length > 0) {
+          if (typeof repo.destroy === 'function' && matchedIds.length > 0) {
+            await repo.destroy({ filter: { id: { $in: matchedIds } } });
+            purgedCount = matched.length;
+          } else {
+            for (const row of matched) {
+              if (typeof row.destroy === 'function') {
+                await row.destroy();
+                purgedCount += 1;
+              }
+            }
+          }
+        }
+      }
+      ctx.body = { purgedCount, state: rawState };
       return next();
     },
 
@@ -568,7 +619,10 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
       const params = readParams(ctx);
       const { organizationId } = await resolveSolutionBundleScope(ctx, params, null, { allowAllString: true });
       const snapshotUid = params.snapshotUid ? String(params.snapshotUid).trim() : '';
-      ctx.body = await rollbackLastSolutionBundle(db, { organizationId, snapshotUid });
+      const enableWorkflows = params.enableWorkflows === undefined
+        ? true
+        : (typeof params.enableWorkflows === 'string' ? params.enableWorkflows === 'true' : Boolean(params.enableWorkflows));
+      ctx.body = await rollbackLastSolutionBundle(db, { organizationId, snapshotUid, enableWorkflows });
       return next();
     },
 
@@ -643,8 +697,8 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
             }
           }
         }
-        return seedBusinessPackSamples(db, { organizationId, packKey: 'all' });
-      });
+        return seedBusinessPackSamples(db, { organizationId, packKey: 'all', transaction, foundation: defaultFoundation });
+      }, defaultFoundation);
       ctx.body = { ok: true, organizationId, paraDocsSeeded, ...packSeeds };
       return next();
     },

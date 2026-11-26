@@ -668,7 +668,7 @@ function registerObservability(app, { env = process.env, registry = createMetric
   });
 
   if (typeof app?.acl?.allow === 'function') {
-    app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi', 'manifest', 'sw.js', 'sw'], 'public');
+    app.acl.allow('dxos', ['health', 'metrics', 'openapi', 'asyncapi', 'manifest', 'sw.js', 'sw', 'icon-192.png', 'icon-512.png'], 'public');
   }
 
   return { registry, middleware, otelExporter: activeOtel };

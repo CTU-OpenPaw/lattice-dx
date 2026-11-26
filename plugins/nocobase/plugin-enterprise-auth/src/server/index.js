@@ -27,7 +27,7 @@ class EnterpriseLoginPlugin extends Plugin {
     this.app.resourceManager.define({name:'enterpriseAuth',actions});
     this.app.use(createRevocationGuard(cache),{tag:'enterpriseAuthRevocationGuard',after:'auth'});
     this.app.acl.allow('enterpriseAuth',['start','callback','finish','backchannelLogout'],'public');
-    this.app.acl.allow('enterpriseAuth',['configuration','link','listMappings','unlink'],'loggedIn');
+    this.app.acl.allow('enterpriseAuth',['configuration','link','listLinkTargets','listMappings','unlink'],'loggedIn');
   }
 }
 module.exports=EnterpriseLoginPlugin;

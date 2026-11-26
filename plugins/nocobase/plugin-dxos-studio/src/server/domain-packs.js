@@ -606,14 +606,14 @@ async function installBusinessPackAction(db, ctx, next, { foundation, requireBui
   return next();
 }
 
-async function seedBusinessPackSamples(db, { organizationId, packKey = 'all', foundation } = {}) {
+async function seedBusinessPackSamples(db, { organizationId, packKey = 'all', foundation, transaction = null } = {}) {
   const orgId = String(organizationId || '').trim();
   if (!orgId) return { workOrdersSeeded: 0, partnerClaimsSeeded: 0 };
   const result = { workOrdersSeeded: 0, partnerClaimsSeeded: 0 };
   const seedCmms = packKey === 'all' || packKey === 'cmms-maintenance';
   const seedClaims = packKey === 'all' || packKey === 'coldchain-partner-settlement';
-  await runWithOptionalRls(db, orgId, async (transaction) => {
-    const txOpt = transaction ? { transaction } : {};
+  const executeSeed = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
     if (seedCmms) {
       const woRepo = db.getRepository?.('latticeCustomWorkOrders');
       if (woRepo && typeof woRepo.findOne === 'function' && typeof woRepo.create === 'function') {
@@ -694,7 +694,12 @@ async function seedBusinessPackSamples(db, { organizationId, packKey = 'all', fo
         }
       }
     }
-  }, foundation);
+  };
+  if (transaction) {
+    await executeSeed(transaction);
+  } else {
+    await runWithOptionalRls(db, orgId, executeSeed, foundation);
+  }
   return result;
 }
 
