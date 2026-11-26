@@ -82,11 +82,11 @@ function buildClientScriptSource() {
   var bootstrapEl = document.getElementById('dxos-track-bootstrap');
   if (!root || !bootstrapEl) return;
 
-  var bootstrap = { trackingCode: '', token: '', apiBasePath: '/api' };
+  var bootstrap = { trackingCode: '', token: '', verify: '', apiBasePath: '/api' };
   try {
     bootstrap = JSON.parse(bootstrapEl.textContent || '{}');
   } catch (e) {
-    bootstrap = { trackingCode: '', token: '', apiBasePath: '/api' };
+    bootstrap = { trackingCode: '', token: '', verify: '', apiBasePath: '/api' };
   }
 
   var apiBase = String(bootstrap.apiBasePath || '/api').replace(/\\/+$/, '') || '/api';
@@ -94,6 +94,7 @@ function buildClientScriptSource() {
   var cleanInput = function (v) { return String(v || '').trim(); };
   var initialCode = cleanInput(bootstrap.trackingCode);
   var initialToken = cleanInput(bootstrap.token || query.get('token') || query.get('trackingToken'));
+  var initialVerify = cleanInput(bootstrap.verify || query.get('verify'));
 
   var STATUS_LABELS = {
     draft: 'B\u1ea3n nh\u00e1p',
@@ -171,7 +172,8 @@ function buildClientScriptSource() {
   grid.appendChild(codeGroup);
 
   var tokenGroup = el('div', { class: 'dxos-field' });
-  tokenGroup.appendChild(el('label', { class: 'dxos-label', for: 'dxos-track-token-input' }, 'M\u00e3 x\u00e1c th\u1ef1c (Tracking Token) *'));
+  tokenGroup.appendChild(el('label', { class: 'dxos-label', for: 'dxos-track-token-input' }, 'M\\u00e3 x\\u00e1c th\\u1ef1c (Tracking Token) *'));
+  var tokenWrap = el('div', { class: 'dxos-input-wrap' });
   var tokenInput = el('input', {
     id: 'dxos-track-token-input',
     type: 'password',
@@ -179,15 +181,32 @@ function buildClientScriptSource() {
     'data-testid': 'public-track-token-input',
     required: true,
     value: initialToken,
-    placeholder: 'Nh\u1eadp token t\u1eeb phi\u1ebfu giao nh\u1eadn / QR (?token=...)',
-    class: 'dxos-input',
+    placeholder: 'Nh\\u1eadp token t\\u1eeb phi\\u1ebfu giao nh\\u1eadn / QR (?token=...)',
+    class: 'dxos-input dxos-input-with-toggle',
+  });
+  var tokenToggleBtn = el('button', {
+    type: 'button',
+    'data-testid': 'public-track-token-toggle',
+    'aria-label': 'Hi\\u1ec7n/\\u1ea9n m\\u00e3 x\\u00e1c th\\u1ef1c',
+    'aria-pressed': 'false',
+    class: 'dxos-eye-btn',
+  }, 'Hi\\u1ec7n');
+  tokenToggleBtn.addEventListener('click', function () {
+    var cur = tokenInput.getAttribute ? tokenInput.getAttribute('type') : tokenInput.type;
+    var nextType = cur === 'password' ? 'text' : 'password';
+    tokenInput.type = nextType;
+    if (tokenInput.setAttribute) tokenInput.setAttribute('type', nextType);
+    tokenToggleBtn.setAttribute('aria-pressed', nextType === 'text' ? 'true' : 'false');
+    tokenToggleBtn.textContent = nextType === 'text' ? '\\u1ea8n' : 'Hi\\u1ec7n';
   });
   var tokenErrorEl = el('div', {
     'data-testid': 'public-track-token-error',
     role: 'alert',
     class: 'dxos-field-error dxos-hidden',
   });
-  tokenGroup.appendChild(tokenInput);
+  tokenWrap.appendChild(tokenInput);
+  tokenWrap.appendChild(tokenToggleBtn);
+  tokenGroup.appendChild(tokenWrap);
   tokenGroup.appendChild(tokenErrorEl);
   grid.appendChild(tokenGroup);
   lookupForm.appendChild(grid);
@@ -320,9 +339,12 @@ function buildClientScriptSource() {
         return;
       }
       verifyBtn.disabled = true;
-      verifyBtn.textContent = '\u0110ang ki\u1ec3m \u0111\u1ecbnh ch\u1eef k\u00fd...';
-      var qs = new URLSearchParams({ trackingCode: data.trackingCode || code, token: token }).toString();
-      fetch(apiBase + '/dxosWms:verifyTrackSignature?' + qs, { method: 'GET' })
+      verifyBtn.textContent = '\\u0110ang ki\\u1ec3m \\u0111\\u1ecbnh ch\\u1eef k\\u00fd...';
+      fetch(apiBase + '/dxosWms:verifyTrackSignature', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: data.trackingCode || code, trackingCode: data.trackingCode || code, token: token }),
+      })
         .then(function (resp) {
           return resp.json().catch(function () { return {}; }).then(function (json) {
             if (!resp.ok) {
@@ -433,6 +455,49 @@ function buildClientScriptSource() {
       });
   }
 
+  function verifyPublicProof(code, verifyCode) {
+    clearError();
+    while (resultArea.firstChild) resultArea.removeChild(resultArea.firstChild);
+    if (!code || !verifyCode) return Promise.resolve();
+    setLoading(true);
+    return fetch(apiBase + '/dxosWms:verifyTrackSignature', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code, trackingCode: code, verify: verifyCode }),
+    })
+      .then(function (resp) {
+        return resp.json().catch(function () { return {}; }).then(function (json) {
+          if (!resp.ok) {
+            var msg = (json && json.errors && json.errors[0] && json.errors[0].message) || (json && json.message) || ('HTTP ' + resp.status);
+            throw new Error(msg);
+          }
+          return (json && json.data !== undefined) ? json.data : json;
+        });
+      })
+      .then(function (res) {
+        var ok = Boolean(res && res.verified);
+        var card = el('section', {
+          'data-testid': 'public-track-proof-card',
+          class: 'dxos-card',
+        });
+        card.appendChild(el('div', { class: 'dxos-card-title' }, ok ? 'Ch\\u1ee9ng th\\u1ef1c S\\u1ed5 c\\u00e1i c\\u00f4ng khai Ed25519 h\\u1ee3p l\\u1ec7' : 'Kh\\u00f4ng x\\u00e1c th\\u1ef1c \\u0111\\u01b0\\u1ee3c ch\\u1ee9ng th\\u1ef1c c\\u00f4ng khai'));
+        card.appendChild(el('div', { class: 'dxos-meta-line' }, 'M\\u00e3 v\\u1eadn \\u0111\\u01a1n: ' + ((res && res.trackingCode) || code)));
+        if (res && res.keyId) card.appendChild(el('div', { class: 'dxos-meta-sub' }, 'Kh\\u00f3a k\\u00fd s\\u1ed1: ' + res.keyId));
+        var hashVal = res && (res.ledgerEntryHash || res.entryHash);
+        if (hashVal) card.appendChild(el('div', { class: 'dxos-mono' }, 'Ledger Hash: ' + hashVal));
+        var signedAt = res && (res.signedAt || res.verifiedAt);
+        if (signedAt) card.appendChild(el('div', { class: 'dxos-meta-sub' }, 'Th\\u1eddi \\u0111i\\u1ec3m k\\u00fd: ' + formatTimestampVi(signedAt)));
+        card.appendChild(el('div', { class: 'dxos-alert dxos-alert-info' }, 'Ch\\u1ebf \\u0111\\u1ed9 x\\u00e1c th\\u1ef1c c\\u00f4ng khai (Zero-PII). Vui l\\u00f2ng nh\\u1eadp M\\u00e3 x\\u00e1c th\\u1ef1c (Tracking Token) \\u1edf tr\\u00ean \\u0111\\u1ec3 xem chi ti\\u1ebft ePOD v\\u00e0 nh\\u1eadt k\\u00fd giao nh\\u1eadn.'));
+        resultArea.appendChild(card);
+      })
+      .catch(function (err) {
+        showError((err && err.message) ? err.message : 'Kh\\u00f4ng th\\u1ec3 x\\u00e1c th\\u1ef1c m\\u00e3 QR c\\u00f4ng khai.');
+      })
+      .finally(function () {
+        setLoading(false);
+      });
+  }
+
   lookupForm.addEventListener('submit', function (evt) {
     evt.preventDefault();
     performTrackLookup(cleanInput(codeInput.value), cleanInput(tokenInput.value));
@@ -440,6 +505,8 @@ function buildClientScriptSource() {
 
   if (activeTrackState.code && activeTrackState.token) {
     performTrackLookup(activeTrackState.code, activeTrackState.token);
+  } else if (activeTrackState.code && initialVerify) {
+    verifyPublicProof(activeTrackState.code, initialVerify);
   }
 })();`;
 }
@@ -447,6 +514,7 @@ function buildClientScriptSource() {
 function renderPublicTrackHtml({
   trackingCode = '',
   token = '',
+  verify = '',
   nonce = '',
   apiBasePath = '/api',
 } = {}) {
@@ -454,9 +522,11 @@ function renderPublicTrackHtml({
     ? String(nonce)
     : randomBytes(16).toString('base64url');
   const normalizedApiBase = String(apiBasePath || '/api').replace(/\/+$/, '') || '/api';
+  const safeVerify = sanitizeTrackToken(verify);
   const bootstrap = {
     trackingCode: sanitizeTrackCode(trackingCode),
     token: sanitizeTrackToken(token),
+    ...(safeVerify ? { verify: safeVerify } : {}),
     apiBasePath: normalizedApiBase,
   };
 
@@ -481,10 +551,13 @@ function renderPublicTrackHtml({
     .dxos-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 12px; }
     .dxos-field { margin-bottom: 4px; }
     .dxos-label { display: block; font-weight: 600; font-size: 13px; margin-bottom: 6px; }
-    .dxos-input { width: 100%; padding: 9px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; font-family: inherit; }
+    .dxos-input { width: 100%; min-height: 44px; padding: 9px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 14px; font-family: inherit; }
+    .dxos-input-wrap { display: flex; gap: 6px; align-items: center; }
+    .dxos-input-with-toggle { flex: 1; min-width: 0; }
+    .dxos-eye-btn { min-height: 44px; min-width: 44px; padding: 9px 12px; border-radius: 6px; border: 1px solid #cbd5e1; background: #ffffff; color: #334155; font-size: 12px; font-weight: 600; cursor: pointer; flex-shrink: 0; }
     .dxos-input-error { border-color: #dc2626; background: #fef2f2; }
     .dxos-field-error { color: #b91c1c; font-size: 12px; margin-top: 5px; font-weight: 500; }
-    .dxos-btn { padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
+    .dxos-btn { min-height: 44px; min-width: 44px; padding: 10px 18px; border-radius: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
     .dxos-btn:disabled { cursor: not-allowed; opacity: 0.65; }
     .dxos-btn-primary { border: 1px solid #0284c7; background: #0284c7; color: #ffffff; }
     .dxos-alert { padding: 14px 16px; border-radius: 8px; margin-top: 12px; margin-bottom: 16px; font-size: 14px; }
@@ -540,10 +613,12 @@ function createPublicTrackGatewayHandler({ apiBasePath = '/api' } = {}) {
     const token = sanitizeTrackToken(
       urlObj.searchParams.get('token') || urlObj.searchParams.get('trackingToken') || '',
     );
+    const verify = sanitizeTrackToken(urlObj.searchParams.get('verify') || '');
     const nonce = randomBytes(16).toString('base64url');
     const html = renderPublicTrackHtml({
       trackingCode: match.rawCode,
       token,
+      verify,
       nonce,
       apiBasePath,
     });

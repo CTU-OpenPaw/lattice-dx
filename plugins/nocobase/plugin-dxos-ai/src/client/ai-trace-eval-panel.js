@@ -22,7 +22,7 @@ const DEFAULT_EVAL_SUITES = [
   },
   {
     id: 'wave1-3-capabilities',
-    name: 'Wave 1–3 Capabilities (v0.4.1)',
+    name: 'Wave 1–3 Capabilities (v0.4.2)',
     description: 'App Builder 2.0, BI Chart, ReAct & Memory, A2A, Draft/Publish Workflow, Approvals, Omnichannel, Public Forms.',
     estimatedCaseCount: 11,
     sampleCases: [

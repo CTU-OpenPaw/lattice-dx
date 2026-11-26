@@ -172,13 +172,19 @@ function assertValidOrgId(organizationId) {
 
 function serializePublicKeyRow(row) {
   if (!row) return null;
+  const active = val(row, 'active') !== false;
+  const rawStatus = val(row, 'status');
+  const status = rawStatus ? String(rawStatus) : (active ? 'active' : 'retired');
+  const retiredAt = val(row, 'retiredAt');
   return {
     organizationId: val(row, 'organizationId'),
     keyId: val(row, 'keyId'),
     algorithm: val(row, 'algorithm') || 'Ed25519',
     publicKeyPem: val(row, 'publicKeyPem'),
     fingerprintSha256: val(row, 'fingerprintSha256'),
-    active: val(row, 'active') !== false,
+    active,
+    status,
+    retiredAt: retiredAt instanceof Date ? retiredAt.toISOString() : (retiredAt || null),
   };
 }
 
@@ -218,18 +224,23 @@ async function ensureOrgSigningKey(db, organizationId, options = {}) {
     throw failPki('PKI_REPO_UNAVAILABLE', 503, 'latticePkiKeys repository is unavailable.');
   }
 
-  const findKeyRow = async () => (
-    typeof repo.findOne === 'function'
-      ? repo.findOne({ filter: { organizationId: orgId }, ...txOpt })
-      : ((await repo.find({ filter: { organizationId: orgId }, limit: 1, ...txOpt })) || [])[0] || null
-  );
-
-  const existing = await findKeyRow();
-  if (existing) {
-    if (val(existing, 'active') === false) {
-      throw failPki('PKI_KEY_INACTIVE', 403, 'Organization PKI signing key is inactive.');
+  const findOrgKeys = async () => {
+    if (typeof repo.find === 'function') {
+      return (await repo.find({ filter: { organizationId: orgId }, sort: ['-id'], limit: 100, ...txOpt })) || [];
     }
-    return toPlain(existing);
+    const one = await repo.findOne({ filter: { organizationId: orgId }, ...txOpt });
+    return one ? [one] : [];
+  };
+
+  const existingRows = await findOrgKeys();
+  const activeKey = existingRows.find(
+    (k) => val(k, 'active') !== false && String(val(k, 'status') || 'active').toLowerCase() === 'active',
+  );
+  if (activeKey) {
+    return toPlain(activeKey);
+  }
+  if (existingRows.length > 0) {
+    throw failPki('PKI_KEY_INACTIVE', 403, 'Organization PKI signing key is inactive.');
   }
 
   const { publicKey, privateKey } = generateKeyPairSync('ed25519');
@@ -250,13 +261,16 @@ async function ensureOrgSigningKey(db, organizationId, options = {}) {
         encryptedPrivateKey,
         fingerprintSha256,
         active: true,
+        status: 'active',
+        retiredAt: null,
       },
       ...txOpt,
     });
     return toPlain(created);
   } catch (err) {
     if (err?.name === 'SequelizeUniqueConstraintError' || /unique/i.test(String(err?.message || ''))) {
-      const winner = await findKeyRow();
+      const rows = await findOrgKeys();
+      const winner = rows.find((k) => val(k, 'active') !== false) || rows[0];
       if (winner) return toPlain(winner);
     }
     throw err;
@@ -295,17 +309,47 @@ async function verifyPayloadSignature(db, organizationId, payload, signatureBase
   if (!repo) {
     return { valid: false, reason: 'PKI_REPO_UNAVAILABLE', keyId: null, fingerprintSha256: null, payloadHash };
   }
+  const cleanExpectedKeyId = expectedKeyId != null && String(expectedKeyId).trim()
+    ? String(expectedKeyId).trim()
+    : null;
   const activeTx = options.transaction || getActiveRlsContext()?.transaction || null;
-  const findKey = (tx) => repo.findOne({ filter: { organizationId: orgId }, ...(tx ? { transaction: tx } : {}) });
+  const findKey = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
+    if (cleanExpectedKeyId) {
+      if (typeof repo.findOne === 'function') {
+        return repo.findOne({ filter: { organizationId: orgId, keyId: cleanExpectedKeyId }, ...txOpt });
+      }
+      const list = (await repo.find({ filter: { organizationId: orgId, keyId: cleanExpectedKeyId }, limit: 1, ...txOpt })) || [];
+      return list[0] || null;
+    }
+    if (typeof repo.find === 'function') {
+      const list = (await repo.find({ filter: { organizationId: orgId }, sort: ['-id'], limit: 50, ...txOpt })) || [];
+      return list.find((k) => val(k, 'active') !== false && String(val(k, 'status') || 'active').toLowerCase() === 'active') || list[0] || null;
+    }
+    return repo.findOne({ filter: { organizationId: orgId }, ...txOpt });
+  };
   const keyRow = !activeTx && canUsePgRlsSession(db)
     ? await withTenantRlsContext(db, orgId, findKey)
     : await findKey(activeTx);
-  if (!keyRow || val(keyRow, 'active') === false) {
+  if (!keyRow) {
+    return { valid: false, reason: 'KEY_NOT_FOUND', keyId: null, fingerprintSha256: null, payloadHash };
+  }
+  const keyStatus = String(val(keyRow, 'status') || (val(keyRow, 'active') === false ? 'inactive' : 'active')).toLowerCase();
+  if (keyStatus === 'revoked') {
+    return {
+      valid: false,
+      reason: 'KEY_REVOKED',
+      keyId: val(keyRow, 'keyId') || null,
+      fingerprintSha256: val(keyRow, 'fingerprintSha256') || null,
+      payloadHash,
+    };
+  }
+  if (val(keyRow, 'active') === false && !(cleanExpectedKeyId && keyStatus === 'retired')) {
     return { valid: false, reason: 'KEY_NOT_FOUND', keyId: null, fingerprintSha256: null, payloadHash };
   }
 
   const keyId = val(keyRow, 'keyId');
-  if (expectedKeyId && String(expectedKeyId).trim() !== keyId) {
+  if (cleanExpectedKeyId && cleanExpectedKeyId !== keyId) {
     return { valid: false, reason: 'KEY_ID_MISMATCH', keyId, fingerprintSha256: val(keyRow, 'fingerprintSha256'), payloadHash };
   }
 
@@ -435,7 +479,7 @@ async function appendLedgerEntry(
     return serializeLedgerEntry(created);
   };
 
-  return runWithOrgMutex(orgId, async () => {
+  const runAppend = async () => {
     const activeTx = options.transaction || getActiveRlsContext()?.transaction || null;
     if (activeTx) {
       return execute(activeTx);
@@ -446,6 +490,124 @@ async function appendLedgerEntry(
     if (typeof db?.sequelize?.transaction === 'function') {
       return db.sequelize.transaction(execute);
     }
+    return execute(null);
+  };
+  if (options._skipOrgMutex) {
+    return runAppend();
+  }
+  return runWithOrgMutex(orgId, runAppend);
+}
+
+async function rotateOrgSigningKey(db, organizationId, options = {}) {
+  const orgId = assertValidOrgId(organizationId);
+  const env = options.env || process.env;
+  const actor = options.actor || {};
+  const repo = getRepo(db, 'latticePkiKeys');
+  if (!repo || typeof repo.create !== 'function' || typeof repo.update !== 'function') {
+    throw failPki('PKI_REPO_UNAVAILABLE', 503, 'latticePkiKeys repository is unavailable.');
+  }
+
+  const execute = async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    if (
+      transaction
+      && db?.sequelize?.getDialect?.() === 'postgres'
+      && typeof db.sequelize.query === 'function'
+    ) {
+      await db.sequelize.query('SELECT pg_advisory_xact_lock(hashtext(:lockKey))', {
+        replacements: { lockKey: `latticedx:ledger:${orgId}` },
+        transaction,
+      });
+    }
+
+    const existingRows = typeof repo.find === 'function'
+      ? ((await repo.find({ filter: { organizationId: orgId }, sort: ['-id'], limit: 100, ...txOpt })) || [])
+      : ([await repo.findOne({ filter: { organizationId: orgId }, ...txOpt })].filter(Boolean));
+
+    const prevActive = existingRows.find(
+      (k) => val(k, 'active') !== false && String(val(k, 'status') || 'active').toLowerCase() === 'active',
+    ) || null;
+    const retiredKeyId = prevActive ? val(prevActive, 'keyId') : null;
+    const retiredAt = new Date();
+
+    for (const row of existingRows) {
+      if (val(row, 'active') !== false || String(val(row, 'status') || 'active').toLowerCase() === 'active') {
+        const rowId = val(row, 'id');
+        if (rowId != null) {
+          await repo.update({
+            filterByTk: rowId,
+            values: { active: false, status: 'retired', retiredAt },
+            ...txOpt,
+          });
+        } else {
+          await repo.update({
+            filter: { organizationId: orgId, keyId: val(row, 'keyId') },
+            values: { active: false, status: 'retired', retiredAt },
+            ...txOpt,
+          });
+        }
+      }
+    }
+
+    const { publicKey, privateKey } = generateKeyPairSync('ed25519');
+    const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
+    const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+    const spkiDer = publicKey.export({ type: 'spki', format: 'der' });
+    const fingerprintSha256 = sha256Hex(spkiDer);
+    const newKeyId = `ed25519-${fingerprintSha256.slice(0, 16)}`;
+    const encryptedPrivateKey = encryptPrivateKeyPem(privateKeyPem, env);
+
+    await repo.create({
+      values: {
+        organizationId: orgId,
+        keyId: newKeyId,
+        algorithm: 'Ed25519',
+        publicKeyPem,
+        encryptedPrivateKey,
+        fingerprintSha256,
+        active: true,
+        status: 'active',
+        retiredAt: null,
+      },
+      ...txOpt,
+    });
+
+    let rotationEntry = null;
+    if (hasLedgerRepositories(db)) {
+      rotationEntry = await appendLedgerEntry(db, {
+        organizationId: orgId,
+        eventType: 'pki.key_rotated',
+        targetCollection: 'latticePkiKeys',
+        targetRecordId: newKeyId,
+        actor,
+        payload: {
+          organizationId: orgId,
+          retiredKeyId,
+          newKeyId,
+          fingerprintSha256,
+        },
+        metadata: { retiredKeyId, newKeyId },
+      }, { ...options, transaction, _skipOrgMutex: true });
+    }
+
+    return {
+      organizationId: orgId,
+      newKeyId,
+      retiredKeyId,
+      publicKeyPem,
+      fingerprintSha256,
+      active: true,
+      status: 'active',
+      retiredAt: retiredKeyId ? retiredAt.toISOString() : null,
+      ledgerSeq: rotationEntry?.seq ?? null,
+    };
+  };
+
+  return runWithOrgMutex(orgId, async () => {
+    const activeTx = options.transaction || getActiveRlsContext()?.transaction || null;
+    if (activeTx) return execute(activeTx);
+    if (canUsePgRlsSession(db)) return withTenantRlsContext(db, orgId, execute);
+    if (typeof db?.sequelize?.transaction === 'function') return db.sequelize.transaction(execute);
     return execute(null);
   });
 }
@@ -732,7 +894,14 @@ function registerPkiLedger(app) {
         const pkiRepo = getRepo(db, 'latticePkiKeys');
         const statusBody = await runOrgLedgerDb(organizationId, async (transaction) => {
           const txOpt = transaction ? { transaction } : {};
-          const keyRow = pkiRepo ? await pkiRepo.findOne({ filter: { organizationId }, ...txOpt }) : null;
+          const keyRows = pkiRepo
+            ? (typeof pkiRepo.find === 'function'
+              ? ((await pkiRepo.find({ filter: { organizationId }, sort: ['-id'], limit: 50, ...txOpt })) || [])
+              : ([await pkiRepo.findOne({ filter: { organizationId }, ...txOpt })].filter(Boolean)))
+            : [];
+          const keyRow = keyRows.find(
+            (k) => val(k, 'active') !== false && String(val(k, 'status') || 'active').toLowerCase() === 'active',
+          ) || keyRows[0] || null;
           if (!repo) {
             return {
               organizationId,
@@ -789,7 +958,7 @@ function registerPkiLedger(app) {
           throw failPki('LEDGER_COLLECTION_UNAVAILABLE', 503, 'Target collection repository unavailable.');
         }
         const adminOk = isRoot || (await isPortalAdmin(ctx, db));
-        const entry = await runOrgLedgerDb(organizationId, async (transaction) => {
+        const { entry, docSig, snapshot } = await runOrgLedgerDb(organizationId, async (transaction) => {
           const txOpt = transaction ? { transaction } : {};
           const record = await repo.findOne({ filter: { id: targetRecordId, organizationId }, ...txOpt });
           if (!record || val(record, 'organizationId') !== organizationId) {
@@ -810,23 +979,26 @@ function registerPkiLedger(app) {
             }
           }
 
-          const snapshot = toPlain(record);
-          return appendLedgerEntry(db, {
+          const docSnapshot = toPlain(record);
+          const ledgerEntry = await appendLedgerEntry(db, {
             organizationId,
             eventType: 'document.signed',
             targetCollection,
             targetRecordId: String(targetRecordId),
             actor,
-            payload: snapshot,
+            payload: docSnapshot,
             metadata: params.reason ? { reason: String(params.reason).trim().slice(0, 255) } : null,
           }, { transaction });
+          const signedDoc = await signCanonicalPayload(db, organizationId, docSnapshot, { transaction });
+          return { entry: ledgerEntry, docSig: signedDoc, snapshot: docSnapshot };
         });
 
         ctx.body = {
           signed: true,
-          entry,
-          signatureBase64: entry.signatureBase64,
-          keyId: entry.keyId,
+          entry: { ...entry, payload: snapshot },
+          signatureBase64: docSig.signatureBase64,
+          ledgerSignatureBase64: entry.signatureBase64,
+          keyId: docSig.keyId,
           merkleRoot: entry.merkleRoot,
         };
         if (next) return next();
@@ -855,12 +1027,85 @@ function registerPkiLedger(app) {
         ctx.body = { organizationId, ...result };
         if (next) return next();
       },
+
+      rotateKey: async (ctx, next) => {
+        if ((ctx.method || 'POST') !== 'POST') ctx.throw(405);
+        assertApiKeyScope(ctx, ['write', 'ledger']);
+        const params = readParams(ctx);
+        const { isRoot, actor, organizationId } = await resolveLedgerCallerOrg(db, ctx, params.organizationId);
+        const adminOk = isRoot || (await isPortalAdmin(ctx, db));
+        if (!adminOk) {
+          throw failPki('LEDGER_ADMIN_REQUIRED', 403, 'Administrator role is required to rotate PKI keys.');
+        }
+        ctx.body = await rotateOrgSigningKey(db, organizationId, { actor });
+        if (next) return next();
+      },
+
+      exportProof: async (ctx, next) => {
+        if (ctx.method && !['GET', 'POST'].includes(ctx.method)) ctx.throw(405);
+        const params = readParams(ctx);
+        const { organizationId } = await resolveLedgerCallerOrg(db, ctx, params.organizationId);
+        const limit = Math.max(1, Math.min(500, Math.floor(Number(params.limit) || 100)));
+        const targetEntryHash = params.entryHash ? String(params.entryHash).trim() : null;
+        const targetSeq = params.seq != null && String(params.seq).trim() !== '' ? Number(params.seq) : null;
+
+        const ledgerRepo = getRepo(db, 'latticeCryptoLedger');
+        const pkiRepo = getRepo(db, 'latticePkiKeys');
+        const proofData = await runOrgLedgerDb(organizationId, async (transaction) => {
+          const txOpt = transaction ? { transaction } : {};
+          const keyRows = pkiRepo
+            ? (typeof pkiRepo.find === 'function'
+              ? ((await pkiRepo.find({ filter: { organizationId }, sort: ['-id'], limit: 100, ...txOpt })) || [])
+              : ([await pkiRepo.findOne({ filter: { organizationId }, ...txOpt })].filter(Boolean)))
+            : [];
+          const activeKey = keyRows.find(
+            (k) => val(k, 'active') !== false && String(val(k, 'status') || 'active').toLowerCase() === 'active',
+          ) || keyRows[0] || null;
+
+          const report = ledgerRepo
+            ? await verifyLedgerChain(db, organizationId, { transaction })
+            : { valid: true, checkedCount: 0, brokenAtSeq: null, reason: null, merkleRoot: ZERO_HASH, headHash: ZERO_HASH };
+
+          const allEntries = ledgerRepo ? await fetchAllOrgEntries(ledgerRepo, organizationId, transaction) : [];
+          const serialized = allEntries.map(serializeLedgerEntry);
+          const matchedEntry = serialized.find((e) => (
+            (targetEntryHash && e.entryHash === targetEntryHash)
+            || (targetSeq != null && Number.isFinite(targetSeq) && Number(e.seq) === targetSeq)
+          )) || serialized[serialized.length - 1] || null;
+
+          return {
+            organizationId,
+            exportedAt: new Date().toISOString(),
+            keyId: activeKey ? val(activeKey, 'keyId') : null,
+            publicKeyPem: activeKey ? val(activeKey, 'publicKeyPem') : null,
+            fingerprintSha256: activeKey ? val(activeKey, 'fingerprintSha256') : null,
+            publicKeys: keyRows.map(serializePublicKeyRow),
+            chainValid: Boolean(report.valid),
+            checkedCount: Number(report.checkedCount || 0),
+            rootHash: report.merkleRoot || ZERO_HASH,
+            merkleRoot: report.merkleRoot || ZERO_HASH,
+            headHash: report.headHash || ZERO_HASH,
+            entries: serialized.slice(-limit),
+            proof: matchedEntry ? {
+              seq: matchedEntry.seq,
+              leafHash: matchedEntry.entryHash,
+              prevHash: matchedEntry.prevHash,
+              entryHash: matchedEntry.entryHash,
+              merkleRoot: matchedEntry.merkleRoot,
+              keyId: matchedEntry.keyId,
+              signatureBase64: matchedEntry.signatureBase64,
+            } : null,
+          };
+        });
+        ctx.body = proofData;
+        if (next) return next();
+      },
     },
   });
 
   app.acl?.allow?.(
     'dxosLedger',
-    ['publicKey', 'entries', 'status', 'verify', 'signDocument', 'verifySignature'],
+    ['publicKey', 'entries', 'status', 'verify', 'signDocument', 'verifySignature', 'rotateKey', 'exportProof'],
     'loggedIn',
   );
 }
@@ -876,6 +1121,7 @@ module.exports = {
   isLedgerSecurityInvariant,
   hasLedgerRepositories,
   ensureOrgSigningKey,
+  rotateOrgSigningKey,
   signCanonicalPayload,
   verifyPayloadSignature,
   appendLedgerEntry,

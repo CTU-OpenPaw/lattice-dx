@@ -1615,12 +1615,32 @@ async function invokeResourceAction(ctx, resourceName, actionName, options = {})
   return { available: true, body: subCtx.body?.data || subCtx.body || {} };
 }
 
+function matchesInboxSearch(item, cleanSearch) {
+  if (!cleanSearch) return true;
+  const hay = [
+    item.title,
+    item.summary,
+    item.targetCode,
+    item.targetCollection,
+    item.targetRecordId != null ? String(item.targetRecordId) : '',
+    item.requesterUsername,
+    item.requestUid,
+    item.ruleKey,
+    item.itemKey,
+    item.aiEmployee,
+  ]
+    .filter((v) => v != null && String(v).trim() !== '')
+    .map((v) => String(v).toLowerCase());
+  return hay.some((field) => field.includes(cleanSearch));
+}
+
 async function listUnifiedInbox(db, {
   actor,
   organizationId = null,
   source = 'all',
   status = 'pending',
   assignedToMe = false,
+  search = '',
   limit = 50,
   now = new Date(),
 } = {}) {
@@ -1629,6 +1649,7 @@ async function listUnifiedInbox(db, {
     throw failApproval('APPROVAL_SOURCE_INVALID', 400, 'source must be all, business, ai_hitl, flow, or proposals.');
   }
   const cleanStatus = String(status || 'pending').trim().toLowerCase();
+  const cleanSearch = String(search || '').trim().toLowerCase();
   const cap = Math.max(1, Math.min(200, Number(limit) || 50));
   const scopedOrg = actor.isRoot ? (organizationId || null) : assertValidOrgId(actor.organizationId);
   const verifiedSet = new Set(Array.isArray(actor.verifiedRoles) ? actor.verifiedRoles : []);
@@ -1645,9 +1666,9 @@ async function listUnifiedInbox(db, {
   const allDelegations = Array.isArray(dlgRes.delegations) ? dlgRes.delegations : [];
 
   const items = [];
-  const counts = { business: 0, ai_hitl: 0, flow: 0 };
+  const counts = { business: 0, proposals: 0, ai_hitl: 0, flow: 0 };
 
-  if (cleanSource === 'all' || cleanSource === 'business') {
+  {
     const reqRepo = getRepo(db, 'latticeApprovalRequests');
     if (reqRepo && typeof reqRepo.find === 'function') {
       const bizFilter = {
@@ -1701,15 +1722,17 @@ async function listUnifiedInbox(db, {
           createdAt: ser.createdAt,
           canAct: Boolean(canVote),
         };
-        if (!assignedToMe || item.canAct) {
+        if ((!assignedToMe || item.canAct) && matchesInboxSearch(item, cleanSearch)) {
           counts.business += 1;
-          items.push(item);
+          if (cleanSource === 'all' || cleanSource === 'business') {
+            items.push(item);
+          }
         }
       }
     }
   }
 
-  if (cleanSource === 'all' || cleanSource === 'ai_hitl') {
+  {
     const aiRepo = getRepo(db, 'latticeAiApprovalQueue');
     if (aiRepo && typeof aiRepo.find === 'function') {
       const aiFilter = {
@@ -1765,15 +1788,17 @@ async function listUnifiedInbox(db, {
           createdAt: val(row, 'createdAt') || null,
           canAct: Boolean(canAct),
         };
-        if (!assignedToMe || item.canAct) {
+        if ((!assignedToMe || item.canAct) && matchesInboxSearch(item, cleanSearch)) {
           counts.ai_hitl += 1;
-          items.push(item);
+          if (cleanSource === 'all' || cleanSource === 'ai_hitl') {
+            items.push(item);
+          }
         }
       }
     }
   }
 
-  if (cleanSource === 'all' || cleanSource === 'flow') {
+  {
     const runsRepo = getRepo(db, 'latticeAutomationRuns');
     if (runsRepo && typeof runsRepo.find === 'function') {
       const flowStatusFilter = cleanStatus === 'pending' ? { status: 'suspended' } : {};
@@ -1843,16 +1868,17 @@ async function listUnifiedInbox(db, {
           createdAt: val(row, 'createdAt') || null,
           canAct: Boolean(canAct),
         };
-        if (!assignedToMe || item.canAct) {
+        if ((!assignedToMe || item.canAct) && matchesInboxSearch(item, cleanSearch)) {
           counts.flow += 1;
-          items.push(item);
+          if (cleanSource === 'all' || cleanSource === 'flow') {
+            items.push(item);
+          }
         }
       }
     }
   }
 
-  if ((cleanSource === 'all' || cleanSource === 'proposals') && cleanStatus !== 'executed') {
-    let proposalCount = 0;
+  if (cleanStatus !== 'executed') {
     const propStateFilter = cleanStatus === 'all'
       ? null
       : (cleanStatus === 'pending'
@@ -1920,15 +1946,14 @@ async function listUnifiedInbox(db, {
             createdAt: val(row, 'createdAt') || null,
             canAct: Boolean(canAct),
           };
-          if (!assignedToMe || item.canAct) {
-            proposalCount += 1;
-            items.push(item);
+          if ((!assignedToMe || item.canAct) && matchesInboxSearch(item, cleanSearch)) {
+            counts.proposals += 1;
+            if (cleanSource === 'all' || cleanSource === 'proposals') {
+              items.push(item);
+            }
           }
         }
       }
-    }
-    if (cleanSource === 'proposals' || proposalCount > 0) {
-      counts.proposals = proposalCount;
     }
   }
 
@@ -1938,10 +1963,20 @@ async function listUnifiedInbox(db, {
     return tb - ta;
   });
 
+  const totalCount = counts.business + counts.proposals + counts.ai_hitl + counts.flow;
+
   return {
     organizationId: scopedOrg,
     total: items.length,
-    counts,
+    counts: {
+      business: counts.business,
+      proposals: counts.proposals,
+      ai_hitl: counts.ai_hitl,
+      aiHitl: counts.ai_hitl,
+      flow: counts.flow,
+      all: totalCount,
+      total: totalCount,
+    },
     items: items.slice(0, cap),
   };
 }
@@ -2317,6 +2352,7 @@ function createDxosApprovalsActions(db) {
         source: params.source || 'all',
         status: params.status || 'pending',
         assignedToMe,
+        search: params.search ?? params.q ?? '',
         limit: params.limit || 50,
       });
       if (next) return next();

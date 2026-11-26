@@ -316,3 +316,134 @@ test('dist/client-v2/index.js & dist/client/index.js mount /mobile, /mobile/*, a
   assert.ok(routesV2.some((r) => r.name === 'dxos-mobile-field-sub' && r.path === '/mobile/*' && typeof r.Component === 'function'));
   assert.ok(routesV2.some((r) => r.name === 'dxos-public-track' && r.path === '/track/:code' && r.skipAuthCheck === true && typeof r.Component === 'function'));
 });
+
+test('P0-05 & P3-05: PublicTrackPage handles ?verify= proof without bypassing trackingToken, renders lookup form + eye toggle', async () => {
+  const { parseTrackParams, createPublicTrackPage } = require('../src/client-v2/public-track-page');
+  const withVerify = parseTrackParams({
+    pathname: '/v/track/LDX-TRK-9373FB0FE9',
+    search: '?verify=abc123def4567890',
+  });
+  assert.deepEqual(withVerify, { trackingCode: 'LDX-TRK-9373FB0FE9', token: '', verify: 'abc123def4567890' });
+
+  const fakeReact = createFakeReact();
+  const requests = [];
+  const mockApi = {
+    async request(req) {
+      requests.push(req);
+      if (req.url === 'dxosWms:verifyTrackSignature') {
+        return {
+          data: {
+            data: {
+              verified: true,
+              publicProofOnly: true,
+              trackingCode: 'LDX-TRK-9373FB0FE9',
+              keyId: 'ed25519-org-a-v1',
+              ledgerEntryHash: 'sha256_proof_999',
+              signedAt: '2026-11-26T01:00:00.000Z',
+              requiresTokenForDetails: true,
+            },
+          },
+        };
+      }
+      if (req.url === 'dxosWms:publicTrack') {
+        return {
+          data: {
+            data: {
+              trackingCode: req.params.trackingCode,
+              status: 'delivered',
+              orderCode: 'ORD-COLD-99',
+              ledgerVerification: { seq: 11, keyId: 'ed25519-org-a-v1', verifiedFormat: true },
+            },
+          },
+        };
+      }
+      return { data: {} };
+    },
+  };
+
+  const PublicTrackPage = createPublicTrackPage({ Plugin: class {} }, fakeReact, { apiClient: mockApi });
+  let tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    location: { pathname: '/v/track/LDX-TRK-9373FB0FE9', search: '?verify=abc123def4567890' },
+  });
+  await fakeReact._flushEffects();
+  tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    location: { pathname: '/v/track/LDX-TRK-9373FB0FE9', search: '?verify=abc123def4567890' },
+  });
+
+  assert.equal(requests.some((r) => r.url === 'dxosWms:publicTrack'), false);
+  const verifyReq = requests.find((r) => r.url === 'dxosWms:verifyTrackSignature');
+  assert.ok(verifyReq && verifyReq.method === 'POST');
+  assert.deepEqual(verifyReq.data, {
+    code: 'LDX-TRK-9373FB0FE9',
+    trackingCode: 'LDX-TRK-9373FB0FE9',
+    verify: 'abc123def4567890',
+  });
+
+  const proofCard = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-proof-card');
+  assert.ok(proofCard, 'Expected public-track-proof-card');
+  assert.ok(collectText(proofCard).includes('ed25519-org-a-v1'));
+
+  const codeInput = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-code-input');
+  const tokenInput = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-token-input');
+  const toggleBtn = findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-token-toggle');
+  assert.equal(codeInput?.props?.value, 'LDX-TRK-9373FB0FE9');
+  assert.equal(tokenInput?.props?.type, 'password');
+  assert.ok(toggleBtn);
+  toggleBtn.props.onClick();
+  tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    location: { pathname: '/v/track/LDX-TRK-9373FB0FE9', search: '?verify=abc123def4567890' },
+  });
+  assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-token-input')?.props?.type, 'text');
+});
+
+test('T4-RW-02: PublicTrackPage interactive buttons and inputs enforce >=44px mobile touch targets', async () => {
+  const { createPublicTrackPage } = require('../src/client-v2/public-track-page');
+  const fakeReact = createFakeReact();
+  const mockApi = {
+    async request(req) {
+      if (req.url === 'dxosWms:publicTrack') {
+        return {
+          data: {
+            data: {
+              trackingCode: 'LDX-TRK-TOUCH-44',
+              status: 'delivered',
+              orderCode: 'ORD-TOUCH-44',
+              ledgerVerification: { seq: 1, keyId: 'k1', verifiedFormat: true },
+            },
+          },
+        };
+      }
+      return { data: {} };
+    },
+  };
+  const PublicTrackPage = createPublicTrackPage({ Plugin: class {} }, fakeReact, { apiClient: mockApi });
+  let tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    trackingCode: 'LDX-TRK-TOUCH-44',
+    token: 'ldx_trk_touch_44',
+  });
+  await fakeReact._flushEffects();
+  tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    trackingCode: 'LDX-TRK-TOUCH-44',
+    token: 'ldx_trk_touch_44',
+  });
+
+  for (const tid of [
+    'public-track-code-input',
+    'public-track-token-input',
+    'public-track-token-toggle',
+    'public-track-lookup-btn',
+    'public-track-verify-btn',
+  ]) {
+    const el = findNode(tree, (n) => n.props?.['data-testid'] === tid);
+    assert.ok(el, `Expected element ${tid}`);
+    assert.ok(Number(el.props?.style?.minHeight) >= 44, `${tid} minHeight must be >= 44, got ${el.props?.style?.minHeight}`);
+    if (el.type === 'button') {
+      assert.ok(Number(el.props?.style?.minWidth) >= 44, `${tid} minWidth must be >= 44, got ${el.props?.style?.minWidth}`);
+    }
+  }
+});

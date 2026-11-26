@@ -221,3 +221,78 @@ test('MappingSettings surfaces loadMappings errors, passes Table loading state, 
     assert.equal(h.resetCalls.length, 1, 'Successful link must call form.resetFields()');
   }
 });
+
+test('MappingSettings renders warning alert when configured:false, uses non-raw-ID Selects when listLinkTargets is available, and client-v2 registers routes/settings', async () => {
+  const h = createHarness();
+  const api = {
+    async request(req) {
+      if (req.url === 'enterpriseAuth:configuration') {
+        return { data: { data: { configured: false, issuer: 'http://localhost:8081/realms/lattice', clientId: 'dx-native', callback: 'http://localhost:13000/api/enterpriseAuth:callback', warning: 'Internal transport mismatch' } } };
+      }
+      if (req.url === 'enterpriseAuth:listMappings') {
+        return { data: { data: { items: [{ id: 1, authenticator: 'native-keycloak', subject: 'sub-1', userId: 12, username: 'alice', email: 'alice@example.com', employeeName: 'Alice', organizationId: 'org-a', issuer: 'http://kc' }] } } };
+      }
+      if (req.url === 'enterpriseAuth:listLinkTargets') {
+        return {
+          data: {
+            data: {
+              authenticators: [{ name: 'native-keycloak', title: 'Keycloak SSO', enabled: true }],
+              users: [{ id: 12, username: 'alice', email: 'alice@example.com', employeeCode: 'EMP-1', employeeName: 'Alice', organizationId: 'org-a' }],
+            },
+          },
+        };
+      }
+      return { data: {} };
+    },
+  };
+  const MappingSettings = await h.init(api);
+  let tree = h.render(MappingSettings);
+  await h.flushEffects();
+  tree = h.render(MappingSettings);
+
+  const warnAlerts = findAllNodes(tree, (n) => n.type === h.antd.Alert && n.props?.type === 'warning');
+  assert.ok(warnAlerts.some((a) => String(a.props.description || a.props.message || '').includes('Internal transport mismatch')));
+
+  const selects = findAllNodes(tree, (n) => n.type === h.antd.Select);
+  assert.ok(selects.length >= 2, 'Expected Select controls for authenticator and userId');
+  const formNode = findNode(tree, (n) => n.type === h.antd.Form);
+  const userIdItem = findNode(formNode, (n) => n.type === h.antd.Form.Item && n.props?.name === 'userId');
+  assert.ok(userIdItem.props.rules.some((r) => r.pattern && r.pattern.test('123') && !r.pattern.test('abc')));
+
+  const table = findNode(tree, (n) => n.type === h.antd.Table);
+  assert.ok(table.props.columns.some((c) => c.dataIndex === 'organizationId' || String(c.title).includes('Tổ chức')));
+
+  // client-v2 registration check (without @nocobase/client dependency)
+  const v2Path = path.resolve(__dirname, '../src/client-v2/index.js');
+  const v2Src = readFileSync(v2Path, 'utf8');
+  assert.doesNotMatch(v2Src, /['"]@nocobase\/client['"]/);
+  let v2Factory;
+  const defineV2 = (_name, deps, fn) => {
+    assert.ok(Array.from(deps).includes('@nocobase/client-v2'));
+    v2Factory = fn;
+  };
+  defineV2.amd = {};
+  vm.runInNewContext(v2Src, {
+    define: defineV2,
+    window: { location: { search: '', replace() {}, assign() {} }, history: { replaceState() {} } },
+    URLSearchParams,
+    Error,
+  });
+  const v2Mod = v2Factory({ Plugin: class {}, useAPIClient: () => api }, {
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (i) => [typeof i === 'function' ? i() : i, () => {}],
+    useCallback: (fn) => fn,
+    useRef: (i) => ({ current: i }),
+    useEffect() {},
+  }, h.antd);
+  const v2Routes = [];
+  const v2Settings = [];
+  const v2Plugin = new v2Mod.default();
+  v2Plugin.app = {
+    router: { add: (name, cfg) => v2Routes.push({ name, ...cfg }) },
+    pluginSettingsManager: { add: (name, cfg) => v2Settings.push({ name, ...cfg }) },
+  };
+  await v2Plugin.load();
+  assert.ok(v2Routes.some((r) => r.name === 'enterprise-login' && r.path === '/enterprise-login' && r.skipAuthCheck === true));
+  assert.ok(v2Settings.some((s) => s.name === 'auth.enterprise-mappings' && typeof s.Component === 'function'));
+});

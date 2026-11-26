@@ -724,10 +724,10 @@ test('studio-settings integrates 6 governance tabs alongside preserved 6 studio 
   const Page = createDxosStudioSettingsPage(client, harness.React, {}, {});
   let tree = await harness.mountAndFlush(Page);
 
-  // All 11 studio tabs preserved inside single role="tablist" (original 6 + Tabs 7-11 Broker/Automation/Builder/Forms/Approvals)
+  // All 12 studio tabs preserved inside single role="tablist" (including Notify tab)
   const tablists = collectNodes(tree, (n) => n.props?.role === 'tablist');
   assert.equal(tablists.length, 1);
-  assert.equal(collectNodes(tablists[0], (n) => n.props?.role === 'tab').length, 11);
+  assert.equal(collectNodes(tablists[0], (n) => n.props?.role === 'tab').length, 12);
 
   // All 6 governance sub-tabs exposed 1 click away via data-testid="dxos-studio-tab-<id>"
   for (const id of ['api-keys', 'ledger', 'data-gov', 'wms-epod', 'dmn', 'delegations']) {
@@ -1084,5 +1084,178 @@ test('Task 3: DMN console collapses raw JSON forms inside closed <details> and r
   const evalFormAfter = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-dmn-eval-form')[0];
   const nextEvalCtx = JSON.parse(collectNodes(evalFormAfter, (n) => n.type === 'textarea')[0].props.value);
   assert.deepEqual(nextEvalCtx, { weightKg: 0, express: false, region: '' }, 'Selecting a DMN table must regenerate simContextText from tbl.inputsJson');
+});
+
+test('P1-05 & P2-07: API Key Copy PAT + <select> role, and PKI 2-step Key Rotation + Merkle Proof export', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosApiKeys:list': async () => ({ organizationId: 'org-a', items: [] }),
+    'dxosApiKeys:issue': async (req) => ({ id: 99, name: req.data.name, roleName: req.data.roleName, keyPrefix: 'ldx_pat_copy99', token: 'ldx_pat_copy99_secret' }),
+    'dxosLedger:publicKey': async () => ({ organizationId: 'org-a', keyId: 'ed25519-old-1', fingerprintSha256: 'fp-old' }),
+    'dxosLedger:status': async () => ({ organizationId: 'org-a', keyId: 'ed25519-old-1', entryCount: 1, merkleRoot: 'root-1' }),
+    'dxosLedger:entries': async () => ({ organizationId: 'org-a', total: 1, items: [{ seq: 1, eventType: 'wms.epod_captured', targetCollection: 'latticeOrders', targetRecordId: '1', entryHash: 'h1', merkleRoot: 'root-1' }] }),
+    'dxosLedger:rotateKey': async () => ({
+      organizationId: 'org-a',
+      newKeyId: 'ed25519-new-2',
+      retiredKeyId: 'ed25519-old-1',
+      fingerprintSha256: 'fp-new',
+      active: true,
+      status: 'active',
+    }),
+    'dxosLedger:exportProof': async () => ({ organizationId: 'org-a', entryCount: 1, merkleRoot: 'root-1', publicKey: { keyId: 'ed25519-new-2' }, entries: [{ seq: 1 }] }),
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  const roleSelect = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-role-input')[0];
+  assert.equal(roleSelect.type, 'select');
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-name-input')[0].props.onChange({ target: { value: 'CI Key' } });
+  tree = harness.render(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-issue-form')[0].props.onSubmit({ preventDefault() {} });
+  tree = harness.render(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+
+  const copyBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-copy-token-btn')[0];
+  assert.ok(copyBtn);
+  await copyBtn.props.onClick();
+  tree = harness.render(Consoles, { initialSection: 'api-keys', selectedOrg: 'org-a' });
+  assert.ok(textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-apikey-copy-token-btn')[0]).includes('Đã sao chép'));
+
+  // Ledger rotateKey (2-step) + exportProof
+  tree = await harness.mountAndFlush(Consoles, { activeSection: 'ledger', selectedOrg: 'org-a' });
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-rotate-key-btn')[0].props.onClick();
+  tree = harness.render(Consoles, { activeSection: 'ledger', selectedOrg: 'org-a' });
+  const confirmRotateBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-rotate-confirm-btn')[0];
+  assert.ok(confirmRotateBtn);
+  await confirmRotateBtn.props.onClick();
+  tree = harness.render(Consoles, { activeSection: 'ledger', selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosLedger:rotateKey' && r.method === 'post'));
+  const rotateBanner = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-rotate-result')[0];
+  assert.ok(rotateBanner, 'dxos-ledger-rotate-result banner must render after key rotation');
+  assert.ok(textOf(rotateBanner).includes('ed25519-new-2'));
+  assert.ok(textOf(rotateBanner).includes('ed25519-old-1'));
+  const statusFeedback = collectNodes(tree, (n) => n.props?.role === 'status' && textOf(n).includes('ed25519-new-2'));
+  assert.ok(statusFeedback.length >= 1);
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-export-proof-btn')[0].props.onClick();
+  tree = harness.render(Consoles, { activeSection: 'ledger', selectedOrg: 'org-a' });
+  assert.ok(requests.some((r) => r.url === 'dxosLedger:exportProof' && r.method === 'get'));
+  const proofPreview = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-ledger-proof-preview')[0];
+  assert.ok(proofPreview && textOf(proofPreview).includes('root-1'));
+});
+
+test('T4-RW-03 regression: DataGovConsole and LedgerConsole skip org-required queries while organizationId is empty and auto-fetch once resolved', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+
+  // 1. Direct DataGovConsole mount with empty/whitespace selectedOrg fires ZERO dxosDataGov:* requests
+  const dgHarness = createReactHarness();
+  const dgMock = createApiMock({
+    'dxosDataGov:tierSummary': async (req) => {
+      assert.ok(req.params?.organizationId, 'tierSummary must receive non-empty organizationId');
+      return { organizationId: req.params.organizationId, hotOrders: 3, warmOrders: 1, hotTickets: 0, coldSnapshots: 1, coldTotalRecords: 5, lineageEdges: 2, quarantineOpen: 1, quarantineResolved: 0 };
+    },
+    'dxosDataGov:listSnapshots': async (req) => {
+      assert.ok(req.params?.organizationId, 'listSnapshots must receive non-empty organizationId');
+      return { organizationId: req.params.organizationId, total: 1, items: [{ snapshotUid: 'SNP-RW03-1', sourceCollection: 'latticeOrders', tier: 'cold', recordCount: 5, payloadHash: 'hash1', frozenAt: '2026-11-26T00:00:00.000Z' }] };
+    },
+    'dxosDataGov:quarantineList': async (req) => {
+      assert.ok(req.params?.organizationId, 'quarantineList must receive non-empty organizationId');
+      return { organizationId: req.params.organizationId, total: 1, items: [{ quarantineUid: 'QRN-RW03-1', sourceSystem: 'mqtt', assetEntityId: 'urn:ngsi-ld:Asset:org-a:native:1', metricName: 'temperature', numericValue: 18, unit: 'CEL', reasonCode: 'TEMP_HIGH', status: 'quarantined' }] };
+    },
+  });
+  const ConsolesDG = createDxosGovernanceConsoles(dgMock.client, dgHarness.React, {}, {});
+  let dgTree = await dgHarness.mountAndFlush(ConsolesDG, { initialSection: 'data-gov', selectedOrg: '' });
+  assert.equal(dgMock.requests.length, 0, 'DataGovConsole must not call dxosDataGov:* when selectedOrg is empty');
+
+  dgTree = await dgHarness.mountAndFlush(ConsolesDG, { initialSection: 'data-gov', selectedOrg: '   ' });
+  assert.equal(dgMock.requests.length, 0, 'DataGovConsole must not call dxosDataGov:* when selectedOrg is whitespace');
+
+  // Refresh button is disabled while organizationId is unset and clicking/submitting triggers zero API calls
+  const dgRefreshBtn = collectNodes(dgTree, (n) => n.type === 'button' && textOf(n) === 'Làm mới dữ liệu')[0];
+  assert.ok(dgRefreshBtn && dgRefreshBtn.props.disabled === true);
+  await dgRefreshBtn.props.onClick();
+  await collectNodes(dgTree, (n) => n.props?.['data-testid'] === 'dxos-datagov-freeze-form')[0].props.onSubmit({ preventDefault() {} });
+  assert.equal(dgMock.requests.length, 0);
+
+  // Once selectedOrg resolves to 'org-a', tierSummary, listSnapshots, and quarantineList are called with organizationId='org-a'
+  dgTree = await dgHarness.mountAndFlush(ConsolesDG, { initialSection: 'data-gov', selectedOrg: 'org-a' });
+  assert.equal(dgMock.requests.filter((r) => r.url === 'dxosDataGov:tierSummary' && r.params?.organizationId === 'org-a').length, 1);
+  assert.equal(dgMock.requests.filter((r) => r.url === 'dxosDataGov:listSnapshots' && r.params?.organizationId === 'org-a').length, 1);
+  assert.equal(dgMock.requests.filter((r) => r.url === 'dxosDataGov:quarantineList' && r.params?.organizationId === 'org-a').length, 1);
+  const dgDump = JSON.stringify(dgTree);
+  assert.ok(dgDump.includes('SNP-RW03-1'));
+  assert.ok(dgDump.includes('QRN-RW03-1'));
+
+  // 2. Direct LedgerConsole mount with empty selectedOrg skips dxosLedger:* until organizationId resolves
+  const ledgerHarness = createReactHarness();
+  const ledgerMock = createApiMock({
+    'dxosLedger:publicKey': async (req) => {
+      assert.ok(req.params?.organizationId);
+      return { organizationId: req.params.organizationId, keyId: 'ed25519-rw03' };
+    },
+    'dxosLedger:status': async (req) => {
+      assert.ok(req.params?.organizationId);
+      return { organizationId: req.params.organizationId, entryCount: 1, latestSeq: 1, merkleRoot: 'root-rw03' };
+    },
+    'dxosLedger:entries': async (req) => {
+      assert.ok(req.params?.organizationId);
+      return { organizationId: req.params.organizationId, total: 1, items: [{ seq: 1, eventType: 'audit.test', targetCollection: 'latticeOrders', targetRecordId: '1', entryHash: 'h1', merkleRoot: 'root-rw03' }] };
+    },
+  });
+  const ConsolesLedger = createDxosGovernanceConsoles(ledgerMock.client, ledgerHarness.React, {}, {});
+  await ledgerHarness.mountAndFlush(ConsolesLedger, { initialSection: 'ledger', selectedOrg: '' });
+  assert.equal(ledgerMock.requests.length, 0, 'LedgerConsole must not call dxosLedger:* when selectedOrg is empty');
+  const ledgerTree = await ledgerHarness.mountAndFlush(ConsolesLedger, { initialSection: 'ledger', selectedOrg: 'org-a' });
+  assert.equal(ledgerMock.requests.filter((r) => r.url === 'dxosLedger:entries' && r.params?.organizationId === 'org-a').length, 1);
+  assert.ok(JSON.stringify(ledgerTree).includes('ed25519-rw03'));
+
+  // 3. Full DxosStudioSettingsPage ?tab=data-gov repro: backend rejects any missing organizationId with 400 DATA_GOV_ORG_REQUIRED
+  const prevWindow = globalThis.window;
+  globalThis.window = { location: { search: '?tab=data-gov' } };
+  try {
+    const studioHarness = createReactHarness();
+    const studioMock = createApiMock({
+      'dxosStudio:listTemplates': async () => ({ items: [] }),
+      'dxosStudio:listEmployees': async () => ({ items: [], organizations: ['native-ui-lab'], organizationCounts: { 'native-ui-lab': 4 } }),
+      'dxosStudio:readiness': async () => ({ plugins: [] }),
+      'dxosDataGov:tierSummary': async (req) => {
+        if (!req.params?.organizationId) {
+          const err = new Error('Valid organizationId is required for root data governance queries.');
+          err.response = { status: 400, data: { errors: [{ code: 'DATA_GOV_ORG_REQUIRED', message: err.message }] } };
+          throw err;
+        }
+        return { organizationId: req.params.organizationId, hotOrders: 2, warmOrders: 0, hotTickets: 1, coldSnapshots: 1, coldTotalRecords: 2, lineageEdges: 1, quarantineOpen: 0, quarantineResolved: 0 };
+      },
+      'dxosDataGov:listSnapshots': async (req) => {
+        if (!req.params?.organizationId) {
+          const err = new Error('Valid organizationId is required for root data governance queries.');
+          err.response = { status: 400, data: { errors: [{ code: 'DATA_GOV_ORG_REQUIRED', message: err.message }] } };
+          throw err;
+        }
+        return { organizationId: req.params.organizationId, total: 1, items: [{ snapshotUid: 'SNP-LAB-1', sourceCollection: 'latticeOrders', tier: 'cold', recordCount: 2, payloadHash: 'h-lab' }] };
+      },
+      'dxosDataGov:quarantineList': async (req) => {
+        if (!req.params?.organizationId) {
+          const err = new Error('Valid organizationId is required for root data governance queries.');
+          err.response = { status: 400, data: { errors: [{ code: 'DATA_GOV_ORG_REQUIRED', message: err.message }] } };
+          throw err;
+        }
+        return { organizationId: req.params.organizationId, total: 0, items: [] };
+      },
+    });
+    const Page = createDxosStudioSettingsPage(studioMock.client, studioHarness.React, {}, {});
+    const studioTree = await studioHarness.mountAndFlush(Page);
+    assert.equal(collectNodes(studioTree, (n) => n.props?.['data-testid'] === 'dxos-governance-console-data-gov').length, 1);
+
+    const govReqs = studioMock.requests.filter((r) => r.url.startsWith('dxosDataGov:'));
+    assert.ok(govReqs.some((r) => r.url === 'dxosDataGov:listSnapshots'));
+    assert.ok(govReqs.some((r) => r.url === 'dxosDataGov:quarantineList'));
+    assert.ok(govReqs.every((r) => r.params?.organizationId === 'native-ui-lab'), 'Every dxosDataGov:* request must carry resolved organizationId');
+    assert.equal(collectNodes(studioTree, (n) => n.props?.role === 'status').length, 0, 'No error banner may appear on ?tab=data-gov mount');
+    assert.ok(JSON.stringify(studioTree).includes('SNP-LAB-1'));
+  } finally {
+    globalThis.window = prevWindow;
+  }
 });
 

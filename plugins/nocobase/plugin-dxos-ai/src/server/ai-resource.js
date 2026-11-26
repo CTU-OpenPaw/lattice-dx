@@ -60,6 +60,9 @@ const {
   validateQuickConnectBaseUrl,
   probeLlmHealth,
   runQuickConnectLlm,
+  listLlmServices,
+  deleteLlmService,
+  switchLlmServiceModel,
 } = require('./ai-llm-health');
 const {
   serializeProfile,
@@ -725,17 +728,19 @@ function createDxosAiActions(db, { env = process.env, fetchImpl, llmClient } = {
       const targetDb = resolveDb(ctx);
       const user = ctx?.state?.currentUser || ctx?.auth?.user;
       if (!val(user, 'id')) throw failTool('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
+      const actor = targetDb ? await resolveActorScope(ctx, targetDb) : null;
       const payload = readActionPayload(ctx);
       const portalSlug = String(ctx?.action?.params?.portalSlug || payload.portalSlug || '').trim().toLowerCase();
       const pageTitle = String(ctx?.action?.params?.pageTitle || payload.pageTitle || '').trim();
       ctx.body = portalSlug
-        ? await getSurfaceRevisionState(targetDb, portalSlug, pageTitle, val)
+        ? await getSurfaceRevisionState(targetDb, portalSlug, pageTitle, val, actor?.organizationId || '')
         : { revision: 1, blockCount: 0, layoutSignature: '' };
       if (typeof next === 'function') await next();
     },
 
     surfaceEvents: createSurfaceEventsHandler({
-      getInitialState: (ctx, portalSlug, pageTitle) => getSurfaceRevisionState(resolveDb(ctx), portalSlug, pageTitle, val),
+      resolveDb,
+      getInitialState: (ctx, portalSlug, pageTitle, organizationId = '') => getSurfaceRevisionState(resolveDb(ctx), portalSlug, pageTitle, val, organizationId),
     }),
 
     async inspectPageBlocks(ctx, next) {
@@ -920,6 +925,38 @@ function createDxosAiActions(db, { env = process.env, fetchImpl, llmClient } = {
       }
       const targetDb = await requireAdmin(ctx);
       ctx.body = await runQuickConnectLlm(targetDb, ctx, { env, fetchImpl, readActionPayload });
+      if (typeof next === 'function') await next();
+    },
+
+    async listLlmServices(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'GET') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức GET.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      ctx.body = await listLlmServices(targetDb);
+      if (typeof next === 'function') await next();
+    },
+
+    async deleteLlmService(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const payload = readActionPayload(ctx);
+      const name = payload.name ?? payload.serviceName ?? ctx?.action?.params?.name ?? ctx?.action?.params?.filterByTk;
+      ctx.body = await deleteLlmService(targetDb, ctx, { name, env });
+      if (typeof next === 'function') await next();
+    },
+
+    async switchLlmServiceModel(ctx, next) {
+      if (ctx.method && String(ctx.method).toUpperCase() !== 'POST') {
+        throw failTool('METHOD_NOT_ALLOWED', 405, 'Cần phương thức POST.');
+      }
+      const targetDb = await requireAdmin(ctx);
+      const payload = readActionPayload(ctx);
+      const name = payload.name ?? payload.serviceName ?? ctx?.action?.params?.name;
+      const modelName = payload.modelName ?? payload.model ?? ctx?.action?.params?.modelName;
+      ctx.body = await switchLlmServiceModel(targetDb, ctx, { name, modelName, env });
       if (typeof next === 'function') await next();
     },
 

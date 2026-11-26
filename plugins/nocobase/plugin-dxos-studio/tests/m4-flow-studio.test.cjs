@@ -214,19 +214,30 @@ test('FlowCanvas preserves viewport zoom/pan on ResizeObserver container resize 
   }
 });
 
-test('dxosStudio:listAutomationRules action delegates cleanly and ACL allows loggedIn users', async () => {
+test('dxosStudio:listAutomationRules action delegates cleanly and enforces manager/admin ACL (P0-07)', async () => {
   const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
   const serverIndexSrc = fs.readFileSync(path.join(PLUGIN_ROOT, 'src/server/index.js'), 'utf8');
   assert.match(serverIndexSrc, /acl\.allow\(\s*'dxosStudio'\s*,\s*\[[^\]]*'listAutomationRules'[^\]]*\]\s*,\s*'loggedIn'\s*\)/);
 
   const mockDb = {
     getRepository(name) {
+      if (name === 'rolesUsers') {
+        return {
+          async find({ filter }) {
+            if (filter?.userId === 10) return [{ userId: 10, roleName: 'ldx_manager' }];
+            if (filter?.userId === 11) return [{ userId: 11, roleName: 'ldx_employee' }];
+            return [];
+          },
+        };
+      }
       if (name === 'latticeEmployees') {
         return {
-          async find() {
+          async find({ filter }) {
+            if (filter?.userId === 11) return [{ id: 2, userId: 11, organizationId: 'org-a', role: 'ldx_employee', active: true }];
             return [{ id: 1, userId: 10, organizationId: 'org-a', role: 'ldx_manager', active: true }];
           },
-          async findOne() {
+          async findOne({ filter }) {
+            if (filter?.userId === 11) return { id: 2, userId: 11, organizationId: 'org-a', role: 'ldx_employee', active: true };
             return { id: 1, userId: 10, organizationId: 'org-a', role: 'ldx_manager', active: true };
           },
         };
@@ -247,13 +258,24 @@ test('dxosStudio:listAutomationRules action delegates cleanly and ACL allows log
 
   const ctx = {
     method: 'GET',
-    state: { currentUser: { id: 10, roles: [{ name: 'ldx_manager' }] }, organizationId: 'org-a' },
+    state: { currentUser: { id: 10, roles: [{ name: 'ldx_manager' }] }, currentRole: 'ldx_manager', organizationId: 'org-a' },
     action: { params: { organizationId: 'org-a' } },
     query: {},
   };
   await actions.listAutomationRules(ctx, async () => {});
   assert.equal(Array.isArray(ctx.body?.items), true);
   assert.equal(ctx.body.items[0].ruleKey, 'rule_1');
+
+  const empCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 11, roles: [{ name: 'ldx_employee' }] }, currentRole: 'ldx_employee', organizationId: 'org-a' },
+    action: { params: { organizationId: 'org-a' } },
+    query: {},
+  };
+  await assert.rejects(
+    () => actions.listAutomationRules(empCtx, async () => {}),
+    (err) => err?.status === 403 && err?.code === 'FORBIDDEN',
+  );
 });
 
 test('flow-version-ui formats timestamps in +07:00 and localizes Live badge while retaining Draft indicator', () => {

@@ -113,3 +113,72 @@ test('buildPitrPlan produces safe non-shell command arguments for base-backup, l
   ]);
   assert.equal(JSON.stringify(restore).includes('top-secret-pass'), false);
 });
+
+test('P1-17: local-gz PITR backend supports check-config, base-backup, list, and .gz restore-plan with path safety', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, resolve } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+
+  const parsed = parsePitrArgs([
+    'restore-plan',
+    '--backend=local-gz',
+    '--target-time=2026-11-22T06:00:00Z',
+    '--allow-unencrypted-local',
+  ]);
+  assert.equal(parsed.backend, 'local-gz');
+  assert.equal(parsed.allowUnencryptedLocal, true);
+
+  assert.throws(
+    () => checkPitrConfig({ backend: 'local-gz', env: {} }),
+    /allow-unencrypted-local|encryption/i,
+  );
+  assert.throws(
+    () => checkPitrConfig({
+      backend: 'local-gz',
+      allowUnencryptedLocal: true,
+      env: { PITR_WAL_DIR: '/var/lib/postgresql/wal-archive;rm -rf /' },
+    }),
+    /Invalid.*PITR_WAL_DIR/i,
+  );
+
+  const env = {
+    PITR_WAL_DIR: '/var/lib/postgresql/wal-archive',
+    PITR_BASEBACKUP_DIR: '/var/lib/postgresql/basebackups',
+    PGDATA: '/var/lib/postgresql/data',
+  };
+  const cfg = checkPitrConfig({ backend: 'local-gz', allowUnencryptedLocal: true, env });
+  assert.equal(cfg.ok, true);
+  assert.equal(cfg.backend, 'local-gz');
+  assert.equal(cfg.walDir, '/var/lib/postgresql/wal-archive');
+  assert.equal(cfg.baseBackupDir, '/var/lib/postgresql/basebackups');
+
+  const base = buildPitrPlan({ action: 'base-backup', backend: 'local-gz', allowUnencryptedLocal: true, env });
+  assert.equal(base.command, 'pg_basebackup');
+  assert.ok(base.args.includes('-Ft') && base.args.includes('-z'));
+
+  const list = buildPitrPlan({ action: 'list', backend: 'local-gz', allowUnencryptedLocal: true, env });
+  assert.equal(list.command, 'find');
+  assert.ok(list.args.includes('/var/lib/postgresql/wal-archive'));
+
+  const restore = buildPitrPlan({
+    action: 'restore-plan',
+    backend: 'local-gz',
+    targetTime: '2026-11-22T06:00:00Z',
+    allowUnencryptedLocal: true,
+    env,
+  });
+  assert.equal(restore.command, 'tar');
+  assert.deepEqual(restore.args, ['-xzf', '/var/lib/postgresql/basebackups/latest/base.tar.gz', '-C', '/var/lib/postgresql/data']);
+  assert.deepEqual(restore.recoveryConfig, {
+    restore_command: 'gzip -dc "/var/lib/postgresql/wal-archive/%f.gz" > "%p"',
+    recovery_target_time: '2026-11-22T06:00:00Z',
+    recovery_target_action: 'promote',
+  });
+
+  const pitrSh = readFileSync(join(ROOT, 'infra/config/postgres/pitr-archive.sh'), 'utf8');
+  assert.equal(pitrSh.includes('\r'), false, 'pitr-archive.sh must remain LF');
+  assert.match(pitrSh, /gzip -dc -- "\$dest".*cmp -s - "\$wal_path"/);
+  assert.match(pitrSh, /PITR_WAL_RETENTION_DAYS/);
+  assert.match(pitrSh, /find "\$wal_dir"/);
+});

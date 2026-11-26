@@ -167,6 +167,17 @@ function findNode(node, predicate) {
   return null;
 }
 
+function findAllNodes(node, predicate, out = []) {
+  if (!node || typeof node !== 'object') return out;
+  if (predicate(node)) out.push(node);
+  if (Array.isArray(node.children)) {
+    for (const child of node.children) {
+      findAllNodes(child, predicate, out);
+    }
+  }
+  return out;
+}
+
 function collectText(node) {
   if (node == null || typeof node === 'boolean') return '';
   if (typeof node === 'string' || typeof node === 'number') return String(node);
@@ -191,15 +202,16 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   assert.equal(manifest.display, 'standalone');
   assert.equal(manifest.background_color, '#0f172a');
   assert.equal(manifest.theme_color, '#0f172a');
-  assert.ok(Array.isArray(manifest.icons) && manifest.icons.length >= 1);
-  assert.ok(manifest.icons.every((ic) => typeof ic.src === 'string' && ic.src.startsWith('data:image/svg+xml')));
+  assert.ok(Array.isArray(manifest.icons) && manifest.icons.length >= 2);
+  assert.ok(manifest.icons.some((ic) => ic.src === '/api/dxos:icon-192.png' && ic.sizes === '192x192' && ic.type === 'image/png'));
+  assert.ok(manifest.icons.some((ic) => ic.src === '/api/dxos:icon-512.png' && ic.sizes === '512x512' && ic.type === 'image/png'));
   const manifestJson = JSON.stringify(manifest).toLowerCase();
   for (const forbidden of ['password', 'secret', 'token', 'apikey', 'organizationid', 'userid', 'email']) {
     assert.equal(manifestJson.includes(forbidden), false, `Manifest must not leak ${forbidden}`);
   }
 
   // 2. Service Worker Script syntax + runtime Cache Storage invariants
-  const swScript = buildServiceWorkerScript({ version: '0.4.1' });
+  const swScript = buildServiceWorkerScript({ version: '0.4.2' });
   assert.equal(typeof swScript, 'string');
   assert.doesNotThrow(() => new vm.Script(swScript), 'sw.js must be valid JavaScript');
 
@@ -306,7 +318,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   const cachedKeys = [...openedCaches.entries()]
     .filter(([k]) => k !== 'latticedx-field-pwa-old-v0')
     .flatMap(([, c]) => [...c._entries.keys()]);
-  assert.deepEqual(cachedKeys.sort(), ['/api/dxos:manifest', '/v/mobile']);
+  assert.deepEqual(cachedKeys.sort(), ['/api/dxos:icon-192.png', '/api/dxos:icon-512.png', '/api/dxos:manifest', '/v/mobile']);
 
   listeners.get('activate')({ waitUntil: (p) => waitPromises.push(p) });
   await Promise.all(waitPromises.splice(0));
@@ -363,7 +375,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   });
   assert.ok(noStorePromise);
   await noStorePromise;
-  const activeCache = openedCaches.get('latticedx-field-pwa-v0.4.1');
+  const activeCache = openedCaches.get('latticedx-field-pwa-v0.4.2');
   assert.equal(activeCache._entries.has('/v/assets/private-nostore.js'), false);
 
   let redirectedPromise = null;
@@ -478,7 +490,7 @@ test('client-v2 offline queue: bounded 50 items, allowlisted actions only, FIFO 
     { code: 'OFFLINE_QUEUE_FULL' },
   );
 
-  // Flush FIFO behavior: 200 succeeded (removed), 400 invalid (removed + failed++), 403 forbidden (removed + failed++), 503 & network error (retained!)
+  // Flush FIFO behavior: 200 succeeded (removed), 400 invalid (quarantined), 403 forbidden (quarantined), 503 & network error (deferred/failed)
   const flushStorage = makeMemoryStorage();
   const q1 = enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: { seq: 1 } }, { storage: flushStorage }).item;
   const q2 = enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: { seq: 2 } }, { storage: flushStorage }).item;
@@ -523,12 +535,21 @@ test('client-v2 offline queue: bounded 50 items, allowlisted actions only, FIFO 
   assert.equal(progressEvents.length, 5);
   assert.equal(flushRes.synced, 1);
   assert.equal(flushRes.failed, 2);
+  assert.equal(flushRes.quarantined, 2);
   assert.equal(flushRes.deferred, 2);
   const remaining = readOfflineQueue({ storage: flushStorage });
-  assert.deepEqual(remaining.map((r) => r.id), [q4.id, q5.id]);
-  assert.equal(remaining[0].attempts, 1);
-  assert.equal(remaining[1].attempts, 1);
-  assert.ok(!remaining.some((r) => r.id === q1.id || r.id === q2.id || r.id === q3.id));
+  assert.deepEqual(remaining.map((r) => r.id), [q2.id, q3.id, q4.id, q5.id]);
+  const q2Stored = remaining.find((r) => r.id === q2.id);
+  const q3Stored = remaining.find((r) => r.id === q3.id);
+  const q4Stored = remaining.find((r) => r.id === q4.id);
+  assert.equal(q2Stored.status, 'quarantined');
+  assert.equal(q2Stored.httpStatus, 400);
+  assert.match(q2Stored.lastError, /Validation failed/);
+  assert.equal(q3Stored.status, 'quarantined');
+  assert.equal(q3Stored.httpStatus, 403);
+  assert.equal(q4Stored.status, 'failed');
+  assert.equal(q4Stored.attempts, 1);
+  assert.ok(!remaining.some((r) => r.id === q1.id));
 });
 
 test('client-v2 QR/barcode parser parses URN, tracking, lot, order, JSON tags and rejects unsafe/oversized payloads', () => {
@@ -594,7 +615,28 @@ test('client-v2 MobileFieldPwaPage renders field controls, handles QR/GPS/Canvas
   const requests = [];
   let failNetwork = false;
   const mockApiClient = {
+    auth: { role: 'ldx_manager', getToken: () => 'jwt-field-test' },
     async request(req) {
+      if (req.url === 'roles:check') {
+        return {
+          data: {
+            data: {
+              allowAll: false,
+              resources: ['latticeOrders', 'latticeAssets', 'latticeIncidentCases', 'latticeServiceTickets'],
+              actions: { 'latticeAssets:update': true, 'latticeIncidentCases:create': true },
+            },
+          },
+        };
+      }
+      if ([
+        'latticeNotifications:unreadCount',
+        'dxosApprovals:listInbox',
+        'latticeOrders:list',
+        'latticeIncidentCases:list',
+        'latticeServiceTickets:list',
+      ].includes(req.url)) {
+        return { data: { data: { items: [], unreadCount: 0 } } };
+      }
       requests.push(req);
       if (failNetwork) throw new Error('Network unreachable');
       if (req.url === 'dxosWms:epodCapture') {
@@ -617,8 +659,14 @@ test('client-v2 MobileFieldPwaPage renders field controls, handles QR/GPS/Canvas
     navigator: global.navigator,
     window: global.window,
     document: global.document,
+    fetch: globalThis.fetch,
   };
   let onlineFlag = true;
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    writable: true,
+    value: async () => ({ ok: true, status: 200, body: null }),
+  });
   Object.defineProperty(global, 'navigator', {
     configurable: true,
     value: {
@@ -659,7 +707,11 @@ test('client-v2 MobileFieldPwaPage renders field controls, handles QR/GPS/Canvas
   try {
     const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, { apiClient: mockApiClient });
     let tree = fakeReact._render(MobilePage, { storage, apiClient: mockApiClient });
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null);
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle'), null);
     fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    tree = fakeReact._render(MobilePage, { storage, apiClient: mockApiClient });
 
     assert.equal(registeredSw.length, 1);
     assert.equal(registeredSw[0].url, '/api/dxos:sw.js');
@@ -775,10 +827,12 @@ test('client-v2 MobileFieldPwaPage renders field controls, handles QR/GPS/Canvas
     assert.equal(readOfflineQueue({ storage }).length, 0);
     assert.equal(requests.at(-1).url, 'dxosBlocks:twinSetDesired');
     assert.deepEqual(requests.at(-1).data, { assetId: 18, desiredPatch: { targetTempC: -20 } });
+    fakeReact._unmount();
   } finally {
     Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
     Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
     Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
     void onlineFlag;
   }
 
@@ -1088,12 +1142,18 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     navigator: global.navigator,
     window: global.window,
     document: global.document,
+    fetch: globalThis.fetch,
   };
 
-  let isNavigatorOnline = false;
+  let isNavigatorOnline = true;
   const windowListeners = new Map();
   const storage = makeMemoryStorage();
 
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    writable: true,
+    value: async () => ({ ok: true, status: 200, body: null }),
+  });
   Object.defineProperty(global, 'navigator', {
     configurable: true,
     value: {
@@ -1113,33 +1173,60 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } },
   });
 
+  const makeRoleGrantApi = () => ({
+    auth: { role: 'ldx_manager', getToken: () => 'jwt-round1' },
+    async request(req) {
+      if (req.url === 'roles:check') {
+        return {
+          data: {
+            data: {
+              allowAll: false,
+              resources: ['latticeOrders', 'latticeAssets', 'latticeIncidentCases', 'latticeServiceTickets'],
+              actions: { 'latticeAssets:update': true, 'latticeIncidentCases:create': true },
+            },
+          },
+        };
+      }
+      return { data: {} };
+    },
+  });
+
   try {
     // Part A: Important 2 — 50-item full queue & QuotaExceededError in submitEpod / submitTwinDesired never throw unhandled rejections
     for (let i = 0; i < MAX_OFFLINE_QUEUE_ITEMS; i += 1) {
       enqueueOfflineAction({ actionType: 'iot.twinSetDesired', payload: { assetId: i + 1, desiredPatch: { targetTempC: 4 } } }, { storage });
     }
+    const partAApi = makeRoleGrantApi();
     const fakeReactA = createFakeReact();
     const MobilePageA = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactA, {});
     // Also test Minor 4: props.testSignatureDataUrl is ignored
     let treeA = fakeReactA._render(MobilePageA, {
       storage,
-      apiClient: { request: async () => ({ data: {} }) },
+      apiClient: partAApi,
       testSignatureDataUrl: 'data:image/png;base64,SHOULD_BE_IGNORED',
     });
     fakeReactA._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    isNavigatorOnline = false;
+    windowListeners.get('offline')?.();
+    treeA = fakeReactA._render(MobilePageA, {
+      storage,
+      apiClient: partAApi,
+      testSignatureDataUrl: 'data:image/png;base64,SHOULD_BE_IGNORED',
+    });
 
     findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-recipient-input').props.onChange({ target: { value: 'Anh Binh' } });
     findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-lat-input').props.onChange({ target: { value: '10.04' } });
     findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-lng-input').props.onChange({ target: { value: '105.74' } });
     treeA = fakeReactA._render(MobilePageA, {
       storage,
-      apiClient: { request: async () => ({ data: {} }) },
+      apiClient: partAApi,
       testSignatureDataUrl: 'data:image/png;base64,SHOULD_BE_IGNORED',
     });
     // Without canvas signature, testSignatureDataUrl prop MUST NOT bypass signature check
     const noSigRes = await findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
     assert.equal(noSigRes, null);
-    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: partAApi });
     assert.ok(collectText(findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('chữ ký'));
 
     // Draw signature via canvas mock, then hit OFFLINE_QUEUE_FULL cleanly on submitEpod & submitTwinDesired
@@ -1153,20 +1240,21 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     };
     canvasNodeA.props.onPointerDown({ clientX: 5, clientY: 5, pointerId: 1 });
     canvasNodeA.props.onPointerUp({ pointerId: 1 });
-    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: partAApi });
 
     const epodFullRes = await findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
     assert.equal(epodFullRes, null);
-    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: partAApi });
     assert.ok(collectText(findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('50/50'));
 
     findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.onChange({ target: { value: '12' } });
     findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '-18' } });
-    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: partAApi });
     const twinFullRes = await findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
     assert.equal(twinFullRes, null);
-    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: { request: async () => ({ data: {} }) } });
+    treeA = fakeReactA._render(MobilePageA, { storage, apiClient: partAApi });
     assert.ok(collectText(findNode(treeA, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('đầy'));
+    fakeReactA._unmount();
 
     // QuotaExceededError storage simulation
     const quotaStorage = {
@@ -1175,17 +1263,24 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
         throw Object.assign(new Error('DOM Exception 22'), { name: 'QuotaExceededError', code: 22 });
       },
     };
+    isNavigatorOnline = true;
+    const partQApi = makeRoleGrantApi();
     const fakeReactQ = createFakeReact();
     const MobilePageQ = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactQ, {});
-    let treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: { request: async () => ({ data: {} }) } });
+    let treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: partQApi });
     fakeReactQ._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    isNavigatorOnline = false;
+    windowListeners.get('offline')?.();
+    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: partQApi });
     findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.onChange({ target: { value: '12' } });
     findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '-18' } });
-    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: { request: async () => ({ data: {} }) } });
+    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: partQApi });
     const quotaRes = await findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
     assert.equal(quotaRes, null);
-    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: { request: async () => ({ data: {} }) } });
+    treeQ = fakeReactQ._render(MobilePageQ, { storage: quotaStorage, apiClient: partQApi });
     assert.ok(collectText(findNode(treeQ, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('vượt dung lượng'));
+    fakeReactQ._unmount();
 
     // Part B: Important 3 + Minor 2 + Minor 3 — Concurrent handleSync lock, 401 notice, empty online skip, HITL & URN
     isNavigatorOnline = true;
@@ -1200,7 +1295,19 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     let mockMode = 'deferred-sync';
     const twinCalls = [];
     const syncApiClient = {
+      auth: { role: 'ldx_manager', getToken: () => 'jwt-part-b' },
       async request(req) {
+        if (req.url === 'roles:check') {
+          return {
+            data: {
+              data: {
+                allowAll: false,
+                resources: ['latticeOrders', 'latticeAssets', 'latticeIncidentCases', 'latticeServiceTickets'],
+                actions: { 'latticeAssets:update': true, 'latticeIncidentCases:create': true },
+              },
+            },
+          };
+        }
         if (req.url === 'dxosWms:epodCapture') {
           epodPostCalls += 1;
           if (mockMode === 'deferred-sync') {
@@ -1223,6 +1330,8 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     const MobilePageB = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactB, {});
     let treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
     fakeReactB._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    treeB = fakeReactB._render(MobilePageB, { storage: syncStorage, apiClient: syncApiClient });
 
     // Simultaneous Sync button click + browser 'online' event + duplicate click MUST send only 1 POST
     const syncBtn = findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-sync-btn');
@@ -1286,10 +1395,12 @@ test('Fix Round 1 (Important 2, Important 3, Minor 2, Minor 3, Minor 4): quota h
     assert.equal(readOfflineQueue({ storage: syncStorage }).length, 1);
     const unauthNotice = collectText(findNode(treeB, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice'));
     assert.ok(unauthNotice.includes('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại'));
+    fakeReactB._unmount();
   } finally {
     Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
     Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
     Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
   }
 });
 
@@ -2164,6 +2275,775 @@ test('MobileFieldPwaPage renders above-the-fold approvals/deliveries/incidents/t
     Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
     Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
     Object.defineProperty(globalThis, 'indexedDB', { configurable: true, writable: true, value: prevGlobals.indexedDB });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
+  }
+});
+
+test('P0-02: quarantined outbox items (400/403/404/422/409) are never auto-deleted, skipped during bulk flush, editable via updateOutboxItem, exportable, and conflict-resolvable', async () => {
+  const {
+    enqueueOutboxItem,
+    listOutboxItems,
+    updateOutboxItem,
+    resetMemoryOutboxStore,
+  } = require('../src/client-v2/mobile-offline-db');
+  const { flushOfflineQueue, createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+
+  resetMemoryOutboxStore();
+  const storage = makeMemoryStorage();
+  const q404 = await enqueueOutboxItem({
+    actionType: 'wms.epodCapture',
+    payload: { orderCode: 'ORD-BAD-404', recipientName: 'Khách A', deliveredQty: 2, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,AAA' },
+  }, { useIndexedDB: false, storage });
+  const q409 = await enqueueOutboxItem({
+    actionType: 'wms.epodCapture',
+    payload: { orderCode: 'ORD-CONF-409', recipientName: 'Khách B', deliveredQty: 3, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,BBB' },
+  }, { useIndexedDB: false, storage });
+
+  const sent = [];
+  const res1 = await flushOfflineQueue({
+    useIndexedDB: false,
+    storage,
+    isOnline: true,
+    apiClient: {
+      async request(req) {
+        sent.push(req.data.orderCode);
+        if (req.data.orderCode === 'ORD-BAD-404') {
+          throw Object.assign(new Error('Not Found'), { response: { status: 404, data: { errors: [{ message: 'Không tìm thấy đơn ORD-BAD-404' }] } } });
+        }
+        throw Object.assign(new Error('Conflict'), { response: { status: 409, data: { message: 'Đơn đã được ký bởi tài xế khác', serverRecord: { status: 'delivered', recipientName: 'Server User' } } } });
+      },
+    },
+  });
+  assert.equal(res1.quarantined, 2);
+  assert.equal(res1.conflicts, 1);
+
+  const after1 = await listOutboxItems({ useIndexedDB: false, storage });
+  assert.equal(after1.length, 2);
+  assert.equal(after1[0].status, 'quarantined');
+  assert.equal(after1[0].httpStatus, 404);
+  assert.equal(after1[0].lastError, 'Không tìm thấy đơn ORD-BAD-404');
+  assert.equal(after1[1].status, 'quarantined');
+  assert.equal(after1[1].httpStatus, 409);
+  assert.equal(after1[1].conflictData.serverRecord.recipientName, 'Server User');
+
+  // Auto-sync skips quarantined items while syncing newly queued pending items
+  const qOk = await enqueueOutboxItem({
+    actionType: 'iot.twinSetDesired',
+    payload: { assetId: 11, desiredPatch: { targetTempC: 3 } },
+  }, { useIndexedDB: false, storage });
+  sent.length = 0;
+  const res2 = await flushOfflineQueue({
+    useIndexedDB: false,
+    storage,
+    isOnline: true,
+    apiClient: {
+      async request(req) {
+        sent.push(req.url);
+        return { data: { ok: true } };
+      },
+    },
+  });
+  assert.deepEqual(sent, ['dxosBlocks:twinSetDesired']);
+  assert.equal(res2.synced, 1);
+
+  // Edit orderCode via updateOutboxItem & retry in UI
+  const updated = await updateOutboxItem(q404.id, {
+    payload: { ...after1[0].payload, orderCode: 'ORD-FIXED-200' },
+    status: 'pending',
+    lastError: null,
+    httpStatus: null,
+  }, { useIndexedDB: false, storage });
+  assert.equal(updated.payload.orderCode, 'ORD-FIXED-200');
+  assert.equal(updated.status, 'pending');
+
+  const fakeReact = createFakeReact();
+  const prevGlobals = { navigator: global.navigator, window: global.window, document: global.document };
+  const retriedPayloads = [];
+  const api = {
+    auth: { getToken: () => 'jwt-1' },
+    async request(req) {
+      if (req.url === 'dxosWms:epodCapture') {
+        retriedPayloads.push(req.data);
+        return { data: { data: { trackingCode: 'LDX-TRK-FIXED' } } };
+      }
+      return { data: {} };
+    },
+  };
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storage, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: api });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 15));
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: api });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: api });
+
+    // Conflict UI & Export JSON & OrderCode edit rendered
+    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-conflict-${q409.id}`));
+    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-export-${q404.id}`));
+    const orderEdit = findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-edit-order-${q404.id}`);
+    assert.ok(orderEdit);
+    orderEdit.props.onChange({ target: { value: 'ORD-UI-999' } });
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: api });
+    await findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-save-retry-${q404.id}`).props.onClick();
+    assert.equal(retriedPayloads[0].orderCode, 'ORD-UI-999');
+    assert.equal((await listOutboxItems({ useIndexedDB: false, storage })).some((x) => x.id === q404.id), false);
+    fakeReact._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    void qOk;
+  }
+});
+
+test('P0-03: JWT exp detection catches expired 3-part JWTs while preserving PAT/mock tokens, flushOfflineQueue stops on first 401, and submitEpod preserves payload on 401', async () => {
+  const {
+    isJwtTokenExpired,
+    isAuthenticatedMobileClient,
+    flushOfflineQueue,
+    createMobileFieldPwaPage,
+    enqueueOfflineAction,
+    readOfflineQueue,
+  } = require('../src/client-v2/mobile-field-pwa');
+
+  const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expiredJwt = `${b64({ alg: 'HS256' })}.${b64({ sub: '1', exp: nowSec - 60 })}.sig`;
+  const validJwt = `${b64({ alg: 'HS256' })}.${b64({ sub: '1', exp: nowSec + 3600 })}.sig`;
+
+  assert.equal(isJwtTokenExpired(expiredJwt), true);
+  assert.equal(isJwtTokenExpired(validJwt), false);
+  assert.equal(isJwtTokenExpired('jwt-emp'), false);
+  assert.equal(isJwtTokenExpired('ldx_pat_abc123'), false);
+
+  assert.equal(isAuthenticatedMobileClient({ auth: { getToken: () => expiredJwt }, request: async () => ({}) }), false);
+  assert.equal(isAuthenticatedMobileClient({ auth: { getToken: () => validJwt }, request: async () => ({}) }), true);
+  assert.equal(isAuthenticatedMobileClient({ auth: { getToken: () => 'jwt-emp' }, request: async () => ({}) }), true);
+
+  // flushOfflineQueue stops on first 401 without hammering remaining items
+  const storage = makeMemoryStorage();
+  enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: { seq: 1 } }, { storage });
+  enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: { seq: 2 } }, { storage });
+  enqueueOfflineAction({ actionType: 'wms.epodCapture', payload: { seq: 3 } }, { storage });
+  let requestCount = 0;
+  const res401 = await flushOfflineQueue({
+    storage,
+    isOnline: true,
+    apiClient: {
+      async request() {
+        requestCount += 1;
+        throw Object.assign(new Error('Unauthorized'), { response: { status: 401 } });
+      },
+    },
+  });
+  assert.equal(requestCount, 1, 'Must stop immediately on first 401');
+  assert.equal(res401.unauthorized, true);
+  assert.equal(res401.deferred, 3);
+  assert.equal(readOfflineQueue({ storage }).length, 3);
+
+  // submitEpod receiving 401 preserves ePOD in outbox and activates authExpired banner
+  const fakeReact = createFakeReact();
+  const storage2 = makeMemoryStorage();
+  const prevGlobals = { navigator: global.navigator, window: global.window, document: global.document };
+  const api401 = {
+    auth: { getToken: () => validJwt },
+    async request(req) {
+      if (req.url === 'dxosWms:epodCapture') {
+        throw Object.assign(new Error('Token expired'), { response: { status: 401 } });
+      }
+      return { data: {} };
+    },
+  };
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storage2, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage: storage2, useIndexedDB: false, apiClient: api401 });
+    fakeReact._flushEffects();
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-recipient-input').props.onChange({ target: { value: 'Tài xế 401' } });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-lat-input').props.onChange({ target: { value: '10.04' } });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-lng-input').props.onChange({ target: { value: '105.74' } });
+    const canvasEl = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-signature-canvas');
+    canvasEl.props.ref.current = {
+      width: 440,
+      height: 160,
+      getContext: () => ({ beginPath() {}, moveTo() {}, lineTo() {}, stroke() {}, clearRect() {} }),
+      toDataURL: () => 'data:image/png;base64,AAA',
+    };
+    canvasEl.props.onPointerDown({ clientX: 10, clientY: 10 });
+    canvasEl.props.onPointerUp({});
+    tree = fakeReact._render(MobilePage, { storage: storage2, useIndexedDB: false, apiClient: api401 });
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-epod-submit').props.onClick({ preventDefault() {} });
+    tree = fakeReact._render(MobilePage, { storage: storage2, useIndexedDB: false, apiClient: api401 });
+    assert.equal(readOfflineQueue({ storage: storage2 }).length, 1, 'ePOD must be preserved in outbox on 401');
+    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-auth-banner'), '401 on submitEpod must set authExpired(true)');
+    fakeReact._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
+
+test('P1-15 & P2-04: PNG 192/512 icons, /v/mobile SSR shell, SW precaching, Twin ACL gate, offline incidents/tickets, GPS fallback, and >=44px touch targets + 100dvh', async () => {
+  const {
+    buildServiceWorkerScript,
+    registerMobilePwaActions,
+    createMobilePwaGatewayHandler,
+  } = require('../src/server/mobile-pwa');
+  const { ALLOWED_OFFLINE_ACTIONS } = require('../src/client-v2/mobile-offline-db');
+  const { buildEpodPayload, createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+
+  // 1. PNG 192 & 512 endpoints return valid PNG magic bytes & dimensions
+  const actions = registerMobilePwaActions({ version: '0.4.2' });
+  for (const [actionName, expectedSize] of [['icon-192.png', 192], ['icon-512.png', 512]]) {
+    const ctx = { method: 'GET', response: { headers: {} }, set(k, v) { this.response.headers[k] = v; } };
+    await actions[actionName](ctx);
+    assert.equal(ctx.status, 200);
+    assert.equal(ctx.response.headers['Content-Type'], 'image/png');
+    assert.ok(Buffer.isBuffer(ctx.body));
+    assert.equal(ctx.body.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.equal(ctx.body.readUInt32BE(16), expectedSize);
+    assert.equal(ctx.body.readUInt32BE(20), expectedSize);
+  }
+
+  // 2. SSR /v/mobile Gateway injects manifest, apple-touch-icon, SW registration & discovers /v/assets/* chunks
+  const fakeHtml = '<!DOCTYPE html><html><head><title>App</title><script type="module" src="/v/assets/index-abc.js"></script><link rel="stylesheet" href="/v/assets/index-xyz.css"></head><body><div id="root"></div></body></html>';
+  const gw = createMobilePwaGatewayHandler({ readIndexHtml: () => fakeHtml });
+  const headers = {};
+  let body = '';
+  let statusCode = 0;
+  const handled = await gw({ method: 'GET', url: '/v/mobile' }, {
+    writeHead(s, h) { statusCode = s; Object.assign(headers, h); },
+    end(b) { body = String(b || ''); },
+  });
+  assert.equal(handled, true);
+  assert.equal(statusCode, 200);
+  assert.equal(headers['Cache-Control'], 'no-cache');
+  assert.match(body, /<link rel="manifest" href="\/api\/dxos:manifest">/);
+  assert.match(body, /<link rel="apple-touch-icon" href="\/api\/dxos:icon-192\.png">/);
+  assert.match(body, /serviceWorker\.register\(['"]\/api\/dxos:sw\.js['"]/);
+
+  const swWithChunks = buildServiceWorkerScript({ version: '0.4.2', precacheAssets: ['/v/assets/index-abc.js', '/v/assets/index-xyz.css'] });
+  assert.match(swWithChunks, /\/v\/assets\/index-abc\.js/);
+  assert.match(swWithChunks, /\/v\/assets\/index-xyz\.css/);
+
+  // 3. Offline actions include service.ticketCreate & iot.incidentCreate (dxosBlocks:alarmIngest)
+  assert.equal(ALLOWED_OFFLINE_ACTIONS['service.ticketCreate'].url, 'latticeServiceTickets:create');
+  assert.equal(ALLOWED_OFFLINE_ACTIONS['iot.incidentCreate'].url, 'dxosBlocks:alarmIngest');
+
+  // 4. buildEpodPayload accepts explicit gpsUnavailable:true with non-empty reason
+  const coldEpod = buildEpodPayload({
+    recipientName: 'Kho Lạnh Ngầm',
+    deliveredQty: 5,
+    gpsLat: null,
+    gpsLng: null,
+    gpsUnavailable: true,
+    gpsUnavailableReason: 'Kho lạnh ngầm mất tín hiệu GPS',
+    signatureDataUrl: 'data:image/png;base64,AAA',
+  });
+  assert.equal(coldEpod.ok, true);
+  assert.equal(coldEpod.payload.gpsUnavailable, true);
+  assert.equal(coldEpod.payload.gpsUnavailableReason, 'Kho lạnh ngầm mất tín hiệu GPS');
+
+  // 5. Twin ACL gate hides Twin setpoint card when roles:check lacks latticeAssets:update, and all buttons have >=44px + 100dvh
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  const prevGlobals = { navigator: global.navigator, window: global.window, document: global.document };
+  const driverApi = {
+    auth: { role: 'ldx_driver', getToken: () => 'jwt-drv' },
+    async request(req) {
+      if (req.url === 'roles:check') {
+        return {
+          data: {
+            data: {
+              allowAll: false,
+              resources: ['latticeOrders', 'latticeAssets', 'latticeServiceTickets', 'latticeIncidentCases'],
+              actions: { 'latticeOrders:view': true, 'latticeAssets:view': true, 'latticeIncidentCases:create': true },
+            },
+          },
+        };
+      }
+      return { data: {} };
+    },
+  };
+  let resizeListeners = 0;
+  let removedListeners = 0;
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', {
+    configurable: true,
+    value: {
+      localStorage: storage,
+      addEventListener() {},
+      removeEventListener() {},
+      visualViewport: {
+        height: 500,
+        offsetTop: 0,
+        addEventListener() { resizeListeners += 1; },
+        removeEventListener() { removedListeners += 1; },
+      },
+    },
+  });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: driverApi });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 25));
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: driverApi });
+
+    assert.equal(tree.props.style.minHeight, '100dvh');
+    assert.ok(resizeListeners >= 1, 'Expected visualViewport listener');
+    // Twin setpoint submit hidden when latticeAssets:update is missing
+    assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null);
+
+    // Open notif, outbox, and AI drawer to audit >=44px minHeight on all interactive elements
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge').props.onClick();
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge').props.onClick();
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-ai-pill').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: driverApi });
+
+    const interactive = findAllNodes(tree, (n) => ['button', 'a', 'input', 'select'].includes(n.type) && n.props?.type !== 'checkbox');
+    for (const el of interactive) {
+      const mh = Number(el.props?.style?.minHeight);
+      assert.ok(mh >= 44, `Control ${el.props?.['data-testid'] || el.type} minHeight must be >= 44, got ${mh}`);
+    }
+    fakeReact._unmount();
+    assert.ok(removedListeners >= 1, 'Expected visualViewport listener cleanup');
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
+
+test('Remediation M2-1: /v/mobile resolves real NocoBase 2.2.50 v2 HTML (Gateway.renderV2IndexHtml & APP_PACKAGE_ROOT/dist/client/v/index.html), fails open when absent, and precaches /v/global.css + /v/browser-checker.js?v=1 while rejecting ?token=abc', async () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const {
+    resolveDefaultIndexHtml,
+    resolveDefaultV2IndexHtml,
+    createMobilePwaGatewayHandler,
+    extractClientV2AssetUrls,
+    buildServiceWorkerScript,
+  } = require('../src/server/mobile-pwa');
+
+  assert.equal(typeof resolveDefaultV2IndexHtml, 'function');
+
+  // 1. Fails open (returns null and gateway returns false) when no Gateway template and no disk v2 HTML exist
+  const prevAppPkgRoot = process.env.APP_PACKAGE_ROOT;
+  const prevAppPublicPath = process.env.APP_PUBLIC_PATH;
+  const prevCwd = process.cwd();
+  const tmpEmptyDir = fs.mkdtempSync(path.join(__dirname, '.tmp-empty-v2-'));
+  try {
+    delete process.env.APP_PACKAGE_ROOT;
+    process.env.APP_PUBLIC_PATH = '/';
+    process.chdir(tmpEmptyDir);
+
+    const noHtml = await resolveDefaultV2IndexHtml({ Gateway: null });
+    assert.equal(noHtml, null, 'Must never fabricate scriptless <div id="root"></div> stub');
+    assert.equal(resolveDefaultIndexHtml(), null, 'Sync resolveDefaultIndexHtml must also return null when absent');
+
+    const failOpenGw = createMobilePwaGatewayHandler({ Gateway: null });
+    let endCalled = false;
+    const handledEmpty = await failOpenGw({ method: 'GET', url: '/v/mobile' }, {
+      writeHead() {},
+      end() { endCalled = true; },
+    });
+    assert.equal(handledEmpty, false, 'Gateway handler must fail open (return false) when no v2 HTML exists');
+    assert.equal(endCalled, false);
+
+    // Also fail open if Gateway returns HTML without <script> tag
+    const stubGateway = { getInstance: () => ({ renderV2IndexHtml: () => '<html><body><div id="root"></div></body></html>' }) };
+    const noScriptGw = createMobilePwaGatewayHandler({ Gateway: stubGateway });
+    const handledNoScript = await noScriptGw({ method: 'GET', url: '/v/mobile' }, {
+      writeHead() {},
+      end() { endCalled = true; },
+    });
+    assert.equal(handledNoScript, false, 'Gateway handler must fail open if resolved HTML has no <script> tag');
+    assert.equal(endCalled, false);
+
+    // 2. Resolves Gateway.getInstance().renderV2IndexHtml() (async Promise) and injects PWA tags + extracts v2 assets
+    const realV2Html = '<!DOCTYPE html><html><head><link rel="stylesheet" href="/v/global.css"><script src="/v/browser-checker.js?v=1"></script><script type="module" src="/v/assets/index-real2250.js"></script><link rel="stylesheet" href="/v/assets/index-real2250.css"></head><body><div id="root"></div></body></html>';
+    const liveGateway = {
+      getInstance: () => ({
+        renderV2IndexHtml: async () => realV2Html,
+      }),
+    };
+    const gwLive = createMobilePwaGatewayHandler({ Gateway: liveGateway });
+    let liveStatus = 0;
+    let liveBody = '';
+    const liveHeaders = {};
+    const handledLive = await gwLive({ method: 'GET', url: '/v/mobile' }, {
+      writeHead(s, h) { liveStatus = s; Object.assign(liveHeaders, h); },
+      end(b) { liveBody = String(b || ''); },
+    });
+    assert.equal(handledLive, true);
+    assert.equal(liveStatus, 200);
+    assert.equal(liveHeaders['Cache-Control'], 'no-cache');
+    assert.match(liveBody, /<script type="module" src="\/v\/assets\/index-real2250\.js">/);
+    assert.match(liveBody, /<link rel="manifest" href="\/api\/dxos:manifest">/);
+    assert.match(liveBody, /\/v\/global\.css/);
+    assert.match(liveBody, /\/v\/browser-checker\.js\?v=1/);
+
+    // 3. Resolves APP_PACKAGE_ROOT/dist/client/v/index.html when Gateway is absent
+    const pkgV2Dir = path.join(tmpEmptyDir, 'dist', 'client', 'v');
+    fs.mkdirSync(pkgV2Dir, { recursive: true });
+    fs.writeFileSync(path.join(pkgV2Dir, 'index.html'), realV2Html, 'utf8');
+    process.env.APP_PACKAGE_ROOT = tmpEmptyDir;
+
+    const fromDisk = await resolveDefaultV2IndexHtml({ Gateway: null });
+    assert.equal(fromDisk, realV2Html);
+    const gwDisk = createMobilePwaGatewayHandler({ Gateway: null });
+    let diskBody = '';
+    const handledDisk = await gwDisk({ method: 'GET', url: '/v/mobile' }, {
+      writeHead() {},
+      end(b) { diskBody = String(b || ''); },
+    });
+    assert.equal(handledDisk, true);
+    assert.match(diskBody, /index-real2250\.js/);
+    assert.match(diskBody, /<link rel="manifest" href="\/api\/dxos:manifest">/);
+
+    // 4. extractClientV2AssetUrls & SW PRECACHE_ASSETS include /v/global.css & /v/browser-checker.js?v=1 while rejecting ?token=abc & /api/users
+    const extracted = extractClientV2AssetUrls(realV2Html);
+    assert.ok(extracted.includes('/v/global.css'), 'Must extract /v/global.css');
+    assert.ok(extracted.includes('/v/browser-checker.js?v=1'), 'Must extract /v/browser-checker.js?v=1');
+    assert.ok(extracted.includes('/v/assets/index-real2250.js'));
+    assert.ok(extracted.includes('/v/assets/index-real2250.css'));
+
+    const swSrc = buildServiceWorkerScript({ version: '0.4.2', precacheAssets: extracted });
+    const addedUrls = [];
+    const listeners = {};
+    vm.runInNewContext(swSrc, {
+      self: {
+        location: { origin: 'https://field.latticedx.local' },
+        addEventListener: (name, fn) => { listeners[name] = fn; },
+        skipWaiting: () => Promise.resolve(),
+        clients: { claim: () => Promise.resolve() },
+      },
+      caches: {
+        open: async () => ({
+          addAll: async (urls) => { addedUrls.push(...urls); },
+        }),
+        keys: async () => [],
+        delete: async () => true,
+      },
+      fetch: async () => ({ ok: true, headers: { get: () => '' } }),
+      URL,
+    });
+    let waitPromise;
+    listeners.message({
+      data: {
+        type: 'PRECACHE_ASSETS',
+        assets: [
+          '/v/global.css',
+          '/v/browser-checker.js?v=1',
+          '/v/browser-checker.js',
+          '/v/browser-checker.js?token=abc',
+          '/v/global.css?token=abc',
+          '/assets/chunk.js?token=abc',
+          '/api/users',
+        ],
+      },
+      waitUntil: (p) => { waitPromise = p; },
+    });
+    await waitPromise;
+    assert.deepEqual(addedUrls, ['/v/global.css', '/v/browser-checker.js?v=1', '/v/browser-checker.js']);
+  } finally {
+    process.chdir(prevCwd);
+    if (prevAppPkgRoot === undefined) delete process.env.APP_PACKAGE_ROOT;
+    else process.env.APP_PACKAGE_ROOT = prevAppPkgRoot;
+    if (prevAppPublicPath === undefined) delete process.env.APP_PUBLIC_PATH;
+    else process.env.APP_PUBLIC_PATH = prevAppPublicPath;
+    fs.rmSync(tmpEmptyDir, { recursive: true, force: true });
+  }
+});
+
+test('Remediation M2-2: 409 conflict diff masks small & large base64 photos before 4096-byte cap and preserves serverRecord fields in UI diff', async () => {
+  const { sanitizeConflictData, enqueueOutboxItem, updateOutboxItem, listOutboxItems } = require('../src/client-v2/mobile-offline-db');
+  const { extractConflictData, createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+
+  const smallPhoto = 'data:image/png;base64,SMALL_BASE64_DATA';
+  const largePhoto = `data:image/jpeg;base64,${'B'.repeat(5000)}`;
+  const smallSig = 'data:image/png;base64,SIG_123';
+
+  // 1. Direct extractConflictData & sanitizeConflictData masking for both small (<=4KB) and large (>5KB) photos
+  for (const [label, photo] of [['small', smallPhoto], ['large', largePhoto]]) {
+    const err409 = {
+      response: {
+        status: 409,
+        data: {
+          code: 'EPOD_VERSION_CONFLICT',
+          message: 'Bản ghi ePOD đã được cập nhật',
+          serverRecord: {
+            orderCode: `ORD-409-${label}`,
+            recipientName: 'Server Recipient',
+            status: 'delivered',
+            deliveredAt: '2026-11-26T08:00:00Z',
+            evidencePhotoDataUrl: photo,
+            signatureDataUrl: smallSig,
+            nested: { previewDataUrl: photo },
+          },
+        },
+      },
+    };
+    const extracted = extractConflictData(err409);
+    const serializedExtracted = JSON.stringify(extracted);
+    assert.equal(serializedExtracted.includes('SMALL_BASE64_DATA'), false, `${label}: extractConflictData must mask small base64`);
+    assert.equal(serializedExtracted.includes('BBBBBBBB'), false, `${label}: extractConflictData must mask large base64`);
+    assert.equal(extracted.serverRecord.recipientName, 'Server Recipient');
+    assert.equal(extracted.serverRecord.status, 'delivered');
+    assert.equal(extracted.serverRecord.deliveredAt, '2026-11-26T08:00:00Z');
+    assert.match(extracted.serverRecord.evidencePhotoDataUrl, /base64 đã ẩn/i);
+
+    const sanitized = sanitizeConflictData({
+      code: 'EPOD_VERSION_CONFLICT',
+      message: 'Bản ghi ePOD đã được cập nhật',
+      serverRecord: err409.response.data.serverRecord,
+    });
+    assert.ok(sanitized.serverRecord, `${label}: sanitizeConflictData must preserve serverRecord after masking`);
+    assert.equal(sanitized.serverRecord.recipientName, 'Server Recipient');
+    assert.equal(sanitized.serverRecord.status, 'delivered');
+    assert.equal(sanitized.serverRecord.deliveredAt, '2026-11-26T08:00:00Z');
+    assert.equal(JSON.stringify(sanitized).includes('SMALL_BASE64_DATA'), false);
+    assert.equal(JSON.stringify(sanitized).includes('BBBBBBBB'), false);
+  }
+
+  // 2. End-to-end UI rendering of 409 diff with large >5KB photo
+  const storage = makeMemoryStorage();
+  const fakeReact = createFakeReact();
+  const item = await enqueueOutboxItem({
+    actionType: 'wms.epodCapture',
+    payload: { orderCode: 'ORD-409-UI', recipientName: 'Local Driver', deliveredQty: 2 },
+  }, { useIndexedDB: false, storage });
+  await updateOutboxItem(item.id, {
+    status: 'quarantined',
+    httpStatus: 409,
+    lastError: 'Conflict 409',
+    conflictData: {
+      code: 'EPOD_CONFLICT',
+      message: 'Conflict 409',
+      serverRecord: {
+        orderCode: 'ORD-409-UI',
+        recipientName: 'Server Recipient',
+        status: 'delivered',
+        deliveredAt: '2026-11-26T08:00:00Z',
+        evidencePhotoDataUrl: largePhoto,
+        signatureDataUrl: smallSig,
+      },
+    },
+  }, { useIndexedDB: false, storage });
+
+  const stored = (await listOutboxItems({ useIndexedDB: false, storage }))[0];
+  assert.ok(stored.conflictData.serverRecord, 'Persisted outbox item must keep serverRecord');
+
+  const prevGlobals = { navigator: global.navigator, window: global.window, document: global.document };
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storage, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, {
+      storage,
+      useIndexedDB: false,
+      apiClient: { auth: { getToken: () => '' }, request: async () => ({ data: {} }) },
+    });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    tree = fakeReact._render(MobilePage, {
+      storage,
+      useIndexedDB: false,
+      apiClient: { auth: { getToken: () => '' }, request: async () => ({ data: {} }) },
+    });
+    findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-queue-badge').props.onClick();
+    tree = fakeReact._render(MobilePage, {
+      storage,
+      useIndexedDB: false,
+      apiClient: { auth: { getToken: () => '' }, request: async () => ({ data: {} }) },
+    });
+    const conflictPanel = findNode(tree, (n) => n.props?.['data-testid'] === `mobile-pwa-outbox-conflict-${item.id}`);
+    assert.ok(conflictPanel, 'Must render 409 conflict panel');
+    const conflictDump = JSON.stringify(conflictPanel);
+    assert.ok(conflictDump.includes('Server Recipient'), 'Rendered diff must preserve recipientName');
+    assert.ok(conflictDump.includes('delivered'), 'Rendered diff must preserve status');
+    assert.ok(conflictDump.includes('2026-11-26T08:00:00Z'), 'Rendered diff must preserve deliveredAt');
+    assert.equal(conflictDump.includes('BBBBBBBB'), false, 'Rendered diff must not leak raw base64');
+    assert.equal(conflictDump.includes('SIG_123'), false, 'Rendered diff must not leak raw signature base64');
+    fakeReact._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
+
+test('Remediation M2-3: auth401SeqRef race keeps mobile-pwa-auth-banner visible when stale unreadCount/loadNotifications 200 resolves after handleSync 401', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+  const { enqueueOutboxItem } = require('../src/client-v2/mobile-offline-db');
+
+  const fakeReact = createFakeReact();
+  const storage = makeMemoryStorage();
+  await enqueueOutboxItem({
+    actionType: 'wms.epodCapture',
+    payload: { orderCode: 'ORD-RACE-401', recipientName: 'Race Driver', deliveredQty: 1 },
+  }, { useIndexedDB: false, storage });
+
+  let resolveUnread;
+  let resolveListMine;
+  const raceApi = {
+    auth: { getToken: () => 'jwt-race-valid' },
+    async request(req) {
+      if (req.url === 'latticeNotifications:unreadCount') {
+        return new Promise((resolve) => { resolveUnread = resolve; });
+      }
+      if (req.url === 'latticeNotifications:listMine') {
+        return new Promise((resolve) => { resolveListMine = resolve; });
+      }
+      if (req.url === 'dxosWms:epodCapture') {
+        throw Object.assign(new Error('Unauthorized'), { response: { status: 401 } });
+      }
+      if (req.url === 'roles:check') return { data: { data: { allowAll: true } } };
+      return { data: { data: { items: [] } } };
+    },
+  };
+
+  const prevGlobals = { navigator: global.navigator, window: global.window, document: global.document };
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storage, addEventListener() {}, removeEventListener() {} } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+  try {
+    const MobilePage = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact, {});
+    let tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: raceApi });
+    fakeReact._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: raceApi });
+
+    // Trigger loadNotifications (in-flight) and handleSync (401) concurrently
+    const notifClickPromise = findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-notif-badge').props.onClick();
+    await findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-sync-btn').props.onClick();
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: raceApi });
+    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-auth-banner'), 'handleSync 401 must show auth banner');
+
+    // Now resolve stale 200 responses from unreadCount and listMine AFTER handleSync 401
+    resolveUnread?.({ data: { data: { unreadCount: 1 } } });
+    resolveListMine?.({ data: { data: { unreadCount: 1, items: [] } } });
+    await notifClickPromise;
+    await new Promise((r) => setTimeout(r, 10));
+
+    tree = fakeReact._render(MobilePage, { storage, useIndexedDB: false, apiClient: raceApi });
+    assert.ok(
+      findNode(tree, (n) => n.props?.['data-testid'] === 'mobile-pwa-auth-banner'),
+      'Stale 200 from refreshUnreadCount/loadNotifications must NOT clear authExpired banner after handleSync 401',
+    );
+    fakeReact._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+  }
+});
+
+test('T1-MOBILE-05 & T1-MOBILE-06: MobileFieldPwaPage defaults canControlTwin and canCreateIncidents fail-closed (false) before roles:check resolves and keeps both hidden for ldx_driver', async () => {
+  const { createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
+
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    fetch: globalThis.fetch,
+  };
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    writable: true,
+    value: async () => ({ ok: true, status: 200, body: null }),
+  });
+  Object.defineProperty(global, 'navigator', { configurable: true, value: { onLine: true } });
+  Object.defineProperty(global, 'document', { configurable: true, value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } } });
+
+  try {
+    // 1. ldx_driver with deferred roles:check -> hidden initially AND hidden after roles:check resolves
+    const storageDrv = makeMemoryStorage();
+    Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storageDrv, addEventListener() {}, removeEventListener() {} } });
+    const fakeReactDrv = createFakeReact();
+    let resolveDriverRoleCheck;
+    const driverApi = {
+      auth: { role: 'ldx_driver', getToken: () => 'jwt-drv-acl' },
+      async request(req) {
+        if (req.url === 'roles:check') {
+          return new Promise((resolve) => { resolveDriverRoleCheck = resolve; });
+        }
+        return { data: { data: { items: [] } } };
+      },
+    };
+    const MobilePageDrv = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactDrv, {});
+    let treeDrv = fakeReactDrv._render(MobilePageDrv, { storage: storageDrv, useIndexedDB: false, apiClient: driverApi });
+    assert.equal(findNode(treeDrv, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null, 'Twin submit must be hidden before roles:check completes');
+    assert.equal(findNode(treeDrv, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle'), null, 'Incident create toggle must be hidden before roles:check completes');
+
+    fakeReactDrv._flushEffects();
+    treeDrv = fakeReactDrv._render(MobilePageDrv, { storage: storageDrv, useIndexedDB: false, apiClient: driverApi });
+    assert.equal(findNode(treeDrv, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null, 'Twin submit must stay hidden while roles:check is in flight');
+    assert.equal(findNode(treeDrv, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle'), null, 'Incident create toggle must stay hidden while roles:check is in flight');
+
+    resolveDriverRoleCheck({
+      data: {
+        data: {
+          allowAll: false,
+          resources: ['latticeOrders', 'latticeAssets', 'latticeServiceTickets'],
+          actions: { 'latticeOrders:view': true, 'latticeAssets:view': true, 'latticeServiceTickets:create': true },
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    treeDrv = fakeReactDrv._render(MobilePageDrv, { storage: storageDrv, useIndexedDB: false, apiClient: driverApi });
+    assert.equal(findNode(treeDrv, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null, 'Twin submit must stay hidden for ldx_driver');
+    assert.equal(findNode(treeDrv, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle'), null, 'Incident create toggle must stay hidden for ldx_driver');
+    fakeReactDrv._unmount();
+
+    // 2. ldx_manager with deferred roles:check -> hidden BEFORE roles:check resolves, visible ONLY AFTER grants resolve
+    const storageMgr = makeMemoryStorage();
+    Object.defineProperty(global, 'window', { configurable: true, value: { localStorage: storageMgr, addEventListener() {}, removeEventListener() {} } });
+    const fakeReactMgr = createFakeReact();
+    let resolveManagerRoleCheck;
+    const managerApi = {
+      auth: { role: 'ldx_manager', getToken: () => 'jwt-mgr-acl' },
+      async request(req) {
+        if (req.url === 'roles:check') {
+          return new Promise((resolve) => { resolveManagerRoleCheck = resolve; });
+        }
+        return { data: { data: { items: [] } } };
+      },
+    };
+    const MobilePageMgr = createMobileFieldPwaPage({ Plugin: class {} }, fakeReactMgr, {});
+    let treeMgr = fakeReactMgr._render(MobilePageMgr, { storage: storageMgr, useIndexedDB: false, apiClient: managerApi });
+    fakeReactMgr._flushEffects();
+    treeMgr = fakeReactMgr._render(MobilePageMgr, { storage: storageMgr, useIndexedDB: false, apiClient: managerApi });
+    assert.equal(findNode(treeMgr, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), null, 'Twin submit must be hidden before manager roles:check resolves');
+    assert.equal(findNode(treeMgr, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle'), null, 'Incident create toggle must be hidden before manager roles:check resolves');
+
+    resolveManagerRoleCheck({
+      data: {
+        data: {
+          allowAll: false,
+          resources: ['latticeOrders', 'latticeAssets', 'latticeIncidentCases', 'latticeServiceTickets'],
+          actions: { 'latticeAssets:update': true, 'latticeIncidentCases:create': true },
+        },
+      },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    treeMgr = fakeReactMgr._render(MobilePageMgr, { storage: storageMgr, useIndexedDB: false, apiClient: managerApi });
+    assert.ok(findNode(treeMgr, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit'), 'Twin submit must render once roles:check grants latticeAssets:update');
+    assert.ok(findNode(treeMgr, (n) => n.props?.['data-testid'] === 'mobile-pwa-incident-create-toggle'), 'Incident create toggle must render once roles:check grants latticeIncidentCases:create');
+    fakeReactMgr._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
     Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
   }
 });

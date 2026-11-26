@@ -78,7 +78,16 @@ const BLOCKED_TARGET_FIELDS = Object.freeze(new Set([
 ]));
 
 const SENSITIVE_FIELD_NAME_RE = /password|secret|token|apikey|api_key|privatekey|private_key|hash|salt/i;
-const ALLOWED_FIELD_TYPES = new Set(['string', 'text', 'number', 'integer', 'boolean', 'date', 'email', 'select']);
+const ALLOWED_FIELD_TYPES = new Set(['string', 'text', 'number', 'integer', 'boolean', 'date', 'email', 'select', 'file']);
+const ALLOWED_FILE_MIME_TYPES = Object.freeze(new Set([
+  'application/pdf',
+  'image/png',
+  'image/jpeg',
+  'image/webp',
+  'text/plain',
+]));
+const MAX_FILE_UPLOAD_BYTES = 2 * 1024 * 1024;
+const ensuredSubmissionDbs = new WeakSet();
 const VOUCHER_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'latticeServiceTickets']);
 const PUBLIC_STATUS_COLLECTIONS = new Set([
   'latticeRequests',
@@ -322,7 +331,94 @@ function validatePublicFormDefinition(raw) {
   };
 }
 
-function sanitizeSubmissionPayload(formDef, rawValues) {
+function sanitizeFileFieldValue(field, raw) {
+  let filename = 'attachment';
+  let mimeType = '';
+  let base64Body = '';
+
+  if (typeof raw === 'string') {
+    const m = raw.trim().match(/^data:([^;,\s]+);base64,([A-Za-z0-9+/=\s]+)$/);
+    if (!m) {
+      throw failForm('FORM_FILE_CONTENT_INVALID', 400, `Field "${field.name}" must be a valid file upload.`);
+    }
+    mimeType = m[1].toLowerCase();
+    base64Body = m[2].replace(/\s+/g, '');
+  } else if (isPlainObject(raw)) {
+    const rawName = typeof raw.filename === 'string' ? raw.filename.trim() : (typeof raw.name === 'string' ? raw.name.trim() : '');
+    if (rawName) {
+      if (rawName.includes('..') || rawName.includes('/') || rawName.includes('\\') || /[\x00-\x1f\x7f]/.test(rawName)) {
+        throw failForm('FORM_FILE_NAME_INVALID', 400, `Invalid filename for "${field.name}".`);
+      }
+      filename = rawName.slice(0, 180);
+    }
+    if (typeof raw.dataUrl === 'string' && raw.dataUrl.trim()) {
+      const m = raw.dataUrl.trim().match(/^data:([^;,\s]+);base64,([A-Za-z0-9+/=\s]+)$/);
+      if (!m) {
+        throw failForm('FORM_FILE_CONTENT_INVALID', 400, `Invalid file dataUrl for "${field.name}".`);
+      }
+      mimeType = m[1].toLowerCase();
+      base64Body = m[2].replace(/\s+/g, '');
+    } else {
+      mimeType = typeof raw.mimeType === 'string' ? raw.mimeType.trim().toLowerCase() : '';
+      base64Body = typeof raw.contentBase64 === 'string' ? raw.contentBase64.replace(/\s+/g, '') : '';
+    }
+  } else {
+    throw failForm('FORM_FILE_TYPE_MISMATCH', 400, `Field "${field.name}" must be a file object.`);
+  }
+
+  if (!ALLOWED_FILE_MIME_TYPES.has(mimeType)) {
+    throw failForm('FORM_FILE_TYPE_INVALID', 400, `File type "${mimeType || 'unknown'}" is not allowed for "${field.name}".`);
+  }
+  if (!base64Body || base64Body.length % 4 === 1 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64Body)) {
+    throw failForm('FORM_FILE_CONTENT_INVALID', 400, `Invalid base64 content for "${field.name}".`);
+  }
+  const maxBytes = Math.min(MAX_FILE_UPLOAD_BYTES, Math.max(1024, Number(field.maxSizeBytes) || MAX_FILE_UPLOAD_BYTES));
+  const decoded = Buffer.from(base64Body, 'base64');
+  if (!decoded.length) {
+    throw failForm('FORM_FILE_CONTENT_INVALID', 400, `Empty file content for "${field.name}".`);
+  }
+  if (decoded.length > maxBytes) {
+    throw failForm('FORM_FILE_TOO_LARGE', 400, `File "${filename}" exceeds maximum size (${maxBytes} bytes).`);
+  }
+
+  let magicOk = false;
+  if (mimeType === 'application/pdf') {
+    magicOk = decoded.length >= 5 && decoded.subarray(0, 5).toString('ascii') === '%PDF-';
+  } else if (mimeType === 'image/png') {
+    magicOk = decoded.length >= 8
+      && decoded[0] === 0x89 && decoded[1] === 0x50 && decoded[2] === 0x4e && decoded[3] === 0x47
+      && decoded[4] === 0x0d && decoded[5] === 0x0a && decoded[6] === 0x1a && decoded[7] === 0x0a;
+  } else if (mimeType === 'image/jpeg') {
+    magicOk = decoded.length >= 3 && decoded[0] === 0xff && decoded[1] === 0xd8 && decoded[2] === 0xff;
+  } else if (mimeType === 'image/webp') {
+    magicOk = decoded.length >= 12
+      && decoded.subarray(0, 4).toString('ascii') === 'RIFF'
+      && decoded.subarray(8, 12).toString('ascii') === 'WEBP';
+  } else if (mimeType === 'text/plain') {
+    const hasNull = decoded.includes(0x00);
+    const headLower = decoded.subarray(0, 256).toString('utf8').trimStart();
+    magicOk = !hasNull && !/^<(?:!--|(?:!doctype|\?xml|html|script|svg|iframe|object|embed)\b)/i.test(headLower);
+  }
+  if (!magicOk) {
+    throw failForm('FORM_FILE_CONTENT_INVALID', 400, `File content for "${filename}" does not match declared MIME type "${mimeType}".`);
+  }
+
+  const sha256 = createHash('sha256').update(decoded).digest('hex');
+  const meta = { filename, mimeType, sizeBytes: decoded.length, sha256 };
+  return {
+    meta,
+    attachment: {
+      fieldName: field.name,
+      filename,
+      mimeType,
+      sizeBytes: decoded.length,
+      sha256,
+      contentBase64: decoded.toString('base64'),
+    },
+  };
+}
+
+function sanitizeSubmissionPayload(formDef, rawValues, outAttachments = null) {
   assertNoPrototypePollution(rawValues);
   if (!isPlainObject(rawValues)) {
     throw failForm('FORM_VALUES_INVALID', 400, 'Submission values must be a plain object.');
@@ -344,6 +440,15 @@ function sanitizeSubmissionPayload(formDef, rawValues) {
     if (isEmpty) {
       if (field.required) {
         throw failForm('FORM_FIELD_REQUIRED', 400, `Field "${field.name}" is required.`);
+      }
+      continue;
+    }
+
+    if (field.type === 'file') {
+      const { meta, attachment } = sanitizeFileFieldValue(field, raw);
+      clean[field.name] = meta;
+      if (Array.isArray(outAttachments)) {
+        outAttachments.push(attachment);
       }
       continue;
     }
@@ -584,7 +689,46 @@ async function isAdminByRoles(db, roleNames) {
   });
 }
 
-async function resolveAdminContext(ctx, db, { requireWriteScope = false } = {}) {
+async function ensurePublicFormSubmissionColumns(db) {
+  if (!db || ensuredSubmissionDbs.has(db)) return;
+  try {
+    const subCol = typeof db.getCollection === 'function' ? db.getCollection('latticePublicFormSubmissions') : null;
+    if (subCol) {
+      for (const fieldName of ['payloadJson', 'attachmentsJson']) {
+        const has = typeof subCol.hasField === 'function' ? subCol.hasField(fieldName) : Boolean(subCol.getField?.(fieldName));
+        if (!has && typeof subCol.setField === 'function') {
+          subCol.setField(fieldName, { type: 'json', name: fieldName });
+        } else if (!has && typeof subCol.addField === 'function') {
+          subCol.addField(fieldName, { type: 'json' });
+        }
+      }
+    }
+  } catch {
+    // Non-fatal in minimal mock DBs
+  }
+  let isPg = false;
+  let pgSucceeded = false;
+  try {
+    const seq = db?.sequelize;
+    isPg = Boolean(seq && typeof seq.query === 'function' && (typeof seq.getDialect !== 'function' || seq.getDialect() === 'postgres'));
+    if (isPg) {
+      const ddl = 'ALTER TABLE "latticePublicFormSubmissions" ADD COLUMN IF NOT EXISTS "payloadJson" JSONB, ADD COLUMN IF NOT EXISTS "attachmentsJson" JSONB;';
+      if (canUsePgRlsSession(db)) {
+        await withSystemRlsBypass(db, (transaction) => seq.query(ddl, transaction ? { transaction } : undefined));
+      } else {
+        await seq.query(ddl);
+      }
+      pgSucceeded = true;
+    }
+  } catch {
+    // Non-fatal if table does not exist yet
+  }
+  if (!isPg || pgSucceeded) {
+    ensuredSubmissionDbs.add(db);
+  }
+}
+
+async function resolveAdminContext(ctx, db, { requireWriteScope = false, allowManager = false } = {}) {
   if (requireWriteScope) {
     assertApiKeyScope(ctx, ['write']);
   }
@@ -594,7 +738,8 @@ async function resolveAdminContext(ctx, db, { requireWriteScope = false } = {}) 
   }
   const callerRolesVerified = await resolveVerifiedCallerRoles(ctx, db, callerUserId);
   const isRoot = callerRolesVerified.includes('root');
-  const isAdmin = isRoot || (await isAdminByRoles(db, callerRolesVerified));
+  const isManagerRole = allowManager && callerRolesVerified.some((r) => ['ldx_manager', 'ldx_admin', 'admin'].includes(r));
+  const isAdmin = isRoot || isManagerRole || (await isAdminByRoles(db, callerRolesVerified));
   if (!isAdmin) {
     throw failForm('FORM_ADMIN_REQUIRED', 403, 'Administrator role is required to manage public forms.');
   }
@@ -748,7 +893,8 @@ function createDxosFormsActions(db, options = {}) {
       const formPlain = {
         allowedFieldsJson: Array.isArray(val(form, 'allowedFieldsJson')) ? val(form, 'allowedFieldsJson') : [],
       };
-      const cleanValues = sanitizeSubmissionPayload(formPlain, rawValues || {});
+      const attachments = [];
+      const cleanValues = sanitizeSubmissionPayload(formPlain, rawValues || {}, attachments);
       const defaults = isPlainObject(val(form, 'defaultValuesJson')) ? val(form, 'defaultValuesJson') : {};
       const safeDefaults = {};
       for (const [k, v] of Object.entries(defaults)) {
@@ -775,9 +921,38 @@ function createDxosFormsActions(db, options = {}) {
         || Object.hasOwn(safeDefaults, 'status')
         || Object.hasOwn(cleanValues, 'status');
 
+      const fileFieldNames = new Set(
+        formPlain.allowedFieldsJson.filter((f) => f && f.type === 'file').map((f) => f.name),
+      );
+      const cleanTargetValues = {};
+      const receiptExtraPayload = {};
+      for (const [k, v] of Object.entries(cleanValues)) {
+        if (fileFieldNames.has(k)) {
+          receiptExtraPayload[k] = v;
+          const hasTargetColField = Boolean(
+            targetColMeta && (
+              typeof targetColMeta.hasField === 'function' ? targetColMeta.hasField(k) : targetColMeta.getField?.(k)
+            ),
+          );
+          if (hasTargetColField && v && typeof v === 'object') {
+            cleanTargetValues[k] = v.filename || '';
+          }
+          continue;
+        }
+        cleanTargetValues[k] = v;
+        if (targetColMeta) {
+          const hasTargetColField = Boolean(
+            typeof targetColMeta.hasField === 'function' ? targetColMeta.hasField(k) : targetColMeta.getField?.(k),
+          );
+          if (!hasTargetColField) {
+            receiptExtraPayload[k] = v;
+          }
+        }
+      }
+
       const targetPayload = {
         ...safeDefaults,
-        ...cleanValues,
+        ...cleanTargetValues,
         code: recordCode,
         name: recordName,
         active: true,
@@ -791,6 +966,8 @@ function createDxosFormsActions(db, options = {}) {
       const submissionCode = `LDX-FRM-${randomBytes(4).toString('hex').toUpperCase()}`;
       const statusToken = `ldx_frm_${randomBytes(24).toString('hex')}`;
       const statusTokenHash = sha256Hex(statusToken);
+
+      await ensurePublicFormSubmissionColumns(db);
 
       const executeSubmit = async (transaction) => {
         const txOpt = transaction ? { transaction } : {};
@@ -815,6 +992,8 @@ function createDxosFormsActions(db, options = {}) {
             targetCollection,
             targetRecordId,
             status: 'submitted',
+            ...(Object.keys(receiptExtraPayload).length > 0 ? { payloadJson: receiptExtraPayload } : {}),
+            ...(attachments.length > 0 ? { attachmentsJson: attachments } : {}),
             submittedAt,
           },
           ...txOpt,
@@ -1138,6 +1317,215 @@ function createDxosFormsActions(db, options = {}) {
       };
       if (next) return next();
     },
+
+    listSubmissions: async (ctx, next) => {
+      const method = (ctx.method || 'GET').toUpperCase();
+      if (method !== 'GET' && method !== 'POST') ctx.throw(405);
+      const { isRoot, organizationId, params } = await resolveAdminContext(ctx, db, { requireWriteScope: false, allowManager: true });
+      assertNoPrototypePollution(params);
+
+      let formId = null;
+      if (params.formId !== undefined && params.formId !== null && String(params.formId).trim() !== '') {
+        const n = Number(params.formId);
+        if (!Number.isInteger(n) || n <= 0) {
+          throw failForm('FORM_ID_INVALID', 400, 'Invalid formId.');
+        }
+        formId = n;
+      }
+
+      let slug = null;
+      if (params.slug !== undefined && params.slug !== null && String(params.slug).trim() !== '') {
+        const s = String(params.slug).trim().toLowerCase();
+        if (!SLUG_RE.test(s)) {
+          throw failForm('FORM_SLUG_INVALID', 400, 'Invalid slug filter.');
+        }
+        slug = s;
+      }
+
+      let status = null;
+      if (params.status !== undefined && params.status !== null && String(params.status).trim() !== '') {
+        const st = String(params.status).trim();
+        if (!/^[a-zA-Z0-9_-]{1,64}$/.test(st)) {
+          throw failForm('FORM_STATUS_INVALID', 400, 'Invalid status filter.');
+        }
+        status = st;
+      }
+
+      const search = typeof params.search === 'string' ? params.search.trim().slice(0, 120).toLowerCase() : '';
+      const page = Math.max(1, Math.floor(Number(params.page) || 1));
+      const pageSize = Math.max(1, Math.min(100, Math.floor(Number(params.pageSize ?? params.limit) || 20)));
+
+      await ensurePublicFormSubmissionColumns(db);
+      const subRepo = getRepo(db, 'latticePublicFormSubmissions');
+      if (!subRepo || typeof subRepo.find !== 'function') {
+        ctx.body = { organizationId, items: [], total: 0, page, pageSize };
+        if (next) return next();
+        return;
+      }
+
+      const filter = {
+        ...(organizationId ? { organizationId } : {}),
+        ...(formId ? { formId } : {}),
+        ...(slug ? { slug } : {}),
+        ...(status ? { status } : {}),
+      };
+
+      const sanitizeStoredPayload = (obj) => {
+        if (!isPlainObject(obj)) return {};
+        const out = {};
+        for (const [k, v] of Object.entries(obj)) {
+          if (BLOCKED_PROTO_KEYS.has(k) || SENSITIVE_FIELD_NAME_RE.test(k)) continue;
+          out[k] = v;
+        }
+        return out;
+      };
+
+      const sanitizeAttachmentsMeta = (rawAtt) => {
+        if (!Array.isArray(rawAtt)) return [];
+        return rawAtt
+          .filter((a) => a && typeof a === 'object')
+          .map((a) => ({
+            fieldName: String(a.fieldName || ''),
+            filename: String(a.filename || 'attachment'),
+            mimeType: String(a.mimeType || 'application/octet-stream'),
+            sizeBytes: Number(a.sizeBytes || 0),
+            sha256: String(a.sha256 || ''),
+          }));
+      };
+
+      const result = await runWithRls(db, isRoot, organizationId, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const canSqlPaginate = !search && typeof subRepo.count === 'function';
+        let rows;
+        let totalCount = null;
+        if (canSqlPaginate) {
+          totalCount = await subRepo.count({ filter, ...txOpt });
+          rows = (await subRepo.find({
+            filter,
+            sort: ['-id'],
+            limit: pageSize,
+            offset: (page - 1) * pageSize,
+            ...txOpt,
+          })) || [];
+        } else {
+          rows = (await subRepo.find({
+            filter,
+            sort: ['-id'],
+            limit: 1000,
+            ...txOpt,
+          })) || [];
+        }
+
+        const formCache = new Map();
+        const formRepo = getRepo(db, 'latticePublicForms');
+        const hydrated = [];
+        for (const row of rows) {
+          const rId = val(row, 'id') ?? null;
+          const rFormId = val(row, 'formId') ?? null;
+          const rSlug = String(val(row, 'slug') || '');
+          const rSubCode = String(val(row, 'submissionCode') || '');
+          const rOrgId = String(val(row, 'organizationId') || organizationId || '');
+          let rStatus = String(val(row, 'status') || 'submitted');
+          const rTargetCol = String(val(row, 'targetCollection') || '');
+          const rTargetId = String(val(row, 'targetRecordId') || '');
+          const rawPayloadJson = val(row, 'payloadJson');
+          const extraPayload = rawPayloadJson && typeof rawPayloadJson === 'object' ? sanitizeStoredPayload(rawPayloadJson) : {};
+          let targetPayloadFields = {};
+
+          if (isValidOrganizationId(rOrgId) && isAllowlistedPublicFormCollection(rTargetCol) && /^[1-9]\d*$/.test(rTargetId)) {
+            let formDef = formCache.get(rFormId);
+            if (!formDef && formRepo && rFormId) {
+              formDef = await formRepo.findOne({ filter: { id: Number(rFormId) }, ...txOpt }).catch(() => null);
+              if (formDef) formCache.set(rFormId, formDef);
+            }
+            const allowedFields = Array.isArray(val(formDef, 'allowedFieldsJson'))
+              ? val(formDef, 'allowedFieldsJson').map((f) => f?.name).filter(Boolean)
+              : [];
+            const targetRepo = getRepo(db, rTargetCol);
+            const targetRec = targetRepo && typeof targetRepo.findOne === 'function'
+              ? await targetRepo.findOne({ filter: { id: Number(rTargetId), organizationId: rOrgId }, ...txOpt }).catch(() => null)
+              : null;
+            if (targetRec) {
+              if (val(targetRec, 'status')) rStatus = String(val(targetRec, 'status'));
+              for (const fname of [...new Set([...allowedFields, 'code', 'name', 'status'])]) {
+                if (BLOCKED_PROTO_KEYS.has(fname) || SENSITIVE_FIELD_NAME_RE.test(fname)) continue;
+                const fv = val(targetRec, fname);
+                if (fv !== undefined && fv !== null) targetPayloadFields[fname] = fv;
+              }
+            }
+          }
+          const payload = { ...targetPayloadFields, ...extraPayload };
+
+          const attachments = sanitizeAttachmentsMeta(val(row, 'attachmentsJson'));
+          const submittedAtRaw = val(row, 'submittedAt');
+          const createdAtRaw = val(row, 'createdAt');
+          const item = {
+            id: rId,
+            formId: rFormId,
+            slug: rSlug,
+            submissionCode: rSubCode,
+            status: rStatus,
+            payload,
+            attachments,
+            submittedAt: submittedAtRaw instanceof Date ? submittedAtRaw.toISOString() : (submittedAtRaw ? String(submittedAtRaw) : null),
+            createdAt: createdAtRaw instanceof Date ? createdAtRaw.toISOString() : (createdAtRaw ? String(createdAtRaw) : null),
+          };
+          if (search) {
+            const haystack = `${rSubCode} ${rSlug} ${rTargetId} ${JSON.stringify(payload)}`.toLowerCase();
+            if (!haystack.includes(search)) continue;
+          }
+          hydrated.push(item);
+        }
+
+        if (canSqlPaginate) {
+          return { items: hydrated, total: Number(totalCount ?? hydrated.length) };
+        }
+        const total = hydrated.length;
+        const start = (page - 1) * pageSize;
+        return { items: hydrated.slice(start, start + pageSize), total };
+      });
+
+      ctx.body = {
+        organizationId,
+        items: result.items,
+        total: result.total,
+        page,
+        pageSize,
+      };
+      if (next) return next();
+    },
+
+    downloadAttachment: async (ctx, next) => {
+      if ((ctx.method || 'GET').toUpperCase() !== 'GET') ctx.throw(405);
+      const { isRoot, organizationId, params } = await resolveAdminContext(ctx, db, { requireWriteScope: false, allowManager: true });
+      const submissionCode = String(params.submissionCode || '').trim();
+      const fieldName = String(params.fieldName || '').trim();
+      if (!SUBMISSION_CODE_RE.test(submissionCode) || !FIELD_NAME_RE.test(fieldName)) {
+        throw failForm('FORM_ATTACHMENT_PARAMS_INVALID', 400, 'Invalid submissionCode or fieldName.');
+      }
+      await ensurePublicFormSubmissionColumns(db);
+      const subRepo = getRepo(db, 'latticePublicFormSubmissions');
+      if (!subRepo || typeof subRepo.findOne !== 'function') {
+        throw failForm('FORM_SUBMISSION_NOT_FOUND', 404, 'Submission not found.');
+      }
+      const row = await runWithRls(db, isRoot, organizationId, (transaction) => subRepo.findOne({
+        filter: { submissionCode, ...(organizationId ? { organizationId } : {}) },
+        ...(transaction ? { transaction } : {}),
+      }));
+      if (!row) throw failForm('FORM_SUBMISSION_NOT_FOUND', 404, 'Submission not found.');
+      const attachments = Array.isArray(val(row, 'attachmentsJson')) ? val(row, 'attachmentsJson') : [];
+      const hit = attachments.find((a) => a && a.fieldName === fieldName);
+      if (!hit || !hit.contentBase64) {
+        throw failForm('FORM_ATTACHMENT_NOT_FOUND', 404, 'Attachment not found.');
+      }
+      const safeFilename = String(hit.filename || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_');
+      ctx.withoutDataWrapping = true;
+      ctx.set?.('Content-Type', ALLOWED_FILE_MIME_TYPES.has(hit.mimeType) ? hit.mimeType : 'application/octet-stream');
+      ctx.set?.('Content-Disposition', `attachment; filename="${safeFilename}"`);
+      ctx.set?.('X-Content-Type-Options', 'nosniff');
+      ctx.body = Buffer.from(hit.contentBase64, 'base64');
+      if (next) return next();
+    },
   };
 }
 
@@ -1183,13 +1571,16 @@ function registerPublicFormsGuard(app) {
 
 function registerPublicForms(app, options = {}) {
   registerPublicFormsGuard(app);
+  if (app?.db) {
+    Promise.resolve(ensurePublicFormSubmissionColumns(app.db)).catch(() => {});
+  }
   const actions = createDxosFormsActions(app.db, options);
   app.resourceManager.define({
     name: 'dxosForms',
     actions,
   });
   app.acl?.allow?.('dxosForms', ['meta', 'submit', 'status'], 'public');
-  app.acl?.allow?.('dxosForms', ['list', 'get', 'save', 'delete', 'rotateToken'], 'loggedIn');
+  app.acl?.allow?.('dxosForms', ['list', 'get', 'save', 'delete', 'rotateToken', 'listSubmissions', 'downloadAttachment'], 'loggedIn');
   return actions;
 }
 

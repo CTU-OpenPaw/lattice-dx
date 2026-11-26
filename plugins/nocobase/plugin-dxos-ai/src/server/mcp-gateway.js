@@ -100,9 +100,9 @@ const MCP_PROMPT_CATALOG = [
 
 function resolveGatewayVersion() {
   try {
-    return String(require('../../package.json')?.version || '0.4.1');
+    return String(require('../../package.json')?.version || '0.4.2');
   } catch {
-    return '0.4.1';
+    return '0.4.2';
   }
 }
 

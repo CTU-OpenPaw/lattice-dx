@@ -707,3 +707,177 @@ test('DxosParaPlugin logs structured retry metadata on afterCommit indexing fail
     Module._load = origLoad;
   }
 });
+
+test('P1-11: syncDocumentChunks deactivates draft/archived docs, extractAttachment redacts PII in summary/preview, and encrypted/scanned/ObjStm PDFs fail explicitly', async () => {
+  const { createParaActions, syncDocumentChunks } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  const employees = [{ id: 10, userId: 100, organizationId: 'org-a', active: true }];
+  const docUpdates = [];
+  const docRow = {
+    id: 1,
+    code: 'SOP-PII-1',
+    title: 'Hồ sơ giao nhận',
+    organizationId: 'org-a',
+    ownerId: 10,
+    status: 'active',
+    active: true,
+    async update(values) {
+      docUpdates.push(values);
+      Object.assign(this, values);
+      return this;
+    },
+  };
+  let chunks = [
+    { id: 1, documentId: 50, organizationId: 'org-a', content: 'Old chunk', active: true },
+  ];
+  let nextChunkId = 2;
+
+  const db = {
+    sequelize: { transaction: async (fn) => fn({}) },
+    getRepository(name) {
+      if (name === 'latticeEmployees') return { find: async ({ filter }) => employees.filter((e) => Number(e.userId) === Number(filter?.userId)) };
+      if (name === 'latticeDepartments') return { find: async () => [] };
+      if (name === 'latticeParaDocuments') return { findOne: async () => docRow };
+      if (name === 'latticeParaChunks') {
+        return {
+          destroy: async ({ filter }) => {
+            chunks = chunks.filter((c) => Number(c.documentId) !== Number(filter?.documentId));
+          },
+          create: async ({ values }) => {
+            const row = { id: nextChunkId++, ...values };
+            chunks.push(row);
+            return row;
+          },
+          find: async () => [],
+        };
+      }
+      return null;
+    },
+  };
+
+  // 1. syncDocumentChunks destroys chunks and skips indexing when status is 'draft' or 'archived'
+  const draftRes = await syncDocumentChunks(db, {
+    id: 50,
+    organizationId: 'org-a',
+    code: 'SOP-DRAFT',
+    title: 'Nháp',
+    status: 'draft',
+    contentMarkdown: 'Nội dung nháp',
+    active: true,
+  });
+  assert.equal(draftRes.deactivated, true);
+  assert.equal(draftRes.chunksCreated, 0);
+  assert.equal(chunks.length, 0);
+
+  const archivedRes = await syncDocumentChunks(db, {
+    id: 50,
+    organizationId: 'org-a',
+    code: 'SOP-ARCH',
+    title: 'Lưu trữ',
+    status: 'archived',
+    contentMarkdown: 'Nội dung cũ',
+    active: true,
+  });
+  assert.equal(archivedRes.deactivated, true);
+  assert.equal(archivedRes.chunksCreated, 0);
+
+  // 2. extractAttachment redacts email, phone, CCCD, STK, MST in doc.summary and preview
+  const actions = createParaActions(db);
+  const piiText = 'Khách hàng: alice@example.com, SĐT: 0912345678, CCCD: 079099123456, STK: 190012345678, MST: 0312345678.';
+  const piiCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_employee' },
+    action: {
+      params: {
+        values: {
+          documentId: 1,
+          filename: 'pii.txt',
+          mimeType: 'text/plain',
+          contentBase64: Buffer.from(piiText, 'utf8').toString('base64'),
+        },
+      },
+    },
+    throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
+  };
+  await actions.extractAttachment(piiCtx, async () => {});
+  assert.equal(docUpdates.length, 1);
+  for (const fieldVal of [docUpdates[0].summary, piiCtx.body.preview]) {
+    assert.ok(!fieldVal.includes('alice@example.com'), 'Email must be redacted');
+    assert.ok(!fieldVal.includes('0912345678'), 'Phone must be redacted');
+    assert.ok(!fieldVal.includes('079099123456'), 'CCCD must be redacted');
+    assert.ok(!fieldVal.includes('190012345678'), 'Bank account must be redacted');
+    assert.ok(!fieldVal.includes('0312345678'), 'MST must be redacted');
+    assert.match(fieldVal, /\[REDACTED_EMAIL\]/);
+    assert.match(fieldVal, /\[REDACTED_PHONE\]/);
+  }
+
+  // 3. extractAttachment surfaces explicit 400 error codes for /Encrypt, scanned Image PDF, and /ObjStm PDF
+  const mkPdfCtx = (rawPdf) => ({
+    method: 'POST',
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_employee' },
+    action: {
+      params: {
+        values: {
+          documentId: 1,
+          filename: 'test.pdf',
+          mimeType: 'application/pdf',
+          contentBase64: Buffer.from(rawPdf, 'latin1').toString('base64'),
+        },
+      },
+    },
+    throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
+  });
+
+  await assert.rejects(
+    () => actions.extractAttachment(mkPdfCtx('%PDF-1.4\n1 0 obj << /Encrypt 2 0 R >> endobj\n%%EOF\n'), async () => {}),
+    (err) => err.status === 400 && err.code === 'PDF_ENCRYPTED_UNSUPPORTED',
+  );
+  await assert.rejects(
+    () => actions.extractAttachment(mkPdfCtx('%PDF-1.4\n1 0 obj << /Subtype /Image /Length 4 >>\nstream\nABCD\nendstream\nendobj\n%%EOF\n'), async () => {}),
+    (err) => err.status === 400 && err.code === 'PDF_SCANNED_OCR_REQUIRED',
+  );
+  await assert.rejects(
+    () => actions.extractAttachment(mkPdfCtx('%PDF-1.5\n1 0 obj << /Type /ObjStm /Length 4 >>\nstream\nABCD\nendstream\nendobj\n%%EOF\n'), async () => {}),
+    (err) => err.status === 400 && err.code === 'PDF_OBJSTM_NO_TEXT',
+  );
+});
+
+test('P1-11 R2: buildSafeTextPreview redacts STK and IBAN in continuous unpunctuated Vietnamese prose without swallowing trailing words', () => {
+  const { buildSafeTextPreview } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  const stkInput = 'STK: 19035123456789 tại ngân hàng Techcombank chi nhánh Sài Gòn hôm nay';
+  assert.equal(
+    buildSafeTextPreview(stkInput, 300),
+    'STK: [REDACTED_BANK] tại ngân hàng Techcombank chi nhánh Sài Gòn hôm nay',
+  );
+
+  const spacedStk = 'Số tài khoản: 1903 5123 4567 89 tại ngân hàng Techcombank';
+  assert.equal(
+    buildSafeTextPreview(spacedStk, 300),
+    'Số tài khoản: [REDACTED_BANK] tại ngân hàng Techcombank',
+  );
+
+  const dashedStk = 'Tài khoản ngân hàng 1903-5123-4567-89 chuyển khoản hôm nay';
+  assert.equal(
+    buildSafeTextPreview(dashedStk, 300),
+    'Tài khoản ngân hàng [REDACTED_BANK] chuyển khoản hôm nay',
+  );
+
+  const punctuatedStk = 'STK: 190012345678, MST: 0312345678.';
+  assert.equal(
+    buildSafeTextPreview(punctuatedStk, 300),
+    'STK: [REDACTED_BANK], MST: [REDACTED_MST].',
+  );
+
+  const ibanVn = 'IBAN: VN19035123456789 tại ngân hàng Techcombank';
+  assert.equal(
+    buildSafeTextPreview(ibanVn, 300),
+    'IBAN: [REDACTED_BANK] tại ngân hàng Techcombank',
+  );
+
+  const ibanDe = 'IBAN: DE89 3704 0044 0532 0130 00 at Deutsche Bank';
+  assert.equal(
+    buildSafeTextPreview(ibanDe, 300),
+    'IBAN: [REDACTED_BANK] at Deutsche Bank',
+  );
+});

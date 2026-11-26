@@ -36,7 +36,48 @@ const {
   validateSafeRegexPattern,
 } = require('./rich-schema');
 const { createN8nRouteHandlers } = require('./n8n-api-client');
-const { fail, readParams, resolveVerifiedRoles } = require('./wms-dmn-shared');
+const { alignPortalOverviewRoutesSort } = require('./portal-composer');
+const { fail, readParams, resolveVerifiedRoles, runWithSystemRlsBypass, val } = require('./wms-dmn-shared');
+
+const LEGACY_FORBIDDEN_SLA_ROLES = ['ldx_admin', 'root', 'admin'];
+
+async function normalizeLegacySlaEscalateRoles(db) {
+  const slaRepo = db?.getRepository?.('latticeSlaPolicies');
+  if (!slaRepo || typeof slaRepo.find !== 'function' || typeof slaRepo.update !== 'function') {
+    return { updated: 0 };
+  }
+  return runWithSystemRlsBypass(db, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    const rows = (await slaRepo.find({
+      filter: { escalateToRole: { $in: LEGACY_FORBIDDEN_SLA_ROLES } },
+      limit: 500,
+      ...txOpt,
+    })) || [];
+    let updated = 0;
+    for (const row of rows) {
+      const role = String(val(row, 'escalateToRole') || '').trim();
+      if (!LEGACY_FORBIDDEN_SLA_ROLES.includes(role)) continue;
+      const id = val(row, 'id');
+      if (id != null) {
+        await slaRepo.update({ filterByTk: id, values: { escalateToRole: 'ldx_manager' }, ...txOpt });
+        updated += 1;
+      } else {
+        const orgId = val(row, 'organizationId');
+        const targetCol = val(row, 'targetCollection');
+        const priority = val(row, 'priority');
+        if (orgId && targetCol) {
+          await slaRepo.update({
+            filter: { organizationId: orgId, targetCollection: targetCol, ...(priority ? { priority } : {}) },
+            values: { escalateToRole: 'ldx_manager' },
+            ...txOpt,
+          });
+          updated += 1;
+        }
+      }
+    }
+    return { updated };
+  });
+}
 
 function createOrganizationDirectGuardMiddleware(db) {
   return async function dxosOrganizationDirectGuard(ctx, next) {
@@ -146,7 +187,7 @@ class DxosStudioPlugin extends Plugin {
     this.app.acl.allow('dxosStudio', ['listAutomationRules'], 'loggedIn');
     this.app.acl.allow(
       'dxosWms',
-      ['orderLines', 'saveOrderLine', 'receiveStock', 'lots', 'allocateFefo', 'issueStock', 'holdLotByMkt', 'epodCapture', 'printVoucher'],
+      ['orderLines', 'saveOrderLine', 'receiveStock', 'lots', 'allocateFefo', 'issueStock', 'holdLotByMkt', 'releaseLotByQa', 'epodCapture', 'printVoucher'],
       'loggedIn',
     );
     this.app.acl.allow('dxosWms', ['publicTrack', 'verifyTrackSignature'], 'public');
@@ -186,6 +227,45 @@ class DxosStudioPlugin extends Plugin {
       }, delayTickMs);
       if (typeof this._delayTicker.unref === 'function') this._delayTicker.unref();
     }
+
+    if (!this._startupRepairHookRegistered) {
+      this._startupRepairHookRegistered = true;
+      const runSafe = () => { this.runStartupRepairs().catch(() => {}); };
+      if (typeof this.app?.once === 'function') this.app.once('afterStart', runSafe);
+      else if (typeof this.app?.on === 'function') this.app.on('afterStart', runSafe);
+    }
+    await this.runStartupRepairs().catch(() => {});
+  }
+
+  async runStartupRepairs() {
+    if (!this.db) return { routesUpdated: 0, slaUpdated: 0 };
+    let routesUpdated = 0;
+    let slaUpdated = 0;
+    try {
+      const r = await alignPortalOverviewRoutesSort(this.db);
+      routesUpdated = Number(r?.updated || 0);
+    } catch {
+      // Table may not exist yet before db.sync() or in isolated unit tests
+    }
+    try {
+      const s = await normalizeLegacySlaEscalateRoles(this.db);
+      slaUpdated = Number(s?.updated || 0);
+    } catch {
+      // Table may not exist yet before db.sync() or in isolated unit tests
+    }
+    return { routesUpdated, slaUpdated };
+  }
+
+  async install() {
+    await this.runStartupRepairs().catch(() => {});
+  }
+
+  async afterEnable() {
+    await this.runStartupRepairs().catch(() => {});
+  }
+
+  async start() {
+    await this.runStartupRepairs().catch(() => {});
   }
 
   async unload() {
@@ -207,5 +287,7 @@ DxosStudioPlugin.evaluateFormulaExpression = evaluateFormulaExpression;
 DxosStudioPlugin.validateFormulaExpression = validateFormulaExpression;
 DxosStudioPlugin.validateSafeRegexPattern = validateSafeRegexPattern;
 DxosStudioPlugin.registerRichSchemaHooks = registerRichSchemaHooks;
+DxosStudioPlugin.alignPortalOverviewRoutesSort = alignPortalOverviewRoutesSort;
+DxosStudioPlugin.normalizeLegacySlaEscalateRoles = normalizeLegacySlaEscalateRoles;
 module.exports = DxosStudioPlugin;
 module.exports.default = DxosStudioPlugin;

@@ -14,6 +14,7 @@ const { dispatchNotification, dispatchRoleNotifications, resolveNotificationTarg
 const {
   canUsePgRlsSession,
   getActiveRlsContext,
+  runInRlsSavepoint,
   withSystemRlsBypass,
   withTenantRlsContext,
 } = require('./pg-rls');
@@ -351,10 +352,17 @@ async function safeNotifyRequester(db, { organizationId, collection, recordId, r
 }
 
 function runVoucherTenantTx(db, organizationId, fn) {
-  if (canUsePgRlsSession(db) && !getActiveRlsContext()?.transaction && organizationId) {
+  const activeRls = getActiveRlsContext();
+  if (activeRls?.transaction && (!activeRls.sequelize || !db?.sequelize || activeRls.sequelize === db.sequelize)) {
+    return runInRlsSavepoint(db, fn);
+  }
+  if (canUsePgRlsSession(db)) {
     return withTenantRlsContext(db, organizationId, fn);
   }
-  return db.sequelize.transaction(fn);
+  if (typeof db?.sequelize?.transaction === 'function') {
+    return db.sequelize.transaction(fn);
+  }
+  return fn(null);
 }
 
 async function submitVoucher(db, { collection, id, organizationId, actor, expectedVersion = null, now = new Date() }) {

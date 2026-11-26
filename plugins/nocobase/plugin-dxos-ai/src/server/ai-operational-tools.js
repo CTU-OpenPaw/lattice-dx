@@ -377,7 +377,16 @@ function createOperationalTools(deps) {
           : rawTargets;
         const pool = [];
         const visibleParaDocMap = new Map();
+        const hiddenParaDocIds = new Set();
         const docPoolEntryById = new Map();
+        const isParaStatusActive = (row) => {
+          const activeFlag = val(row, 'active');
+          if (activeFlag === false || activeFlag === 0) return false;
+          const st = val(row, 'status');
+          if (st == null) return true;
+          const clean = String(st).trim().toLowerCase();
+          return !clean || clean === 'active';
+        };
         const docScanCols = canSearchParaChunks && !targets.includes('latticeParaDocuments')
           ? [...targets, 'latticeParaDocuments']
           : targets;
@@ -389,8 +398,12 @@ function createOperationalTools(deps) {
           const isOwnOnly = ownOnlySet.has(colName);
           const emitDocItems = targets.includes(colName);
           for (const row of rows) {
-            if (!isRowVisibleToActor(row, actor, isOwnOnly)) continue;
             const id = val(row, 'id');
+            if (colName === 'latticeParaDocuments' && (val(row, 'active') === false || !isParaStatusActive(row))) {
+              if (id != null) hiddenParaDocIds.add(String(id));
+              continue;
+            }
+            if (!isRowVisibleToActor(row, actor, isOwnOnly)) continue;
             if (colName === 'latticeParaDocuments' && id != null) {
               visibleParaDocMap.set(String(id), row);
             }
@@ -403,13 +416,17 @@ function createOperationalTools(deps) {
           }
         }
         let chunkSearched = false;
+        let neuralEmbeddingVector = null;
         if (canSearchParaChunks) {
           const chunkRepo = db?.getRepository?.('latticeParaChunks');
           const chunkByKey = new Map();
           const addChunkRow = (row) => {
             if (!row || val(row, 'organizationId') !== actor.organizationId || val(row, 'active') === false) return;
+            if (!isParaStatusActive(row)) return;
+            const docId = val(row, 'documentId');
+            if (docId != null && hiddenParaDocIds.has(String(docId))) return;
             const cid = val(row, 'id');
-            const key = cid != null ? `id:${cid}` : `doc:${val(row, 'documentId')}:${val(row, 'chunkIndex') ?? 0}`;
+            const key = cid != null ? `id:${cid}` : `doc:${docId}:${val(row, 'chunkIndex') ?? 0}`;
             const prev = chunkByKey.get(key);
             if (!prev) {
               chunkByKey.set(key, typeof row?.toJSON === 'function' ? row.toJSON() : { ...row });
@@ -431,11 +448,13 @@ function createOperationalTools(deps) {
                 const embEnv = ctx?.state?.dxosEmbeddingEnv || process.env;
                 const embFetch = ctx?.state?.dxosFetchImpl || globalThis.fetch;
                 const emb = await neuralEmbFn(q, { env: embEnv, fetchImpl: embFetch });
-                if (emb?.engine === 'neural' && Array.isArray(emb.vector) && emb.vector.length === 1536) {
+                if (emb?.engine === 'neural' && Array.isArray(emb.vector) && emb.vector.length >= 8 && emb.vector.length <= 8192) {
+                  neuralEmbeddingVector = emb.vector;
                   const pgVecRows = await executePgVectorParaQuery(db, {
                     table: 'latticeParaChunks',
                     organizationId: actor.organizationId,
                     queryEmbedding: emb.vector,
+                    embeddingDim: emb.vector.length,
                     limit: 40,
                   });
                   for (const r of pgVecRows) addChunkRow(r);
@@ -456,6 +475,7 @@ function createOperationalTools(deps) {
               const docOwnOnly = ownOnlySet.has('latticeParaDocuments');
               for (const docRow of pgDocRows) {
                 if (!docRow || val(docRow, 'organizationId') !== actor.organizationId || val(docRow, 'active') === false) continue;
+                if (!isParaStatusActive(docRow)) continue;
                 if (!isRowVisibleToActor(docRow, actor, docOwnOnly)) continue;
                 const docId = val(docRow, 'id');
                 if (docId != null && !visibleParaDocMap.has(String(docId))) {
@@ -484,10 +504,42 @@ function createOperationalTools(deps) {
             for (const r of chunkRows) addChunkRow(r);
             chunkSearched = true;
           }
+          const docRepo = db?.getRepository?.('latticeParaDocuments');
+          if (chunkByKey.size && docRepo && typeof docRepo.find === 'function') {
+            const unresolvedDocIds = [];
+            for (const ch of chunkByKey.values()) {
+              const docId = val(ch, 'documentId');
+              if (docId != null && !visibleParaDocMap.has(String(docId)) && !hiddenParaDocIds.has(String(docId))) {
+                unresolvedDocIds.push(docId);
+              }
+            }
+            if (unresolvedDocIds.length) {
+              const uniqueIds = [...new Set(unresolvedDocIds)];
+              const extraDocs = (await docRepo.find({
+                filter: { organizationId: actor.organizationId, id: { $in: uniqueIds } },
+                limit: uniqueIds.length + 10,
+              }).catch(() => [])) || [];
+              const foundById = new Map();
+              for (const d of extraDocs) {
+                const did = val(d, 'id');
+                if (did != null) foundById.set(String(did), d);
+              }
+              const docOwnOnly = ownOnlySet.has('latticeParaDocuments');
+              for (const uid of uniqueIds) {
+                const docRow = foundById.get(String(uid));
+                if (!docRow || val(docRow, 'active') === false || !isParaStatusActive(docRow) || !isRowVisibleToActor(docRow, actor, docOwnOnly)) {
+                  hiddenParaDocIds.add(String(uid));
+                } else {
+                  visibleParaDocMap.set(String(uid), docRow);
+                }
+              }
+            }
+          }
           if (chunkByKey.size) {
             const chunkPool = buildParaChunkPoolEntries([...chunkByKey.values()], {
               organizationId: actor.organizationId,
               visibleDocMap: visibleParaDocMap,
+              hiddenDocIds: hiddenParaDocIds,
               ownOnly: ownOnlySet.has('latticeParaDocuments'),
               val,
             });
@@ -497,7 +549,7 @@ function createOperationalTools(deps) {
         const searchedCollections = chunkSearched && !targets.includes('latticeParaChunks')
           ? [...targets, 'latticeParaChunks']
           : targets;
-        const items = rankHybridRecords(q, pool, { limit });
+        const items = rankHybridRecords(q, pool, { limit, neuralEmbedding: neuralEmbeddingVector });
         let memoryContext = '';
         if (args.includeMemories && db?.getRepository?.('latticeAiMemory')) {
           try {
@@ -723,7 +775,14 @@ function createOperationalTools(deps) {
             if (!repo) return [];
             const rows = (await repo.find({ filter: { organizationId: actor.organizationId }, limit: 25, sort: ['-id'] })) || [];
             const isOwnOnly = ownOnlySet.has(col);
-            return rows.filter((r) => isRowVisibleToActor(r, actor, isOwnOnly) && matchRow(r, extraTokens)).slice(0, 5).map((r) => ({
+            return rows.filter((r) => {
+              if (col === 'latticeParaDocuments') {
+                if (val(r, 'active') === false) return false;
+                const st = val(r, 'status');
+                if (st != null && String(st).trim() !== '' && String(st).trim().toLowerCase() !== 'active') return false;
+              }
+              return isRowVisibleToActor(r, actor, isOwnOnly) && matchRow(r, extraTokens);
+            }).slice(0, 5).map((r) => ({
               id: val(r, 'id'),
               code: val(r, 'code') || String(val(r, 'id')),
               title: val(r, 'name') || val(r, 'title') || val(r, 'code'),

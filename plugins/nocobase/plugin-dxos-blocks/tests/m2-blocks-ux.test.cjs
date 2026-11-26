@@ -276,7 +276,8 @@ test('M2-1b: BiChartBlock formats numbers in vi-VN, wires inline limit selector,
   });
   const drillCall = requests.find((r) => r.url === 'latticeOrders:list');
   assert.ok(drillCall, 'Bar click must query collection:list');
-  assert.deepEqual(drillCall.params.filter, { $or: [{ status: null }, { status: '' }] });
+  assert.equal(typeof drillCall.params.filter, 'string');
+  assert.deepEqual(JSON.parse(drillCall.params.filter), { $or: [{ status: null }, { status: '' }] });
   const drillPanel = findByTestId(resolveTree(tree), 'dxos-bi-drilldown-panel');
   assert.ok(drillPanel, 'Drilldown panel must appear after bar click');
   assert.ok(textOf(drillPanel).includes('ORD-041'));
@@ -305,7 +306,8 @@ test('M2-1b: BiChartBlock formats numbers in vi-VN, wires inline limit selector,
   });
   const listCalls = requests.filter((r) => r.url === 'latticeOrders:list');
   const pivotListCall = listCalls[listCalls.length - 1];
-  assert.deepEqual(pivotListCall.params.filter, {
+  assert.equal(typeof pivotListCall.params.filter, 'string');
+  assert.deepEqual(JSON.parse(pivotListCall.params.filter), {
     $and: [
       { $or: [{ status: null }, { status: '' }] },
       { region: 'can-tho' },
@@ -735,6 +737,7 @@ test('M2-R2: BiChartBlock buildDrilldownFilter uses null-only filter for non-str
   await bars[0].props.onClick();
   const listCall = requests.find((r) => r.url === 'latticeOrders:list');
   assert.ok(listCall, 'Clicking (Trống) bar must call latticeOrders:list');
-  assert.deepEqual(listCall.params.filter, { totalAmount: null });
+  assert.equal(typeof listCall.params.filter, 'string');
+  assert.deepEqual(JSON.parse(listCall.params.filter), { totalAmount: null });
   hooks.unmount();
 });

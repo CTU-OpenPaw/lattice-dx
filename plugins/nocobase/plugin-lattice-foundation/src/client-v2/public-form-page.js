@@ -130,11 +130,47 @@ function projectZeroPiiSubmissionStatus(raw) {
   };
 }
 
+function localizeFormError(msg) {
+  const text = String(msg || '').trim();
+  if (!text || text === 'Public form not found or inactive.') {
+    return 'Biểu mẫu công khai không tồn tại hoặc đã ngừng tiếp nhận.';
+  }
+  const lower = text.toLowerCase();
+  if (lower.includes('access token') || lower.includes('form_access_token_invalid')) {
+    return 'Mã truy cập biểu mẫu (Access Token) không hợp lệ.';
+  }
+  if (lower.includes('rate limit') || lower.includes('too many requests')) {
+    return 'Bạn gửi quá nhanh. Vui lòng chờ ít phút rồi thử lại.';
+  }
+  if (lower.includes('bot protection') || lower.includes('form_bot_detected')) {
+    return 'Yêu cầu bị từ chối bởi bộ lọc chống spam.';
+  }
+  if (lower.includes('invalid status lookup credentials') || lower.includes('form_status_unauthorized')) {
+    return 'Mã hồ sơ hoặc mã tra cứu trạng thái không đúng.';
+  }
+  if (lower.includes('file type') || lower.includes('not allowed for')) {
+    return 'Định dạng tệp không được hỗ trợ (chỉ nhận PDF, PNG, JPEG, WebP, TXT).';
+  }
+  if (lower.includes('exceeds maximum size') || lower.includes('too large')) {
+    return 'Dung lượng tệp vượt quá giới hạn 2 MB.';
+  }
+  if (lower.includes('does not match declared mime') || lower.includes('invalid base64') || lower.includes('empty file')) {
+    return 'Nội dung tệp không hợp lệ hoặc bị giả mạo định dạng.';
+  }
+  if (lower.includes('exceeds max length')) {
+    return 'Nội dung nhập vượt quá độ dài cho phép.';
+  }
+  if (lower.includes('is required')) {
+    return 'Vui lòng điền đầy đủ các trường bắt buộc.';
+  }
+  return text;
+}
+
 function extractApiError(err, fallbackMsg) {
   const serverMsg = err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message;
   const status = err?.response?.status || err?.status;
-  if (serverMsg) return { message: String(serverMsg), status };
-  if (err?.message) return { message: String(err.message), status };
+  if (serverMsg) return { message: localizeFormError(String(serverMsg)), status };
+  if (err?.message) return { message: localizeFormError(String(err.message)), status };
   return { message: fallbackMsg, status };
 }
 
@@ -180,6 +216,9 @@ function createPublicFormPage(client, React, app) {
     const [checkingStatus, setCheckingStatus] = React.useState(false);
     const [statusData, setStatusData] = React.useState(null);
     const [statusError, setStatusError] = React.useState('');
+    const [lookupCode, setLookupCode] = React.useState(effectiveCode);
+    const [lookupToken, setLookupToken] = React.useState(effectiveStatusToken);
+    const [showLookupToken, setShowLookupToken] = React.useState(false);
 
     async function callEndpoint(actionUrl, opts = {}) {
       if (apiClient && typeof apiClient.request === 'function') {
@@ -283,6 +322,12 @@ function createPublicFormPage(client, React, app) {
           }
           continue;
         }
+        if (field.type === 'file') {
+          if (field.required && !(val && typeof val === 'object' && val.contentBase64)) {
+            nextFieldErrors[field.name] = `Vui lòng đính kèm ${label}.`;
+          }
+          continue;
+        }
         const raw = String(val ?? '');
         const trimmed = raw.trim();
         if (field.required && !trimmed) {
@@ -349,9 +394,9 @@ function createPublicFormPage(client, React, app) {
       }
     }
 
-    async function handleCheckStatus() {
-      const code = receipt?.submissionCode || effectiveCode;
-      const tok = receipt?.statusToken || effectiveStatusToken;
+    async function handleCheckStatus(overrideCode, overrideToken) {
+      const code = (typeof overrideCode === 'string' ? overrideCode : '') || receipt?.submissionCode || effectiveCode;
+      const tok = (typeof overrideToken === 'string' ? overrideToken : '') || receipt?.statusToken || effectiveStatusToken;
       if (!effectiveSlug || !code || !tok) {
         setStatusError('Thiếu mã hồ sơ hoặc mã tra cứu trạng thái.');
         return;
@@ -369,6 +414,16 @@ function createPublicFormPage(client, React, app) {
       } finally {
         setCheckingStatus(false);
       }
+    }
+
+    function handleResetForm() {
+      setReceipt(null);
+      setStatusData(null);
+      setStatusError('');
+      setErrorMsg('');
+      setFieldErrors({});
+      setTokenError('');
+      setValues({});
     }
 
     const inputStyle = {
@@ -427,6 +482,56 @@ function createPublicFormPage(client, React, app) {
           checked: Boolean(currentVal),
           onChange: (e) => updateFieldValue(field.name, Boolean(e?.target?.checked)),
         });
+      }
+      if (field.type === 'file') {
+        const fileObj = currentVal && typeof currentVal === 'object' ? currentVal : null;
+        return h('div', { style: { display: 'grid', gap: 6 } },
+          h('input', {
+            type: 'file',
+            name: field.name,
+            accept: '.pdf,.png,.jpg,.jpeg,.webp,.txt,application/pdf,image/png,image/jpeg,image/webp,text/plain',
+            'data-testid': `public-form-file-input-${field.name}`,
+            onChange: (e) => {
+              const f = e?.target?.files?.[0];
+              if (!f) return;
+              const mimeType = String(f.type || '').toLowerCase();
+              const allowed = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp', 'text/plain'];
+              if (mimeType && !allowed.includes(mimeType)) {
+                setFieldErrors((prev) => ({ ...(prev || {}), [field.name]: 'Định dạng tệp không được hỗ trợ (PDF, PNG, JPEG, WebP, TXT).' }));
+                return;
+              }
+              if (Number(f.size) > 2 * 1024 * 1024) {
+                setFieldErrors((prev) => ({ ...(prev || {}), [field.name]: 'Dung lượng tệp vượt quá 2 MB.' }));
+                return;
+              }
+              const ReaderCtor = typeof FileReader !== 'undefined' ? FileReader : globalThis.FileReader;
+              if (typeof ReaderCtor !== 'function') return;
+              const reader = new ReaderCtor();
+              reader.onload = () => {
+                const resStr = typeof reader.result === 'string' ? reader.result : '';
+                const idx = resStr.indexOf(',');
+                const b64 = idx >= 0 ? resStr.slice(idx + 1) : '';
+                updateFieldValue(field.name, {
+                  filename: f.name || 'attachment',
+                  mimeType: mimeType || 'application/octet-stream',
+                  sizeBytes: Number(f.size || 0),
+                  contentBase64: b64,
+                });
+              };
+              reader.readAsDataURL(f);
+            },
+            style: activeStyle,
+          }),
+          fileObj ? h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#475569' } },
+            h('span', null, `${fileObj.filename || 'attachment'} (${Math.max(1, Math.round(Number(fileObj.sizeBytes || 0) / 1024))} KB)`),
+            h('button', {
+              type: 'button',
+              'data-testid': `public-form-file-clear-${field.name}`,
+              onClick: () => updateFieldValue(field.name, ''),
+              style: { minHeight: 44, minWidth: 44, padding: '8px 12px', borderRadius: 4, border: '1px solid #94a3b8', background: '#ffffff', cursor: 'pointer', fontSize: 12 },
+            }, 'Xóa tệp'),
+          ) : null,
+        );
       }
       const htmlType = field.type === 'number' || field.type === 'integer'
         ? 'number'
@@ -536,6 +641,8 @@ function createPublicFormPage(client, React, app) {
               'data-testid': 'public-form-submit-btn',
               disabled: submitting,
               style: {
+                minHeight: 44,
+                minWidth: 44,
                 padding: '10px 18px',
                 borderRadius: 6,
                 border: '1px solid #0284c7',
@@ -561,25 +668,96 @@ function createPublicFormPage(client, React, app) {
           h('div', { style: { fontSize: 14, marginBottom: 6 } }, `Mã hồ sơ: ${receipt.submissionCode}`),
           h('div', { style: { fontSize: 13, fontFamily: 'monospace', wordBreak: 'break-all', marginBottom: 6 } }, `Status Token: ${receipt.statusToken}`),
           h('div', { style: { fontSize: 13, color: '#334155', marginBottom: 12 } }, `Trạng thái ban đầu: ${receipt.status} · Lúc: ${receipt.submittedAt || '—'}`),
-          h(
-            'button',
-            {
-              type: 'button',
-              'data-testid': 'public-form-check-status-btn',
-              disabled: checkingStatus,
-              onClick: handleCheckStatus,
-              style: {
-                padding: '8px 14px',
-                borderRadius: 6,
-                border: '1px solid #15803d',
-                background: '#15803d',
-                color: '#ffffff',
-                fontWeight: 600,
-                cursor: checkingStatus ? 'not-allowed' : 'pointer',
+          h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+            h(
+              'button',
+              {
+                type: 'button',
+                'data-testid': 'public-form-check-status-btn',
+                disabled: checkingStatus,
+                onClick: () => handleCheckStatus(),
+                style: {
+                  minHeight: 44,
+                  minWidth: 44,
+                  padding: '8px 14px',
+                  borderRadius: 6,
+                  border: '1px solid #15803d',
+                  background: '#15803d',
+                  color: '#ffffff',
+                  fontWeight: 600,
+                  cursor: checkingStatus ? 'not-allowed' : 'pointer',
+                },
               },
-            },
-            checkingStatus ? 'Đang kiểm tra...' : 'Kiểm tra trạng thái hồ sơ',
+              checkingStatus ? 'Đang kiểm tra...' : 'Kiểm tra trạng thái hồ sơ',
+            ),
+            h(
+              'button',
+              {
+                type: 'button',
+                'data-testid': 'public-form-reset-btn',
+                onClick: handleResetForm,
+                style: {
+                  minHeight: 44,
+                  minWidth: 44,
+                  padding: '8px 14px',
+                  borderRadius: 6,
+                  border: '1px solid #94a3b8',
+                  background: '#ffffff',
+                  color: '#0f172a',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                },
+              },
+              'Gửi hồ sơ khác',
+            ),
           ),
+        )
+        : null,
+      formMeta
+        ? h(
+          'form',
+          {
+            'data-testid': 'public-form-manual-status-form',
+            noValidate: true,
+            onSubmit: (e) => {
+              if (e && typeof e.preventDefault === 'function') e.preventDefault();
+              handleCheckStatus(String(lookupCode || '').trim(), String(lookupToken || '').trim());
+            },
+            style: { background: '#ffffff', padding: 16, borderRadius: 10, border: '1px solid #cbd5e1', marginTop: 16, marginBottom: 16 },
+          },
+          h('div', { style: { fontWeight: 700, fontSize: 15, marginBottom: 10 } }, 'Tra cứu trạng thái hồ sơ đã nộp'),
+          h('input', {
+            type: 'text',
+            'data-testid': 'public-form-lookup-code-input',
+            value: lookupCode,
+            onChange: (e) => setLookupCode(e?.target?.value ?? ''),
+            placeholder: 'Mã hồ sơ (VD: LDX-FRM-...)',
+            style: { ...inputStyle, marginBottom: 10 },
+          }),
+          h('div', { style: { display: 'flex', gap: 6, alignItems: 'center', marginBottom: 10 } },
+            h('input', {
+              type: showLookupToken ? 'text' : 'password',
+              'data-testid': 'public-form-lookup-token-input',
+              value: lookupToken,
+              onChange: (e) => setLookupToken(e?.target?.value ?? ''),
+              placeholder: 'Mã tra cứu trạng thái (Status Token)',
+              style: { ...inputStyle, flex: 1, minWidth: 0 },
+            }),
+            h('button', {
+              type: 'button',
+              'data-testid': 'public-form-lookup-token-toggle',
+              'aria-label': 'Hiện/ẩn mã tra cứu',
+              'aria-pressed': String(showLookupToken),
+              onClick: () => setShowLookupToken((v) => !v),
+              style: { minHeight: 44, minWidth: 44, padding: '8px 12px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', color: '#334155', fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0 },
+            }, showLookupToken ? 'Ẩn' : 'Hiện'),
+          ),
+          h('button', {
+            type: 'submit',
+            'data-testid': 'public-form-lookup-btn',
+            disabled: checkingStatus,
+            style: { minHeight: 44, minWidth: 44, padding: '8px 14px', borderRadius: 6, border: '1px solid #94a3b8', background: '#ffffff', color: '#0f172a', fontWeight: 600, cursor: checkingStatus ? 'not-allowed' : 'pointer' },
+          }, 'Tra cứu hồ sơ'),
         )
         : null,
       statusError

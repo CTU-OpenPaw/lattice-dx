@@ -65,18 +65,22 @@ function isSafeLocalPath(rawPath) {
   return !/[\r\n\0\\]/.test(trimmed) && !trimmed.includes('..');
 }
 
-function surfaceKey(portalSlug, pageTitle) {
+function surfaceKey(portalSlug, pageTitle, organizationId = '') {
   const s = String(portalSlug || '').trim().toLowerCase();
   const p = String(pageTitle || '').trim().toLowerCase();
-  return p ? `${s}::${p}` : s;
+  const o = String(organizationId || '').trim();
+  const base = p ? `${s}::${p}` : s;
+  return o ? `${o}::${base}` : base;
 }
 
-function bumpSurfaceRevision(portalSlug, { pageTitle = '', blockCount, layoutSignature, lastMutatedUid = null, message = 'AI Architect vừa cập nhật giao diện trực tiếp' } = {}) {
-  const keys = [surfaceKey(portalSlug), ...(pageTitle ? [surfaceKey(portalSlug, pageTitle)] : [])];
+function bumpSurfaceRevision(portalSlug, { organizationId = '', pageTitle = '', blockCount, layoutSignature, lastMutatedUid = null, message = 'AI Architect vừa cập nhật giao diện trực tiếp' } = {}) {
+  const org = String(organizationId || '').trim();
+  const keys = [surfaceKey(portalSlug, '', org), ...(pageTitle ? [surfaceKey(portalSlug, pageTitle, org)] : [])];
   let nextState = null;
   for (const key of keys) {
     const prev = surfaceRevisionStore.get(key) || { revision: 1 };
     nextState = {
+      ...(org ? { organizationId: org } : {}),
       portalSlug,
       pageTitle: pageTitle || prev.pageTitle || null,
       revision: Number(prev.revision || 1) + 1,
@@ -520,22 +524,25 @@ async function capturePageSnapshot(db, { portalSlug, pageTitle = '', note = '', 
   return values;
 }
 
-async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid = '', organizationId = null, allowCrossOrg = true }, val) {
+async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid = '', organizationId = null, allowCrossOrg = true, scopedBlockUids = null }, val) {
   await ensureUiSnapshotsReady(db);
   const snapRepo = db?.getRepository?.('latticeUiSnapshots');
   if (!snapRepo) return { rolledBack: false, reason: 'latticeUiSnapshots repository unavailable' };
   const cleanOrg = organizationId ? String(organizationId).trim() : '';
+  if (!allowCrossOrg && !cleanOrg) {
+    return { rolledBack: false, code: 'DXOS_ORG_MISMATCH', reason: 'Yêu cầu organizationId hợp lệ để hoàn tác snapshot.' };
+  }
   let targetSnap = null;
   if (snapshotUid) {
     targetSnap = await snapRepo.findOne({ filter: { snapshotUid } });
-    if (targetSnap && !allowCrossOrg && cleanOrg) {
+    if (targetSnap && !allowCrossOrg) {
       const snapOrg = String(val(targetSnap, 'organizationId') || '').trim();
-      if (snapOrg && snapOrg !== cleanOrg) {
+      if (!snapOrg || snapOrg !== cleanOrg) {
         return { rolledBack: false, code: 'DXOS_ORG_MISMATCH', reason: 'Không được phép hoàn tác snapshot của tổ chức khác.' };
       }
     }
   } else {
-    const orgFilter = !allowCrossOrg && cleanOrg ? { organizationId: cleanOrg } : {};
+    const orgFilter = !allowCrossOrg ? { organizationId: cleanOrg } : {};
     if (pageTitle) {
       targetSnap = (await snapRepo.find({ filter: { portalSlug, pageTitle, ...orgFilter }, sort: ['-id'], limit: 1 }))?.[0] || null;
     }
@@ -549,11 +556,15 @@ async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid
   const { flowModelsRepo, grid } = await resolvePageGrid(db, portalSlug, snapPageTitle, val);
   if (!grid || !flowModelsRepo) return { rolledBack: false, reason: `Không tìm thấy grid của portal "${portalSlug}".` };
 
-  const blocks = Array.isArray(val(targetSnap, 'blocks')) ? val(targetSnap, 'blocks') : [];
+  const hasScopedFilter = Array.isArray(scopedBlockUids) || scopedBlockUids instanceof Set;
+  const scopedSet = hasScopedFilter ? new Set([...scopedBlockUids].filter(Boolean)) : null;
+  const rawBlocks = Array.isArray(val(targetSnap, 'blocks')) ? val(targetSnap, 'blocks') : [];
+  const blocks = scopedSet ? rawBlocks.filter((b) => scopedSet.has(b?.uid)) : rawBlocks;
   const keepUids = new Set(blocks.map((b) => b.uid));
   const currentUids = extractGridBlockUids(grid).ordered;
 
   for (const uid of currentUids) {
+    if (scopedSet && !scopedSet.has(uid)) continue;
     if (!keepUids.has(uid)) {
       if (typeof flowModelsRepo.remove === 'function') await flowModelsRepo.remove(uid);
       else if (typeof flowModelsRepo.destroy === 'function') await flowModelsRepo.destroy({ filter: { uid } });
@@ -570,11 +581,20 @@ async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid
       stepParams: blk.stepParams || {},
     });
   }
-  const layoutState = val(targetSnap, 'layoutState') || normalizeGridState(grid, [...keepUids]);
+  let layoutState;
+  if (scopedSet) {
+    const foreignUids = currentUids.filter((u) => !scopedSet.has(u));
+    const restoredUids = blocks.map((b) => b.uid).filter(Boolean);
+    layoutState = normalizeGridState(grid, [...new Set([...foreignUids, ...restoredUids])]);
+  } else {
+    layoutState = val(targetSnap, 'layoutState') || normalizeGridState(grid, [...keepUids]);
+  }
   await updateGridLayout(flowModelsRepo, grid, layoutState);
+  const effectiveOrg = cleanOrg || String(val(targetSnap, 'organizationId') || '').trim();
   bumpSurfaceRevision(portalSlug, {
+    organizationId: effectiveOrg,
     pageTitle: snapPageTitle,
-    blockCount: blocks.length,
+    blockCount: scopedSet ? extractGridBlockUids({ props: layoutState }).ordered.length : blocks.length,
     layoutSignature: computeLayoutSignature({ props: layoutState, stepParams: { gridSettings: { grid: layoutState } }, subModels: { items: blocks } }),
     message: `Đã hoàn tác bố cục về snapshot ${val(targetSnap, 'snapshotUid')}`,
   });
@@ -587,19 +607,20 @@ async function restorePageSnapshot(db, { portalSlug, pageTitle = '', snapshotUid
   };
 }
 
-async function getSurfaceRevisionState(db, portalSlug, pageTitle, val) {
-  const key = surfaceKey(portalSlug, pageTitle);
-  const baseKey = surfaceKey(portalSlug);
+async function getSurfaceRevisionState(db, portalSlug, pageTitle, val, organizationId = '') {
+  const org = String(organizationId || '').trim();
+  const key = surfaceKey(portalSlug, pageTitle, org);
+  const baseKey = surfaceKey(portalSlug, '', org);
   const stored = surfaceRevisionStore.get(key) || surfaceRevisionStore.get(baseKey);
   const { grid } = await resolvePageGrid(db, portalSlug, pageTitle, val);
   const liveSig = grid ? computeLayoutSignature(grid) : (stored?.layoutSignature || '');
   const liveCount = grid ? extractGridBlockUids(grid).ordered.length : (stored?.blockCount ?? 0);
   if (!stored) {
-    const initial = { portalSlug, pageTitle: pageTitle || null, revision: 1, blockCount: liveCount, layoutSignature: liveSig, lastMutatedUid: null, message: '' };
+    const initial = { ...(org ? { organizationId: org } : {}), portalSlug, pageTitle: pageTitle || null, revision: 1, blockCount: liveCount, layoutSignature: liveSig, lastMutatedUid: null, message: '' };
     setSurfaceRevisionEntry(key, initial);
     return initial;
   }
-  return { ...stored, blockCount: liveCount, layoutSignature: liveSig || stored.layoutSignature };
+  return { ...stored, ...(org ? { organizationId: org } : {}), blockCount: liveCount, layoutSignature: liveSig || stored.layoutSignature };
 }
 
 function stripVietnameseDiacritics(input) {
@@ -981,6 +1002,7 @@ function createSurfaceAndCreativeTools(deps) {
         }
         const blockCount = nextLayout ? Object.values(nextLayout.rows || {}).flat(2).length : extractGridBlockUids(grid).ordered.length;
         bumpSurfaceRevision(args.portalSlug, {
+          organizationId: actor.organizationId,
           pageTitle: val(pageRoute, 'title') || args.pageTitle,
           blockCount,
           layoutSignature: computeLayoutSignature({ props: nextLayout || grid.props }),
@@ -1252,7 +1274,7 @@ function createSurfaceAndCreativeTools(deps) {
           status: 'allowed',
           resultSummary: `Provisioned role ${effectiveRoleName}, page ${args.pageTitle}, AI ${validatedProfile.username}`,
         });
-        bumpSurfaceRevision(args.portalSlug, { pageTitle: args.pageTitle, lastMutatedUid: creativeUid, message: `Đã dựng trọn gói cho vai trò ${effectiveRoleName}` });
+        bumpSurfaceRevision(args.portalSlug, { organizationId: actor.organizationId, pageTitle: args.pageTitle, lastMutatedUid: creativeUid, message: `Đã dựng trọn gói cho vai trò ${effectiveRoleName}` });
 
         return {
           provisioned: true,

@@ -11,7 +11,7 @@
 const { createHash, randomBytes, timingSafeEqual } = require('node:crypto');
 const { resolveNativeActor } = require('./native-scope');
 const { val, callerRoles, getRepo } = require('./native-portal-helpers');
-const { canUsePgRlsSession, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
+const { canUsePgRlsSession, isValidOrganizationId, withSystemRlsBypass, withTenantRlsContext } = require('./pg-rls');
 
 const PAT_TOKEN_RE = /^ldx_pat_([0-9a-f]{8})_([0-9a-f]{32})$/;
 const ORG_ID_RE = /^[a-zA-Z0-9_-]{1,80}$/;
@@ -692,6 +692,9 @@ function registerPaasApiKeys(app) {
         }
 
         const params = readParams(ctx);
+        if (params.organizationId !== undefined && params.organizationId !== null && typeof params.organizationId !== 'string') {
+          throw failApiKey('API_KEY_ORG_INVALID', 400, 'Invalid organizationId.');
+        }
         const callerRolesVerified = await resolveVerifiedCallerRoles(ctx, db, callerUserId);
         const isRoot = callerRolesVerified.includes('root');
         const isAdmin = isRoot || (await isAdminByRoles(db, callerRolesVerified));
@@ -699,13 +702,21 @@ function registerPaasApiKeys(app) {
         let filter = {};
         let organizationId = null;
         if (isRoot) {
-          if (params.organizationId && ORG_ID_RE.test(String(params.organizationId).trim())) {
-            organizationId = String(params.organizationId).trim();
+          const reqOrg = typeof params.organizationId === 'string' ? params.organizationId.trim() : '';
+          if (reqOrg) {
+            if (!isValidOrganizationId(reqOrg)) {
+              throw failApiKey('API_KEY_ORG_INVALID', 400, 'Invalid organizationId.');
+            }
+            organizationId = reqOrg;
             filter = { organizationId };
           }
         } else {
           const actor = await resolveNativeActor(db, ctx.state.currentUser);
           organizationId = actor.organizationId;
+          const requestedOrg = typeof params.organizationId === 'string' ? params.organizationId.trim() : '';
+          if (requestedOrg && requestedOrg !== organizationId) {
+            throw failApiKey('NATIVE_ORGANIZATION_MISMATCH', 403, 'Cross-organization API key access is forbidden.');
+          }
           filter = isAdmin
             ? { organizationId }
             : { organizationId, userId: Number(actor.userId) };

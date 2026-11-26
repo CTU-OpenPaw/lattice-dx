@@ -223,7 +223,7 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
   const tablist = collectNodes(tree, (n) => n.props?.role === 'tablist')[0];
   assert.ok(tablist);
   const tabs = collectNodes(tablist, (n) => n.props?.role === 'tab');
-  assert.equal(tabs.length, 11);
+  assert.equal(tabs.length, 12);
   assert.deepEqual(
     tabs.map((t) => t.props['data-testid']),
     [
@@ -235,6 +235,7 @@ test('studio-settings exposes Tabs 7-9 and GitOps Solution Bundle v3 heading', a
       'dxos-studio-tab-approvals',
       'dxos-studio-tab-automation',
       'dxos-studio-tab-broker',
+      'dxos-studio-tab-notify',
       'dxos-studio-tab-outbox',
       'dxos-studio-tab-plugins',
       'dxos-studio-tab-pof',
@@ -1194,4 +1195,45 @@ test('Regression (M1.2 R2 F7): Tab 9 Domain Builder clears stale validation fiel
   tree = harness.render(DomainBuilderAndTenantsPanel, { selectedOrg: 'org-a' });
   const patInput2 = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-builder-field-pattern-2')[0];
   assert.equal(patInput2.props.value, '');
+});
+
+test('T1-STUDIO-05 regression: Tab 11 ApprovalInboxPanel renders [role="status"] inside [data-testid="dxos-approval-inbox"] after decide', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'dxosStudio:listTemplates': async () => ({ items: [] }),
+    'dxosStudio:listEmployees': async () => ({ items: [], organizations: ['org-a'], organizationCounts: { 'org-a': 1 } }),
+    'dxosStudio:readiness': async () => ({ plugins: [] }),
+    'dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
+    'dxosApprovals:listInbox': async () => ({
+      organizationId: 'org-a',
+      items: [
+        { itemKey: 'prop:90', id: 90, source: 'proposals', title: 'Proposal PO-90', status: 'pending', riskLevel: 'low' },
+      ],
+      total: 1,
+      counts: { all: 1, proposals: 1, business: 0, ai_hitl: 0, flow: 0 },
+    }),
+    'dxosApprovals:decide': async (req) => ({ ok: true, decision: req.data.decision }),
+  });
+
+  const Page = createDxosStudioSettingsPage(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Page);
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-approvals')[0].props.onClick();
+  tree = await harness.mountAndFlush(Page);
+
+  const reviewBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-review-prop:90')[0];
+  assert.ok(reviewBtn, 'Proposal review button must render inside Tab 11 ApprovalInboxPanel');
+  await reviewBtn.props.onClick();
+  tree = harness.render(Page);
+
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:decide' && r.data?.itemKey === 'prop:90' && r.data?.decision === 'review'));
+  const inbox = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-inbox')[0];
+  assert.ok(inbox, 'ApprovalInboxPanel root must render');
+  const inboxStatusNodes = collectNodes(inbox, (n) => n.props?.role === 'status');
+  assert.equal(inboxStatusNodes.length, 1, '[data-testid="dxos-approval-inbox"] must contain [role="status"] after decide');
+  assert.ok(textOf(inboxStatusNodes[0]).includes('prop:90'));
+
+  const allStatusNodes = collectNodes(tree, (n) => n.props?.role === 'status');
+  assert.equal(allStatusNodes.length, 1, 'Parent studio-settings must not hijack ApprovalInboxPanel feedback banner');
 });

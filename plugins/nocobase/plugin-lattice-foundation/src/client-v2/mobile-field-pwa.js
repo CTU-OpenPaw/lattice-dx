@@ -16,6 +16,7 @@ const {
   isQuotaExceededError,
   isValidRasterImageDataUrl,
   isIndexedDbAvailable,
+  maskConflictMediaFields,
   sanitizeOutboxItem,
   resolveStorage,
   readSyncFallbackOutbox,
@@ -26,6 +27,7 @@ const {
   listOutboxItems,
   removeOutboxItem,
   updateOutboxStatus,
+  updateOutboxItem,
 } = require('./mobile-offline-db');
 const { subscribeSurfaceEvents } = require('../client/sse-hub');
 
@@ -59,6 +61,33 @@ function extractHttpStatus(err) {
   return Number.isInteger(code) && code >= 100 && code < 600 ? code : 0;
 }
 
+function extractApiErrorMessage(err) {
+  const direct = err?.response?.data?.errors?.[0]?.message
+    || err?.response?.data?.message
+    || err?.message
+    || 'Network error';
+  return String(direct).slice(0, 240);
+}
+
+function extractConflictData(err) {
+  const data = err?.response?.data;
+  if (!data || typeof data !== 'object') {
+    return { message: extractApiErrorMessage(err), code: null, serverRecord: null };
+  }
+  const rawServerRecord = data.serverRecord && typeof data.serverRecord === 'object'
+    ? data.serverRecord
+    : (data.data && typeof data.data === 'object' ? data.data : null);
+  return {
+    message: extractApiErrorMessage(err),
+    code: typeof data.code === 'string' ? data.code : null,
+    serverRecord: rawServerRecord ? maskConflictMediaFields(rawServerRecord) : null,
+  };
+}
+
+function isQuarantineStatus(status) {
+  return status === 400 || status === 403 || status === 404 || status === 409 || status === 422;
+}
+
 function isPermanentRejectionStatus(status) {
   return status === 400 || status === 403 || status === 404 || status === 422;
 }
@@ -69,11 +98,100 @@ function isTransientOrNetworkFailure(err) {
   return status === 408 || status === 429 || status >= 500;
 }
 
-async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, isOnline } = {}) {
+function isAiTimeoutOrUnavailable(err) {
+  const status = extractHttpStatus(err);
+  return status === 503
+    || status === 408
+    || err?.name === 'AbortError'
+    || err?.code === 'AI_TIMEOUT'
+    || err?.code === 'ETIMEDOUT';
+}
+
+function decodeBase64UrlText(segment) {
+  if (typeof segment !== 'string' || !segment) return null;
+  const b64 = segment.replace(/-/g, '+').replace(/_/g, '/');
+  const pad = b64.length % 4 === 0 ? '' : '='.repeat(4 - (b64.length % 4));
+  const normalized = b64 + pad;
+  try {
+    if (typeof atob === 'function') {
+      const bin = atob(normalized);
+      const bytes = Uint8Array.from(bin, (c) => c.charCodeAt(0));
+      if (typeof TextDecoder === 'function') {
+        return new TextDecoder().decode(bytes);
+      }
+      return bin;
+    }
+    if (typeof Buffer !== 'undefined') {
+      return Buffer.from(normalized, 'base64').toString('utf8');
+    }
+  } catch {}
+  return null;
+}
+
+function decodeJwtPayload(token) {
+  if (typeof token !== 'string') return null;
+  const trimmed = token.trim();
+  const parts = trimmed.split('.');
+  if (parts.length !== 3 || !parts[0] || !parts[1] || !parts[2]) return null;
+  const jsonText = decodeBase64UrlText(parts[1]);
+  if (!jsonText) return null;
+  try {
+    const parsed = JSON.parse(jsonText);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isJwtTokenExpired(token, nowMs = Date.now()) {
+  const payload = decodeJwtPayload(token);
+  if (!payload) return false;
+  if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp)) return false;
+  return payload.exp <= Math.floor(nowMs / 1000);
+}
+
+function resolveIncidentOrganizationId({
+  explicitOrgId,
+  entityInput,
+  qrResult,
+  detectedOrgId,
+  token,
+  lists = [],
+} = {}) {
+  const urnFull = typeof entityInput === 'string' ? URN_FULL_RE.exec(entityInput.trim()) : null;
+  const candidates = [
+    urnFull && urnFull[2],
+    explicitOrgId,
+    qrResult?.organizationId,
+    detectedOrgId,
+  ];
+  const jwt = token ? decodeJwtPayload(token) : null;
+  if (jwt) {
+    candidates.push(jwt.organizationId, jwt.orgId);
+  }
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue;
+    for (const row of list) {
+      if (row && typeof row.organizationId === 'string' && row.organizationId.trim()) {
+        candidates.push(row.organizationId);
+        break;
+      }
+    }
+  }
+  for (const cand of candidates) {
+    if (typeof cand === 'string' && cand.trim()) {
+      return cand.trim();
+    }
+  }
+  return '';
+}
+
+async function flushOfflineQueue({ apiClient, storage, indexedDB, useIndexedDB, onProgress, isOnline } = {}) {
   const resolvedStorage = resolveStorage(storage);
   const outboxOpts = {
     storage: resolvedStorage,
     ...(indexedDB !== undefined ? { indexedDB } : {}),
+    ...(useIndexedDB !== undefined ? { useIndexedDB } : {}),
   };
   const hasIdb = isIndexedDbAvailable(outboxOpts);
   const initialQueue = hasIdb
@@ -82,13 +200,17 @@ async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, is
   const online = typeof isOnline === 'boolean'
     ? isOnline
     : (typeof navigator !== 'undefined' && typeof navigator.onLine === 'boolean' ? navigator.onLine : true);
+  const activeQueue = initialQueue.filter((it) => it.status !== 'quarantined');
 
-  if (!online || initialQueue.length === 0) {
+  if (!online || activeQueue.length === 0) {
     return {
       total: initialQueue.length,
       synced: 0,
       failed: 0,
-      deferred: online ? 0 : initialQueue.length,
+      quarantined: initialQueue.filter((it) => it.status === 'quarantined').length,
+      conflicts: initialQueue.filter((it) => it.status === 'quarantined' && it.httpStatus === 409).length,
+      deferred: online ? 0 : activeQueue.length,
+      unauthorized: false,
       remaining: initialQueue,
       results: [],
     };
@@ -100,23 +222,43 @@ async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, is
 
   let synced = 0;
   let failed = 0;
+  let quarantined = 0;
+  let conflicts = 0;
   let deferred = 0;
+  let unauthorized = false;
   const results = [];
   const dropIds = new Set();
   const updatedDeferredMap = new Map();
 
   for (let i = 0; i < initialQueue.length; i += 1) {
     const item = initialQueue[i];
+    if (item.status === 'quarantined') {
+      continue;
+    }
     const spec = Object.hasOwn(ALLOWED_OFFLINE_ACTIONS, item.actionType) ? ALLOWED_OFFLINE_ACTIONS[item.actionType] : null;
     if (!spec) {
       failed += 1;
-      dropIds.add(item.id);
+      quarantined += 1;
+      const quarantinedItem = {
+        ...item,
+        status: 'quarantined',
+        attempts: (Number(item.attempts) || 0) + 1,
+        httpStatus: 400,
+        lastError: 'Unsupported action',
+        updatedAt: new Date().toISOString(),
+      };
+      updatedDeferredMap.set(item.id, quarantinedItem);
       if (hasIdb) {
-        await removeOutboxItem(item.id, outboxOpts).catch(() => undefined);
+        await updateOutboxItem(item.id, {
+          status: 'quarantined',
+          attempts: quarantinedItem.attempts,
+          httpStatus: 400,
+          lastError: 'Unsupported action',
+        }, outboxOpts).catch(() => undefined);
       }
-      results.push({ id: item.id, actionType: item.actionType, status: 'failed', httpStatus: 400, error: 'Unsupported action' });
+      results.push({ id: item.id, actionType: item.actionType, status: 'quarantined', httpStatus: 400, error: 'Unsupported action' });
       if (typeof onProgress === 'function') {
-        onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'failed' });
+        onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, quarantined, deferred, itemId: item.id, outcome: 'quarantined' });
       }
       continue;
     }
@@ -135,21 +277,71 @@ async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, is
         response: response && response.data !== undefined ? response.data : response,
       });
       if (typeof onProgress === 'function') {
-        onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'synced' });
+        onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, quarantined, deferred, itemId: item.id, outcome: 'synced' });
       }
     } catch (err) {
       const status = extractHttpStatus(err);
-      const message = String(err && err.message ? err.message : 'Network error').slice(0, 240);
-      if (isPermanentRejectionStatus(status)) {
-        // Drop permanently invalid 400/403/404/422 mutations rather than looping forever.
-        failed += 1;
-        dropIds.add(item.id);
+      const message = extractApiErrorMessage(err);
+      if (status === 401) {
+        unauthorized = true;
+        const nextAttempts = (Number(item.attempts) || 0) + 1;
+        const pausedItem = {
+          ...item,
+          status: 'failed',
+          attempts: nextAttempts,
+          lastError: message,
+          httpStatus: 401,
+          updatedAt: new Date().toISOString(),
+        };
+        updatedDeferredMap.set(item.id, pausedItem);
         if (hasIdb) {
-          await removeOutboxItem(item.id, outboxOpts).catch(() => undefined);
+          await updateOutboxStatus(item.id, {
+            status: 'failed',
+            attempts: nextAttempts,
+            lastError: message,
+            httpStatus: 401,
+          }, outboxOpts).catch(() => undefined);
         }
-        results.push({ id: item.id, actionType: item.actionType, status: 'failed', httpStatus: status, error: message });
+        results.push({ id: item.id, actionType: item.actionType, status: 'deferred', httpStatus: 401, error: message });
+        const remainingActive = initialQueue.slice(i + 1).filter((rem) => rem.status !== 'quarantined').length;
+        deferred += 1 + remainingActive;
         if (typeof onProgress === 'function') {
-          onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'failed' });
+          onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, quarantined, deferred, itemId: item.id, outcome: 'deferred' });
+        }
+        break;
+      }
+      if (isQuarantineStatus(status)) {
+        // Never auto-delete permanent or 409 conflict mutations; move to quarantine for manual repair/export.
+        quarantined += 1;
+        if (status === 409) {
+          conflicts += 1;
+        } else {
+          failed += 1;
+        }
+        const nextAttempts = (Number(item.attempts) || 0) + 1;
+        const conflictData = status === 409 ? extractConflictData(err) : null;
+        const quarantinedItem = {
+          ...item,
+          status: 'quarantined',
+          attempts: nextAttempts,
+          lastError: message,
+          httpStatus: status,
+          conflictData,
+          updatedAt: new Date().toISOString(),
+        };
+        updatedDeferredMap.set(item.id, quarantinedItem);
+        if (hasIdb) {
+          await updateOutboxItem(item.id, {
+            status: 'quarantined',
+            attempts: nextAttempts,
+            lastError: message,
+            httpStatus: status,
+            conflictData,
+          }, outboxOpts).catch(() => undefined);
+        }
+        results.push({ id: item.id, actionType: item.actionType, status: 'quarantined', httpStatus: status, error: message, ...(conflictData ? { conflictData } : {}) });
+        if (typeof onProgress === 'function') {
+          onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, quarantined, deferred, itemId: item.id, outcome: 'quarantined' });
         }
       } else {
         deferred += 1;
@@ -173,7 +365,7 @@ async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, is
         }
         results.push({ id: item.id, actionType: item.actionType, status: 'deferred', httpStatus: status || null, error: message });
         if (typeof onProgress === 'function') {
-          onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, deferred, itemId: item.id, outcome: 'deferred' });
+          onProgress({ processed: i + 1, total: initialQueue.length, synced, failed, quarantined, deferred, itemId: item.id, outcome: 'deferred' });
         }
       }
     }
@@ -197,7 +389,10 @@ async function flushOfflineQueue({ apiClient, storage, indexedDB, onProgress, is
     total: initialQueue.length,
     synced,
     failed,
+    quarantined,
+    conflicts,
     deferred,
+    unauthorized,
     remaining: persisted,
     results,
   };
@@ -395,9 +590,17 @@ function buildEpodPayload(fields = {}) {
     return { ok: false, error: 'Số lượng giao phải là số không âm.' };
   }
 
+  const gpsUnavailable = fields.gpsUnavailable === true;
+  const gpsUnavailableReason = typeof fields.gpsUnavailableReason === 'string'
+    ? fields.gpsUnavailableReason.trim().slice(0, 240)
+    : '';
   const gpsLat = parseStrictFiniteNumber(fields.gpsLat);
   const gpsLng = parseStrictFiniteNumber(fields.gpsLng);
-  if (gpsLat === null || gpsLat < -90 || gpsLat > 90 || gpsLng === null || gpsLng < -180 || gpsLng > 180) {
+  if (gpsUnavailable) {
+    if (!gpsUnavailableReason) {
+      return { ok: false, error: 'Vui lòng nhập lý do mất tín hiệu GPS (ví dụ: kho lạnh ngầm).' };
+    }
+  } else if (gpsLat === null || gpsLat < -90 || gpsLat > 90 || gpsLng === null || gpsLng < -180 || gpsLng > 180) {
     return { ok: false, error: 'Cần tọa độ GPS hợp lệ (Lat [-90..90], Lng [-180..180]).' };
   }
 
@@ -412,8 +615,9 @@ function buildEpodPayload(fields = {}) {
   const payload = {
     recipientName,
     deliveredQty: rawQty,
-    gpsLat,
-    gpsLng,
+    gpsLat: gpsUnavailable ? null : gpsLat,
+    gpsLng: gpsUnavailable ? null : gpsLng,
+    ...(gpsUnavailable ? { gpsUnavailable: true, gpsUnavailableReason } : {}),
     signatureDataUrl,
     deliveredAt: new Date().toISOString(),
   };
@@ -500,7 +704,9 @@ function parseSseChunk(chunk) {
 
 function isAuthenticatedMobileClient(api, storage) {
   if (!api || typeof api.request !== 'function') return false;
-  return Boolean(resolveClientAuthToken(api, storage));
+  const token = resolveClientAuthToken(api, storage);
+  if (!token) return false;
+  return !isJwtTokenExpired(token);
 }
 
 function formatOutboxItemSummary(item) {
@@ -509,6 +715,7 @@ function formatOutboxItemSummary(item) {
     const parts = [];
     if (item.payload.orderCode) parts.push(item.payload.orderCode);
     if (item.payload.recipientName) parts.push(item.payload.recipientName);
+    if (item.payload.gpsUnavailable) parts.push('Không có GPS');
     if (item.payload.evidencePhotoDataUrl) parts.push('Có ảnh');
     return parts.join(' · ') || 'ePOD';
   }
@@ -516,6 +723,12 @@ function formatOutboxItemSummary(item) {
     const target = item.payload.assetId != null ? `Asset #${item.payload.assetId}` : (item.payload.assetEntityId || 'Twin');
     const temp = item.payload.desiredPatch?.targetTempC;
     return temp !== undefined ? `${target} → ${temp}°C` : target;
+  }
+  if (item.actionType === 'service.ticketCreate') {
+    return item.payload.name || item.payload.code || 'Phiếu dịch vụ';
+  }
+  if (item.actionType === 'iot.incidentCreate') {
+    return item.payload.summary || item.payload.title || item.payload.assetEntityId || item.payload.entityId || 'Sự cố hiện trường';
   }
   return item.endpoint || item.actionType;
 }
@@ -628,6 +841,8 @@ function createMobileFieldPwaPage(client, React, app) {
     const [gpsLng, setGpsLng] = React.useState('');
     const [gpsAccuracyM, setGpsAccuracyM] = React.useState(null);
     const [gpsPending, setGpsPending] = React.useState(false);
+    const [gpsUnavailable, setGpsUnavailable] = React.useState(false);
+    const [gpsUnavailableReason, setGpsUnavailableReason] = React.useState('');
 
     const [hasSignature, setHasSignature] = React.useState(false);
     const [signatureDataUrl, setSignatureDataUrl] = React.useState('');
@@ -644,6 +859,10 @@ function createMobileFieldPwaPage(client, React, app) {
     const [twinBusy, setTwinBusy] = React.useState(false);
 
     const [authExpired, setAuthExpired] = React.useState(false);
+    const [canControlTwin, setCanControlTwin] = React.useState(false);
+    const [canCreateIncidents, setCanCreateIncidents] = React.useState(false);
+    const [outboxOrderDrafts, setOutboxOrderDrafts] = React.useState({});
+    const [exportedOutboxItem, setExportedOutboxItem] = React.useState(null);
     const [opsTab, setOpsTab] = React.useState('all');
     const [opsLoading, setOpsLoading] = React.useState(false);
     const [opsErrors, setOpsErrors] = React.useState([]);
@@ -665,10 +884,17 @@ function createMobileFieldPwaPage(client, React, app) {
     const [newTicketPriority, setNewTicketPriority] = React.useState('medium');
     const [newTicketDesc, setNewTicketDesc] = React.useState('');
     const [ticketCreateBusy, setTicketCreateBusy] = React.useState(false);
+    const [createIncidentOpen, setCreateIncidentOpen] = React.useState(false);
+    const [newIncidentTitle, setNewIncidentTitle] = React.useState('');
+    const [newIncidentEntity, setNewIncidentEntity] = React.useState('');
+    const [newIncidentSeverity, setNewIncidentSeverity] = React.useState('high');
+    const [incidentCreateBusy, setIncidentCreateBusy] = React.useState(false);
     const [aiOpen, setAiOpen] = React.useState(false);
     const [aiPrompt, setAiPrompt] = React.useState('');
     const [aiBusy, setAiBusy] = React.useState(false);
     const [aiMessages, setAiMessages] = React.useState([]);
+    const [aiErrorState, setAiErrorState] = React.useState(null);
+    const [keyboardOffsetPx, setKeyboardOffsetPx] = React.useState(0);
 
     // Keep canvasRef as the first useRef(null) to preserve deterministic signature-canvas test ref lookup.
     const canvasRef = React.useRef(null);
@@ -683,6 +909,11 @@ function createMobileFieldPwaPage(client, React, app) {
     const outboxOptsRef = React.useRef(outboxOpts);
     outboxOptsRef.current = outboxOpts;
     const mountedRef = React.useRef(true);
+    const auth401SeqRef = React.useRef(0);
+    const markAuthExpired = React.useCallback(() => {
+      auth401SeqRef.current += 1;
+      if (mountedRef.current) setAuthExpired(true);
+    }, []);
     const scannerStartSeqRef = React.useRef(0);
     const qrCanvasRef = React.useRef(null);
     const photoVideoRef = React.useRef(null);
@@ -692,6 +923,7 @@ function createMobileFieldPwaPage(client, React, app) {
     const refreshUnreadCountRef = React.useRef(null);
     const refreshOpsSummaryRef = React.useRef(null);
     const roleCapsRef = React.useRef({ token: null, promise: null, data: null });
+    const detectedOrgIdRef = React.useRef('');
     const twinBusyRef = React.useRef(false);
     const aiSessionRef = React.useRef({ token: null, sessionId: null, employee: null });
 
@@ -715,17 +947,18 @@ function createMobileFieldPwaPage(client, React, app) {
             isOnline: effectiveOnline,
           });
           setQueueItems(res.remaining);
-          const hasUnauthorized = Array.isArray(res.results)
-            && res.results.some((r) => r.status === 'deferred' && r.httpStatus === 401);
+          const hasUnauthorized = res.unauthorized
+            || (Array.isArray(res.results) && res.results.some((r) => r.status === 'deferred' && r.httpStatus === 401));
           if (hasUnauthorized) {
+            markAuthExpired();
             setStatusNotice({
               type: 'warn',
-              text: `Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại (giữ ${res.deferred} tác vụ trong hàng đợi${res.synced > 0 ? `, đã đồng bộ ${res.synced}` : ''}${res.failed > 0 ? `, ${res.failed} lỗi vĩnh viễn` : ''}).`,
+              text: `Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại (giữ ${res.deferred} tác vụ trong hàng đợi${res.synced > 0 ? `, đã đồng bộ ${res.synced}` : ''}${res.quarantined > 0 ? `, ${res.quarantined} cần kiểm tra` : ''}).`,
             });
-          } else if (res.synced > 0 || res.failed > 0) {
+          } else if (res.synced > 0 || res.quarantined > 0 || res.failed > 0) {
             setStatusNotice({
-              type: res.failed > 0 ? 'warn' : 'success',
-              text: `Đồng bộ xong: ${res.synced} thành công, ${res.failed} lỗi vĩnh viễn, ${res.deferred} chờ thử lại.`,
+              type: (res.quarantined > 0 || res.failed > 0) ? 'warn' : 'success',
+              text: `Đồng bộ xong: ${res.synced} thành công, ${res.quarantined || 0} cách ly, ${res.deferred} chờ thử lại.`,
             });
           } else if (res.deferred > 0) {
             setStatusNotice({ type: 'warn', text: `Vẫn ngoại tuyến hoặc mất kết nối — giữ ${res.deferred} tác vụ trong hàng đợi.` });
@@ -790,12 +1023,28 @@ function createMobileFieldPwaPage(client, React, app) {
         window.addEventListener('online', onOnline);
         window.addEventListener('offline', onOffline);
       }
+      const vv = typeof window !== 'undefined' ? window.visualViewport : null;
+      const updateViewportOffset = () => {
+        if (!mountedRef.current || !vv || typeof vv.height !== 'number') return;
+        const baseH = typeof window.innerHeight === 'number' && window.innerHeight > 0 ? window.innerHeight : vv.height;
+        const offset = Math.max(0, Math.round(baseH - vv.height - (Number(vv.offsetTop) || 0)));
+        setKeyboardOffsetPx(offset);
+      };
+      if (vv && typeof vv.addEventListener === 'function') {
+        vv.addEventListener('resize', updateViewportOffset);
+        vv.addEventListener('scroll', updateViewportOffset);
+        updateViewportOffset();
+      }
       return () => {
         mountedRef.current = false;
         scannerStartSeqRef.current += 1;
         if (hasWindowEvents) {
           window.removeEventListener?.('online', onOnline);
           window.removeEventListener?.('offline', onOffline);
+        }
+        if (vv && typeof vv.removeEventListener === 'function') {
+          vv.removeEventListener('resize', updateViewportOffset);
+          vv.removeEventListener('scroll', updateViewportOffset);
         }
         if (streamRef.current && typeof streamRef.current.getTracks === 'function') {
           for (const tr of streamRef.current.getTracks()) tr.stop?.();
@@ -810,6 +1059,7 @@ function createMobileFieldPwaPage(client, React, app) {
 
     const refreshUnreadCount = React.useCallback(async () => {
       if (!isAuthenticatedMobileClient(apiClient, storageRef.current)) return null;
+      const startSeq = auth401SeqRef.current;
       try {
         const res = await apiClient.request({
           url: 'latticeNotifications:unreadCount',
@@ -818,19 +1068,21 @@ function createMobileFieldPwaPage(client, React, app) {
         });
         const count = Number(res?.data?.data?.unreadCount ?? res?.data?.unreadCount ?? 0);
         if (mountedRef.current) {
-          setAuthExpired(false);
+          if (auth401SeqRef.current === startSeq) {
+            setAuthExpired(false);
+          }
           if (Number.isFinite(count) && count >= 0) {
             setNotifUnreadCount(count);
           }
         }
         return count;
       } catch (err) {
-        if (mountedRef.current && extractHttpStatus(err) === 401) {
-          setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
         }
         return null;
       }
-    }, [apiClient]);
+    }, [apiClient, markAuthExpired]);
 
     refreshUnreadCountRef.current = refreshUnreadCount;
 
@@ -871,6 +1123,7 @@ function createMobileFieldPwaPage(client, React, app) {
 
     const refreshOpsSummary = React.useCallback(async () => {
       if (!isOnline || !isAuthenticatedMobileClient(apiClient, storageRef.current)) return null;
+      const startSeq = auth401SeqRef.current;
       if (mountedRef.current) {
         setOpsLoading(true);
         setOpsErrors([]);
@@ -879,10 +1132,21 @@ function createMobileFieldPwaPage(client, React, app) {
         const roleData = await resolveRoleCapabilities();
         if (!mountedRef.current) return null;
         if (roleData?.__unauthorized) {
-          setAuthExpired(true);
+          markAuthExpired();
           return null;
         }
+        if (typeof roleData?.organizationId === 'string' && roleData.organizationId.trim()) {
+          detectedOrgIdRef.current = roleData.organizationId.trim();
+        }
         const hasResourceList = roleData && roleData.allowAll !== true && Array.isArray(roleData.resources);
+        const actionsMap = roleData && roleData.actions && typeof roleData.actions === 'object' ? roleData.actions : null;
+        const hasActionsMap = Boolean(actionsMap && Object.keys(actionsMap).length > 0);
+        const allowTwinControl = roleData?.allowAll === true
+          || (hasActionsMap ? Boolean(actionsMap['latticeAssets:update']) : (hasResourceList && roleData.resources.includes('latticeAssets')));
+        const allowIncidentCreate = roleData?.allowAll === true
+          || (hasActionsMap ? Boolean(actionsMap['latticeIncidentCases:create'] || actionsMap['dxosBlocks:alarmIngest']) : (hasResourceList && roleData.resources.includes('latticeIncidentCases')));
+        setCanControlTwin(allowTwinControl);
+        setCanCreateIncidents(allowIncidentCreate);
         const canReadIncidents = !hasResourceList || roleData.resources.includes('latticeIncidentCases');
         const canReadOrders = !hasResourceList || roleData.resources.includes('latticeOrders');
         const canReadTickets = !hasResourceList || roleData.resources.includes('latticeServiceTickets');
@@ -928,6 +1192,11 @@ function createMobileFieldPwaPage(client, React, app) {
           const task = tasks[idx];
           if (outcome.status === 'fulfilled' && outcome.value) {
             sawSuccess = true;
+            if (!detectedOrgIdRef.current) {
+              const items = extractListItems(outcome.value);
+              const orgRow = items.find((row) => row && typeof row.organizationId === 'string' && row.organizationId.trim());
+              if (orgRow) detectedOrgIdRef.current = orgRow.organizationId.trim();
+            }
             task.apply(outcome.value);
           } else if (outcome.status === 'rejected') {
             const status = extractHttpStatus(outcome.reason);
@@ -940,15 +1209,15 @@ function createMobileFieldPwaPage(client, React, app) {
           }
         });
         if (saw401) {
-          setAuthExpired(true);
-        } else if (sawSuccess) {
+          markAuthExpired();
+        } else if (sawSuccess && auth401SeqRef.current === startSeq) {
           setAuthExpired(false);
         }
         setOpsErrors(errors);
         return errors.length === 0 && !saw401;
       } catch (err) {
-        if (mountedRef.current && extractHttpStatus(err) === 401) {
-          setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
         }
         return null;
       } finally {
@@ -1003,7 +1272,7 @@ function createMobileFieldPwaPage(client, React, app) {
           }
         },
         onAuthError: () => {
-          if (!disposed && mountedRef.current) setAuthExpired(true);
+          if (!disposed) markAuthExpired();
         },
       });
 
@@ -1015,6 +1284,7 @@ function createMobileFieldPwaPage(client, React, app) {
 
     const loadNotifications = React.useCallback(async () => {
       if (!isAuthenticatedMobileClient(apiClient, storageRef.current)) return;
+      const startSeq = auth401SeqRef.current;
       setNotifLoading(true);
       setNotifError('');
       try {
@@ -1026,25 +1296,25 @@ function createMobileFieldPwaPage(client, React, app) {
         });
         const data = res?.data?.data || res?.data || {};
         if (mountedRef.current) {
-          setAuthExpired(false);
+          if (auth401SeqRef.current === startSeq) {
+            setAuthExpired(false);
+          }
           setNotifItems(Array.isArray(data.items) ? data.items : []);
           if (data.unreadCount != null && Number.isFinite(Number(data.unreadCount))) {
             setNotifUnreadCount(Math.max(0, Number(data.unreadCount)));
           }
         }
       } catch (err) {
-        if (mountedRef.current) {
-          if (extractHttpStatus(err) === 401) {
-            setAuthExpired(true);
-          } else {
-            const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể tải danh sách thông báo.';
-            setNotifError(String(msg));
-          }
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
+        } else if (mountedRef.current) {
+          const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể tải danh sách thông báo.';
+          setNotifError(String(msg));
         }
       } finally {
         if (mountedRef.current) setNotifLoading(false);
       }
-    }, [apiClient]);
+    }, [apiClient, markAuthExpired]);
 
     const toggleNotifications = React.useCallback(async () => {
       const next = !notifOpen;
@@ -1067,12 +1337,13 @@ function createMobileFieldPwaPage(client, React, app) {
           skipNotify: true,
         });
       } catch (err) {
-        if (mountedRef.current) {
-          if (extractHttpStatus(err) === 401) setAuthExpired(true);
-          else setNotifError(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể đánh dấu đã đọc.');
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
+        } else if (mountedRef.current) {
+          setNotifError(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể đánh dấu đã đọc.');
         }
       }
-    }, [apiClient]);
+    }, [apiClient, markAuthExpired]);
 
     const markAllNotifsRead = React.useCallback(async () => {
       if (notifBusy || !apiClient || typeof apiClient.request !== 'function') return;
@@ -1089,14 +1360,15 @@ function createMobileFieldPwaPage(client, React, app) {
           skipNotify: true,
         });
       } catch (err) {
-        if (mountedRef.current) {
-          if (extractHttpStatus(err) === 401) setAuthExpired(true);
-          else setNotifError(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể đánh dấu tất cả đã đọc.');
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
+        } else if (mountedRef.current) {
+          setNotifError(err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể đánh dấu tất cả đã đọc.');
         }
       } finally {
         if (mountedRef.current) setNotifBusy(false);
       }
-    }, [apiClient, notifBusy]);
+    }, [apiClient, markAuthExpired, notifBusy]);
 
     const applyParsedQr = React.useCallback((rawText) => {
       const parsed = parseFieldQrPayload(rawText);
@@ -1486,21 +1758,95 @@ function createMobileFieldPwaPage(client, React, app) {
         return { ok: true, remaining };
       } catch (err) {
         const status = extractHttpStatus(err);
-        const msg = String(err && err.message ? err.message : 'Network error').slice(0, 240);
-        await updateOutboxStatus(item.id, {
-          status: 'failed',
+        const msg = extractApiErrorMessage(err);
+        if (status === 401) {
+          markAuthExpired();
+        }
+        const nextStatus = isQuarantineStatus(status) ? 'quarantined' : 'failed';
+        await updateOutboxItem(item.id, {
+          status: nextStatus,
           attempts: (Number(item.attempts) || 0) + 1,
           lastError: msg,
           httpStatus: status || null,
+          ...(status === 409 ? { conflictData: extractConflictData(err) } : {}),
         }, outboxOptsRef.current);
         const refreshed = await listOutboxItems(outboxOptsRef.current);
         setQueueItems(refreshed);
-        setStatusNotice({ type: 'error', text: `Thử lại thất bại: ${msg}` });
-        return { ok: false, error: msg };
+        setStatusNotice({
+          type: status === 401 ? 'warn' : 'error',
+          text: status === 401
+            ? 'Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại (đã giữ nguyên tác vụ).'
+            : `Thử lại thất bại: ${msg}`,
+        });
+        return { ok: false, error: msg, httpStatus: status || null };
       } finally {
         setRetryingItemId(null);
       }
     }, [apiClient]);
+
+    const saveAndRetryOutboxItem = React.useCallback(async (item, nextOrderCodeRaw) => {
+      if (!item || !item.id) return null;
+      const nextCode = typeof nextOrderCodeRaw === 'string'
+        ? nextOrderCodeRaw.trim().slice(0, 64)
+        : String(outboxOrderDrafts[item.id] ?? item.payload?.orderCode ?? '').trim().slice(0, 64);
+      const updated = await updateOutboxItem(item.id, {
+        payload: { ...(item.payload || {}), orderCode: nextCode },
+        status: 'pending',
+        lastError: null,
+        httpStatus: null,
+        conflictData: null,
+      }, outboxOptsRef.current);
+      if (!updated) return null;
+      const refreshed = await listOutboxItems(outboxOptsRef.current);
+      setQueueItems(refreshed);
+      return retrySingleOutboxItem(updated);
+    }, [outboxOrderDrafts, retrySingleOutboxItem]);
+
+    const overwriteOutboxItem = React.useCallback(async (item) => {
+      if (!item || !item.id) return null;
+      const updated = await updateOutboxItem(item.id, {
+        payload: { ...(item.payload || {}), forceOverwrite: true },
+        status: 'pending',
+        lastError: null,
+        httpStatus: null,
+        conflictData: null,
+      }, outboxOptsRef.current);
+      if (!updated) return null;
+      return retrySingleOutboxItem(updated);
+    }, [retrySingleOutboxItem]);
+
+    const exportOutboxItemJson = React.useCallback((item) => {
+      if (!item) return null;
+      const json = JSON.stringify(item, null, 2);
+      setExportedOutboxItem({ id: item.id, json });
+      try {
+        if (typeof Blob === 'function' && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function' && typeof document !== 'undefined') {
+          const blob = new Blob([json], { type: 'application/json' });
+          const href = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = href;
+          a.download = `outbox-${item.id}.json`;
+          document.body?.appendChild?.(a);
+          a.click?.();
+          document.body?.removeChild?.(a);
+          URL.revokeObjectURL?.(href);
+        }
+      } catch {}
+      setStatusNotice({ type: 'info', text: `Đã xuất JSON cho tác vụ ${item.id}.` });
+      return json;
+    }, []);
+
+    const keepLocalOutboxItem = React.useCallback(async (item) => {
+      if (!item || !item.id) return null;
+      exportOutboxItemJson(item);
+      const updated = await updateOutboxItem(item.id, {
+        status: 'quarantined',
+        lastError: 'Đã lưu bản sao cục bộ (JSON) để đối chiếu thủ công.',
+      }, outboxOptsRef.current);
+      const refreshed = await listOutboxItems(outboxOptsRef.current);
+      setQueueItems(refreshed);
+      return updated;
+    }, [exportOutboxItemJson]);
 
     const deleteSingleOutboxItem = React.useCallback(async (id) => {
       const remaining = await removeOutboxItem(id, outboxOptsRef.current);
@@ -1525,6 +1871,8 @@ function createMobileFieldPwaPage(client, React, app) {
         gpsLat,
         gpsLng,
         gpsAccuracyM,
+        gpsUnavailable,
+        gpsUnavailableReason,
         notes,
         signatureDataUrl: finalSig,
         evidencePhotoDataUrl,
@@ -1556,6 +1904,15 @@ function createMobileFieldPwaPage(client, React, app) {
         setStatusNotice({ type: 'success', text: `Đã ghi nhận ePOD thành công (${body.trackingCode || epod.trackingCode || 'OK'}).` });
         return body;
       } catch (err) {
+        const status = extractHttpStatus(err);
+        if (status === 401) {
+          markAuthExpired();
+          return tryEnqueueOffline(
+            'wms.epodCapture',
+            built.payload,
+            (len) => `Phiên đăng nhập đã hết hạn — đã bảo toàn ePOD vào hàng đợi (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+          );
+        }
         if (isTransientOrNetworkFailure(err)) {
           return tryEnqueueOffline(
             'wms.epodCapture',
@@ -1563,7 +1920,7 @@ function createMobileFieldPwaPage(client, React, app) {
             (len) => `Mất kết nối máy chủ — đã tự động xếp hàng đợi ePOD (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
           );
         }
-        const errMsg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể gửi ePOD.';
+        const errMsg = extractApiErrorMessage(err) || 'Không thể gửi ePOD.';
         setStatusNotice({ type: 'error', text: errMsg });
         return null;
       } finally {
@@ -1609,8 +1966,8 @@ function createMobileFieldPwaPage(client, React, app) {
         setStatusNotice({ type: 'success', text: `Đã gửi lệnh Digital Twin tới ${target.label} (${tempNum}°C).` });
         return { ok: true, data: body };
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) {
-          setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
         }
         if (isTransientOrNetworkFailure(err)) {
           return tryEnqueueOffline(
@@ -1652,7 +2009,7 @@ function createMobileFieldPwaPage(client, React, app) {
         });
         return true;
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) markAuthExpired();
         const errMsg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể xử lý phê duyệt.';
         setStatusNotice({ type: 'error', text: errMsg });
         return null;
@@ -1685,7 +2042,7 @@ function createMobileFieldPwaPage(client, React, app) {
         if (mountedRef.current) setDetailChatter(items);
         return items;
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) markAuthExpired();
         if (mountedRef.current) setDetailChatter([]);
         return [];
       } finally {
@@ -1737,7 +2094,7 @@ function createMobileFieldPwaPage(client, React, app) {
         return updated;
       } catch (err) {
         const status = extractHttpStatus(err);
-        if (status === 401 && mountedRef.current) setAuthExpired(true);
+        if (status === 401) markAuthExpired();
         const msg = status === 403
           ? 'Vai trò hiện tại không có quyền cập nhật sự cố IoT.'
           : (err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể cập nhật trạng thái sự cố.');
@@ -1771,7 +2128,7 @@ function createMobileFieldPwaPage(client, React, app) {
         setStatusNotice({ type: 'success', text: 'Đã lưu ghi chú hiện trường.' });
         return true;
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) markAuthExpired();
         const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể lưu ghi chú.';
         setStatusNotice({ type: 'error', text: msg });
         return null;
@@ -1801,7 +2158,7 @@ function createMobileFieldPwaPage(client, React, app) {
         setStatusNotice({ type: 'success', text: `Đã trình duyệt phiếu ${selectedTicket.code || `#${selectedTicket.id}`}.` });
         return updated;
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) markAuthExpired();
         const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể trình duyệt phiếu dịch vụ.';
         setStatusNotice({ type: 'error', text: msg });
         return null;
@@ -1817,25 +2174,39 @@ function createMobileFieldPwaPage(client, React, app) {
         setStatusNotice({ type: 'error', text: 'Vui lòng nhập tiêu đề phiếu dịch vụ.' });
         return null;
       }
-      if (ticketCreateBusy || !apiClient || typeof apiClient.request !== 'function') return null;
+      if (ticketCreateBusy) return null;
+      const ticketCode = `TKT-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+      const serviceType = ['leave', 'it_support', 'facilities', 'hr_request'].includes(newTicketType) ? newTicketType : 'it_support';
+      const priority = ['low', 'normal', 'medium', 'high', 'urgent', 'critical'].includes(newTicketPriority) ? newTicketPriority : 'medium';
+      const ticketData = {
+        code: ticketCode,
+        name: title,
+        serviceType,
+        priority,
+        ...(newTicketDesc.trim() ? { description: newTicketDesc.trim() } : {}),
+      };
+      if (!isOnline || !apiClient || typeof apiClient.request !== 'function') {
+        const queued = await tryEnqueueOffline(
+          'service.ticketCreate',
+          ticketData,
+          (len) => `Đang ngoại tuyến — đã lưu phiếu dịch vụ vào hàng đợi (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+        );
+        if (queued) {
+          setNewTicketName('');
+          setNewTicketDesc('');
+          setCreateTicketOpen(false);
+        }
+        return queued;
+      }
       setTicketCreateBusy(true);
       try {
-        const ticketCode = `TKT-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
-        const serviceType = ['leave', 'it_support', 'facilities', 'hr_request'].includes(newTicketType) ? newTicketType : 'it_support';
-        const priority = ['low', 'medium', 'high'].includes(newTicketPriority) ? newTicketPriority : 'medium';
         const res = await apiClient.request({
           url: 'latticeServiceTickets:create',
           method: 'post',
-          data: {
-            code: ticketCode,
-            name: title,
-            serviceType,
-            priority,
-            ...(newTicketDesc.trim() ? { description: newTicketDesc.trim() } : {}),
-          },
+          data: ticketData,
           skipNotify: true,
         });
-        const created = res?.data?.data ?? res?.data ?? { id: Date.now(), code: ticketCode, name: title, serviceType, priority, status: 'draft' };
+        const created = res?.data?.data ?? res?.data ?? { id: Date.now(), ...ticketData, status: 'draft' };
         setServiceTickets((prev) => [created, ...prev]);
         setNewTicketName('');
         setNewTicketDesc('');
@@ -1844,37 +2215,174 @@ function createMobileFieldPwaPage(client, React, app) {
         refreshOpsSummaryRef.current?.();
         return created;
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) setAuthExpired(true);
-        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể tạo phiếu dịch vụ.';
+        const status = extractHttpStatus(err);
+        if (status === 401) markAuthExpired();
+        if (status !== 401 && isTransientOrNetworkFailure(err)) {
+          const queued = await tryEnqueueOffline(
+            'service.ticketCreate',
+            ticketData,
+            (len) => `Mất kết nối — đã xếp hàng đợi phiếu dịch vụ (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+          );
+          if (queued) {
+            setNewTicketName('');
+            setNewTicketDesc('');
+            setCreateTicketOpen(false);
+          }
+          return queued;
+        }
+        const msg = extractApiErrorMessage(err) || 'Không thể tạo phiếu dịch vụ.';
         setStatusNotice({ type: 'error', text: msg });
         return null;
       } finally {
         if (mountedRef.current) setTicketCreateBusy(false);
       }
-    }, [apiClient, newTicketDesc, newTicketName, newTicketPriority, newTicketType, ticketCreateBusy]);
+    }, [apiClient, isOnline, newTicketDesc, newTicketName, newTicketPriority, newTicketType, ticketCreateBusy, tryEnqueueOffline]);
 
-    const submitMobileAiPrompt = React.useCallback(async (ev) => {
+    const submitQuickIncident = React.useCallback(async (ev) => {
       ev?.preventDefault?.();
-      const promptText = String(aiPrompt || '').trim();
-      if (!promptText || aiBusy) return;
-      const userMsg = { id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role: 'user', text: promptText };
-      setAiMessages((prev) => [...prev, userMsg]);
-      setAiPrompt('');
+      const title = String(newIncidentTitle || '').trim();
+      const entityId = String(newIncidentEntity || '').trim();
+      if (!title) {
+        setStatusNotice({ type: 'error', text: 'Vui lòng nhập mô tả sự cố hiện trường.' });
+        return null;
+      }
+      if (incidentCreateBusy) return null;
+      const severity = ['low', 'medium', 'high', 'critical'].includes(newIncidentSeverity) ? newIncidentSeverity : 'high';
+      const resolvedOrgId = resolveIncidentOrganizationId({
+        explicitOrgId: props.organizationId,
+        entityInput: entityId,
+        qrResult,
+        detectedOrgId: detectedOrgIdRef.current,
+        token: resolveClientAuthToken(apiClient, storageRef.current),
+        lists: [incidentCases, deliveryOrders, serviceTickets, pendingApprovals],
+      });
+      const parsedAssetId = parsePositiveInt(entityId);
+      const resolvedAssetEntityId = parsedAssetId !== null
+        ? (resolvedOrgId ? `urn:ngsi-ld:Asset:${resolvedOrgId}:native:${parsedAssetId}` : `urn:ngsi-ld:Asset:native:${parsedAssetId}`)
+        : (entityId || (resolvedOrgId ? `urn:ngsi-ld:Asset:${resolvedOrgId}:field-device` : 'urn:ngsi-ld:Asset:field-device'));
+      const incidentPayload = {
+        ...(resolvedOrgId ? { organizationId: resolvedOrgId } : {}),
+        ...(parsedAssetId !== null ? { assetId: parsedAssetId } : {}),
+        assetEntityId: resolvedAssetEntityId,
+        ruleCode: 'FIELD-INCIDENT',
+        attribute: 'field_incident',
+        alarmType: 'field_incident',
+        severity,
+        summary: title,
+        title,
+      };
       if (!isOnline || !apiClient || typeof apiClient.request !== 'function') {
+        const queued = await tryEnqueueOffline(
+          'iot.incidentCreate',
+          incidentPayload,
+          (len) => `Đang ngoại tuyến — đã lưu báo cáo sự cố vào hàng đợi (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+        );
+        if (queued) {
+          setNewIncidentTitle('');
+          setNewIncidentEntity('');
+          setCreateIncidentOpen(false);
+        }
+        return queued;
+      }
+      setIncidentCreateBusy(true);
+      try {
+        const res = await apiClient.request({
+          url: 'dxosBlocks:alarmIngest',
+          method: 'post',
+          data: incidentPayload,
+          skipNotify: true,
+        });
+        const created = res?.data?.data ?? res?.data ?? { id: Date.now(), name: title, severity, status: 'open' };
+        setIncidentCases((prev) => [created, ...prev]);
+        setNewIncidentTitle('');
+        setNewIncidentEntity('');
+        setCreateIncidentOpen(false);
+        setStatusNotice({ type: 'success', text: `Đã ghi nhận sự cố: ${title}.` });
+        refreshOpsSummaryRef.current?.();
+        return created;
+      } catch (err) {
+        const status = extractHttpStatus(err);
+        if (status === 401) markAuthExpired();
+        if (status !== 401 && isTransientOrNetworkFailure(err)) {
+          const queued = await tryEnqueueOffline(
+            'iot.incidentCreate',
+            incidentPayload,
+            (len) => `Mất kết nối — đã xếp hàng đợi báo cáo sự cố (${len}/${MAX_OFFLINE_QUEUE_ITEMS}).`,
+          );
+          if (queued) {
+            setNewIncidentTitle('');
+            setNewIncidentEntity('');
+            setCreateIncidentOpen(false);
+          }
+          return queued;
+        }
+        setStatusNotice({ type: 'error', text: extractApiErrorMessage(err) || 'Không thể báo cáo sự cố.' });
+        return null;
+      } finally {
+        if (mountedRef.current) setIncidentCreateBusy(false);
+      }
+    }, [apiClient, deliveryOrders, incidentCases, incidentCreateBusy, isOnline, newIncidentEntity, newIncidentSeverity, newIncidentTitle, pendingApprovals, props.organizationId, qrResult, serviceTickets, tryEnqueueOffline]);
+
+    const submitMobileAiPrompt = React.useCallback(async (ev, retryPromptText) => {
+      ev?.preventDefault?.();
+      const promptText = String(typeof retryPromptText === 'string' ? retryPromptText : aiPrompt || '').trim();
+      if (!promptText || aiBusy) return;
+      if (typeof retryPromptText !== 'string') {
+        const userMsg = { id: `u-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role: 'user', text: promptText };
+        setAiMessages((prev) => [...prev, userMsg]);
+        setAiPrompt('');
+      }
+      setAiErrorState(null);
+      if (!isOnline || !apiClient || typeof apiClient.request !== 'function') {
+        const offlineMsg = 'Trợ lý AI cần kết nối mạng và phiên đăng nhập hợp lệ.';
+        setAiErrorState({ message: offlineMsg, prompt: promptText });
         setAiMessages((prev) => [
           ...prev,
-          { id: `a-${Date.now()}`, role: 'error', text: 'Trợ lý AI cần kết nối mạng và phiên đăng nhập hợp lệ.' },
+          { id: `a-${Date.now()}`, role: 'error', text: offlineMsg },
         ]);
         return;
       }
       setAiBusy(true);
       const token = resolveClientAuthToken(apiClient, storageRef.current);
+      const rawTimeout = Number(props.aiTimeoutMs);
+      const timeoutMs = Number.isFinite(rawTimeout) && rawTimeout > 0 ? rawTimeout : 15000;
+
+      const requestWithAiTimeout = async (reqConfig) => {
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        let timer = null;
+        const timeoutErr = Object.assign(
+          new Error('Trợ lý AI không phản hồi kịp thời (hết thời gian chờ).'),
+          { name: 'AbortError', code: 'AI_TIMEOUT', status: 408 },
+        );
+        const timeoutPromise = new Promise((_, reject) => {
+          timer = setTimeout(() => {
+            try { controller?.abort?.(); } catch {}
+            reject(timeoutErr);
+          }, timeoutMs);
+        });
+        try {
+          const reqPromise = apiClient.request({
+            ...reqConfig,
+            ...(controller ? { signal: controller.signal } : {}),
+          });
+          return await Promise.race([reqPromise, timeoutPromise]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
+      };
+
       const appendReply = (role, text) => {
         if (!mountedRef.current) return;
         setAiMessages((prev) => [
           ...prev,
           { id: `a-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, role, text: String(text) },
         ]);
+      };
+      const recordAiError = (msg) => {
+        if (mountedRef.current) {
+          setAiErrorState({ message: String(msg), prompt: promptText });
+        }
+        appendReply('error', msg);
       };
 
       try {
@@ -1883,10 +2391,11 @@ function createMobileFieldPwaPage(client, React, app) {
         let employee = aiSessionRef.current.token === token ? aiSessionRef.current.employee : null;
         let conversationTried = false;
         let liveServerError = null;
+        let skipA2aCascade = false;
 
         if (!sessionId) {
           try {
-            const agentsRes = await apiClient.request({
+            const agentsRes = await requestWithAiTimeout({
               url: 'dxosAi:portalAgents',
               method: 'get',
               params: { portalSlug: 'mobile' },
@@ -1899,42 +2408,51 @@ function createMobileFieldPwaPage(client, React, app) {
             employee = picked?.username || 'dxos-logistics';
           } catch (agentsErr) {
             if (extractHttpStatus(agentsErr) === 401) {
-              if (mountedRef.current) setAuthExpired(true);
-              appendReply('error', 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+              markAuthExpired();
+              recordAiError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
               return;
+            }
+            if (isAiTimeoutOrUnavailable(agentsErr)) {
+              liveServerError = agentsErr;
+              skipA2aCascade = true;
             }
             employee = employee || 'dxos-logistics';
           }
-          try {
-            const createRes = await apiClient.request({
-              url: 'aiConversations:create',
-              method: 'post',
-              headers: { 'X-Timezone': '+07:00' },
-              data: { aiEmployee: { username: employee }, scope: 'mobile' },
-              skipNotify: true,
-            });
-            const created = createRes?.data?.data ?? createRes?.data ?? {};
-            sessionId = created.sessionId || created.id || null;
-            if (sessionId) {
-              aiSessionRef.current = { token, sessionId, employee };
-            }
-          } catch (createErr) {
-            const status = extractHttpStatus(createErr);
-            if (status === 401) {
-              if (mountedRef.current) setAuthExpired(true);
-              appendReply('error', 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-              return;
-            }
-            if (status !== 404) {
-              liveServerError = createErr;
+          if (!skipA2aCascade) {
+            try {
+              const createRes = await requestWithAiTimeout({
+                url: 'aiConversations:create',
+                method: 'post',
+                headers: { 'X-Timezone': '+07:00' },
+                data: { aiEmployee: { username: employee }, scope: 'mobile' },
+                skipNotify: true,
+              });
+              const created = createRes?.data?.data ?? createRes?.data ?? {};
+              sessionId = created.sessionId || created.id || null;
+              if (sessionId) {
+                aiSessionRef.current = { token, sessionId, employee };
+              }
+            } catch (createErr) {
+              const status = extractHttpStatus(createErr);
+              if (status === 401) {
+                markAuthExpired();
+                recordAiError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+                return;
+              }
+              if (isAiTimeoutOrUnavailable(createErr)) {
+                liveServerError = createErr;
+                skipA2aCascade = true;
+              } else if (status !== 404) {
+                liveServerError = createErr;
+              }
             }
           }
         }
 
-        if (sessionId) {
+        if (sessionId && !skipA2aCascade) {
           conversationTried = true;
           try {
-            const sendRes = await apiClient.request({
+            const sendRes = await requestWithAiTimeout({
               url: 'aiConversations:sendMessages',
               method: 'post',
               headers: { 'X-Timezone': '+07:00' },
@@ -1948,68 +2466,75 @@ function createMobileFieldPwaPage(client, React, app) {
             });
             const replyText = extractAiReplyText(sendRes?.data?.data ?? sendRes?.data ?? {});
             if (replyText) {
+              if (mountedRef.current) setAiErrorState(null);
               appendReply('assistant', replyText);
               return;
             }
           } catch (sendErr) {
             const status = extractHttpStatus(sendErr);
             if (status === 401) {
-              if (mountedRef.current) setAuthExpired(true);
-              appendReply('error', 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+              markAuthExpired();
+              recordAiError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
               return;
             }
             aiSessionRef.current = { token: null, sessionId: null, employee: null };
-            if (status !== 404) {
+            if (isAiTimeoutOrUnavailable(sendErr)) {
+              liveServerError = sendErr;
+              skipA2aCascade = true;
+            } else if (status !== 404) {
               liveServerError = sendErr;
             }
           }
         }
 
-        // 2. Governed A2A gateway fallback (exists on live server, avoids 404 on dxosAi:agentChat)
+        // 2. Governed A2A gateway fallback (skipped when primary hit 503 or AbortError/timeout)
         let a2aHadResult = false;
-        try {
-          const a2aRes = await apiClient.request({
-            url: 'dxos-a2a',
-            method: 'post',
-            data: {
-              jsonrpc: '2.0',
-              id: `mobile-${Date.now()}`,
-              method: 'tasks/send',
-              params: {
-                targetAgentId: 'dxos-logistics',
-                message: { role: 'user', parts: [{ type: 'text', text: promptText }] },
-                metadata: { portalSlug: 'mobile' },
+        if (!skipA2aCascade) {
+          try {
+            const a2aRes = await requestWithAiTimeout({
+              url: 'dxos-a2a',
+              method: 'post',
+              data: {
+                jsonrpc: '2.0',
+                id: `mobile-${Date.now()}`,
+                method: 'tasks/send',
+                params: {
+                  targetAgentId: 'dxos-logistics',
+                  message: { role: 'user', parts: [{ type: 'text', text: promptText }] },
+                  metadata: { portalSlug: 'mobile' },
+                },
               },
-            },
-            skipNotify: true,
-          });
-          const a2aBody = a2aRes?.data ?? {};
-          const a2aText = extractAiReplyText(a2aBody);
-          if (a2aText) {
-            a2aHadResult = true;
-            appendReply('assistant', a2aText);
-            return;
-          }
-          if (a2aBody?.error) {
-            liveServerError = new Error(a2aBody.error.message || 'Lỗi từ A2A gateway.');
-          } else if (a2aBody?.result) {
-            a2aHadResult = true;
-          }
-        } catch (a2aErr) {
-          const status = extractHttpStatus(a2aErr);
-          if (status === 401) {
-            if (mountedRef.current) setAuthExpired(true);
-            appendReply('error', 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
-            return;
-          }
-          if (status !== 404) {
-            liveServerError = a2aErr;
+              skipNotify: true,
+            });
+            const a2aBody = a2aRes?.data ?? {};
+            const a2aText = extractAiReplyText(a2aBody);
+            if (a2aText) {
+              a2aHadResult = true;
+              if (mountedRef.current) setAiErrorState(null);
+              appendReply('assistant', a2aText);
+              return;
+            }
+            if (a2aBody?.error) {
+              liveServerError = new Error(a2aBody.error.message || 'Lỗi từ A2A gateway.');
+            } else if (a2aBody?.result) {
+              a2aHadResult = true;
+            }
+          } catch (a2aErr) {
+            const status = extractHttpStatus(a2aErr);
+            if (status === 401) {
+              markAuthExpired();
+              recordAiError('Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.');
+              return;
+            }
+            if (status !== 404) {
+              liveServerError = a2aErr;
+            }
           }
         }
 
         // 3. Legacy / unit-test mock fallback only when aiConversations & dxos-a2a returned unmocked/404 or null (never on live server error)
         if (!conversationTried && !a2aHadResult && !liveServerError) {
-          const res = await apiClient.request({
+          const res = await requestWithAiTimeout({
             url: 'dxosAi:agentChat',
             method: 'post',
             data: { prompt: promptText, portalSlug: 'mobile' },
@@ -2017,27 +2542,33 @@ function createMobileFieldPwaPage(client, React, app) {
           });
           const body = res?.data?.data ?? res?.data ?? {};
           const text = extractAiReplyText(body) || 'Đã tiếp nhận yêu cầu trợ lý AI.';
+          if (mountedRef.current) setAiErrorState(null);
           appendReply('assistant', text);
           return;
         }
 
         if (liveServerError) {
-          const msg = liveServerError?.response?.data?.errors?.[0]?.message || liveServerError?.message || 'Không thể kết nối trợ lý AI lúc này.';
-          appendReply('error', msg);
+          const msg = isAiTimeoutOrUnavailable(liveServerError)
+            ? (liveServerError.code === 'AI_TIMEOUT' || liveServerError.name === 'AbortError'
+              ? 'Trợ lý AI quá thời gian phản hồi. Vui lòng thử lại.'
+              : 'Dịch vụ AI tạm thời quá tải (503). Vui lòng thử lại sau.')
+            : extractApiErrorMessage(liveServerError) || 'Không thể kết nối trợ lý AI lúc này.';
+          recordAiError(msg);
           return;
         }
 
+        if (mountedRef.current) setAiErrorState(null);
         appendReply('assistant', 'Đã tiếp nhận yêu cầu trợ lý AI.');
       } catch (err) {
-        if (extractHttpStatus(err) === 401 && mountedRef.current) {
-          setAuthExpired(true);
+        if (extractHttpStatus(err) === 401) {
+          markAuthExpired();
         }
-        const msg = err?.response?.data?.errors?.[0]?.message || err?.message || 'Không thể kết nối trợ lý AI lúc này.';
-        appendReply('error', msg);
+        const msg = extractApiErrorMessage(err) || 'Không thể kết nối trợ lý AI lúc này.';
+        recordAiError(msg);
       } finally {
         if (mountedRef.current) setAiBusy(false);
       }
-    }, [aiBusy, aiPrompt, apiClient, isOnline]);
+    }, [aiBusy, aiPrompt, apiClient, isOnline, props.aiTimeoutMs]);
 
     const cardStyle = {
       background: '#1e293b',
@@ -2096,7 +2627,7 @@ function createMobileFieldPwaPage(client, React, app) {
       style: {
         maxWidth: 520,
         margin: '0 auto',
-        minHeight: '100vh',
+        minHeight: '100dvh',
         background: '#0f172a',
         color: '#f8fafc',
         padding: 16,
@@ -2119,7 +2650,8 @@ function createMobileFieldPwaPage(client, React, app) {
             onClick: toggleNotifications,
             title: 'Thông báo hiện trường',
             style: {
-              padding: '6px 10px',
+              minHeight: 44,
+              padding: '8px 12px',
               borderRadius: 999,
               background: notifUnreadCount > 0 ? '#dc2626' : '#1e293b',
               border: '1px solid #475569',
@@ -2135,7 +2667,8 @@ function createMobileFieldPwaPage(client, React, app) {
             onClick: () => setOutboxOpen((v) => !v),
             title: 'Mở Outbox Inspector',
             style: {
-              padding: '6px 10px',
+              minHeight: 44,
+              padding: '8px 12px',
               borderRadius: 999,
               background: queueItems.length > 0 ? '#b45309' : '#1e293b',
               border: '1px solid #475569',
@@ -2161,12 +2694,12 @@ function createMobileFieldPwaPage(client, React, app) {
               'data-testid': 'mobile-pwa-notif-mark-all',
               disabled: notifBusy || (notifUnreadCount === 0 && !notifItems.some((it) => !it.readAt)),
               onClick: markAllNotifsRead,
-              style: { ...btnSecondaryStyle, minHeight: 32, padding: '4px 10px', fontSize: 12, background: '#0369a1', borderColor: '#0284c7' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0369a1', borderColor: '#0284c7' },
             }, 'Đánh dấu tất cả đã đọc'),
             h('button', {
               type: 'button',
               onClick: () => setNotifOpen(false),
-              style: { ...btnSecondaryStyle, minHeight: 32, padding: '4px 10px', fontSize: 12 },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
             }, 'Đóng'),
           ),
         ),
@@ -2180,7 +2713,7 @@ function createMobileFieldPwaPage(client, React, app) {
             type: 'button',
             'data-testid': 'mobile-pwa-notif-retry',
             onClick: loadNotifications,
-            style: { ...btnSecondaryStyle, minHeight: 28, padding: '2px 8px', fontSize: 11 },
+            style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
           }, 'Thử lại'),
         ) : null,
         notifLoading && notifItems.length === 0
@@ -2204,7 +2737,7 @@ function createMobileFieldPwaPage(client, React, app) {
                     type: 'button',
                     'data-testid': `mobile-pwa-notif-mark-${it.id}`,
                     onClick: () => markNotifRead(it),
-                    style: { ...btnSecondaryStyle, minHeight: 26, padding: '2px 8px', fontSize: 11, background: '#0369a1', borderColor: '#0284c7', flexShrink: 0 },
+                    style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 10px', fontSize: 12, background: '#0369a1', borderColor: '#0284c7', flexShrink: 0 },
                   }, 'Đánh dấu đã đọc') : null,
                 ),
                 it.body ? h('div', { style: { color: '#cbd5e1', marginTop: 2 } }, String(it.body).slice(0, 120)) : null,
@@ -2224,13 +2757,13 @@ function createMobileFieldPwaPage(client, React, app) {
               'data-testid': 'mobile-pwa-outbox-retry-all',
               disabled: syncing || queueItems.length === 0,
               onClick: () => handleSync(true),
-              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#0284c7', borderColor: '#0284c7' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0284c7', borderColor: '#0284c7' },
             }, syncing ? 'Đang gửi...' : 'Thử lại tất cả'),
             h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-outbox-close',
               onClick: () => setOutboxOpen(false),
-              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12 },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
             }, 'Đóng'),
           ),
         ),
@@ -2238,9 +2771,22 @@ function createMobileFieldPwaPage(client, React, app) {
           ? h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Hàng đợi ngoại tuyến đang trống.')
           : queueItems.map((item) => {
               const spec = ALLOWED_OFFLINE_ACTIONS[item.actionType] || {};
+              const isQuarantined = item.status === 'quarantined';
+              const isConflict = isQuarantined && (item.httpStatus === 409 || Boolean(item.conflictData));
               const isFailed = item.status === 'failed';
-              const statusLabel = item.status === 'syncing' ? 'Đang gửi' : isFailed ? 'Thất bại' : 'Chờ đồng bộ';
+              const statusLabel = item.status === 'syncing'
+                ? 'Đang gửi'
+                : isConflict
+                  ? 'Xung đột (409)'
+                  : isQuarantined
+                    ? 'Cách ly (Lỗi dữ liệu)'
+                    : isFailed
+                      ? 'Thất bại'
+                      : 'Chờ đồng bộ';
               const isConfirmingDelete = confirmDeleteOutboxId === item.id;
+              const draftOrderCode = Object.hasOwn(outboxOrderDrafts, item.id)
+                ? outboxOrderDrafts[item.id]
+                : (item.payload?.orderCode || '');
               return h('div', {
                 key: item.id,
                 'data-testid': `mobile-pwa-outbox-item-${item.id}`,
@@ -2248,33 +2794,85 @@ function createMobileFieldPwaPage(client, React, app) {
                   padding: 10,
                   borderRadius: 8,
                   background: '#0f172a',
-                  border: `1px solid ${isFailed ? '#ef4444' : '#334155'}`,
+                  border: `1px solid ${isQuarantined ? '#f59e0b' : isFailed ? '#ef4444' : '#334155'}`,
                   marginBottom: 8,
                 },
               },
                 h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
                   h('strong', { style: { fontSize: 13 } }, `${spec.label || item.actionType} · ${formatOutboxItemSummary(item)}`),
                   h('span', {
+                    'data-testid': `mobile-pwa-outbox-status-${item.id}`,
                     style: {
                       fontSize: 11,
                       fontWeight: 700,
                       padding: '2px 8px',
                       borderRadius: 999,
-                      background: isFailed ? '#7f1d1d' : '#1e3a8a',
-                      color: '#f8fafc',
+                      background: isQuarantined ? '#78350f' : isFailed ? '#7f1d1d' : '#1e3a8a',
+                      color: isQuarantined ? '#fde68a' : '#f8fafc',
                     },
                   }, statusLabel),
                 ),
-                h('div', { style: { fontSize: 11, color: '#94a3b8', marginTop: 4 } }, `Lần thử: ${item.attempts || 0} · ${item.createdAt}`),
+                h('div', { style: { fontSize: 11, color: '#94a3b8', marginTop: 4 } }, `Lần thử: ${item.attempts || 0} · HTTP: ${item.httpStatus || '—'} · ${item.createdAt}`),
                 item.lastError ? h('div', { style: { fontSize: 11, color: '#fca5a5', marginTop: 3 } }, item.lastError) : null,
+                isConflict ? h('div', {
+                  'data-testid': `mobile-pwa-outbox-conflict-${item.id}`,
+                  style: { marginTop: 8, padding: 8, borderRadius: 6, background: '#451a03', border: '1px solid #f59e0b', fontSize: 11, color: '#fde68a' },
+                },
+                  h('div', { style: { fontWeight: 700, marginBottom: 4 } }, 'Phát hiện xung đột dữ liệu trên máy chủ (HTTP 409):'),
+                  item.conflictData?.serverRecord
+                    ? h('div', { style: { marginBottom: 6, color: '#fef3c7' } }, `Máy chủ: ${JSON.stringify(maskConflictMediaFields(item.conflictData.serverRecord))}`)
+                    : null,
+                  h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `mobile-pwa-outbox-overwrite-${item.id}`,
+                      onClick: () => overwriteOutboxItem(item),
+                      style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 10px', fontSize: 12, background: '#b45309', borderColor: '#f59e0b' },
+                    }, 'Ghi đè bản ghi'),
+                    h('button', {
+                      type: 'button',
+                      'data-testid': `mobile-pwa-outbox-keep-local-${item.id}`,
+                      onClick: () => keepLocalOutboxItem(item),
+                      style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 10px', fontSize: 12 },
+                    }, 'Giữ bản cục bộ'),
+                  ),
+                ) : null,
+                item.actionType === 'wms.epodCapture' ? h('div', {
+                  style: { marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' },
+                },
+                  h('input', {
+                    type: 'text',
+                    'data-testid': `mobile-pwa-outbox-edit-order-${item.id}`,
+                    value: draftOrderCode,
+                    onChange: (e) => {
+                      const val = e?.target?.value ?? '';
+                      setOutboxOrderDrafts((prev) => ({ ...prev, [item.id]: val }));
+                    },
+                    placeholder: 'Sửa mã đơn hàng (Order Code)...',
+                    style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 44, fontSize: 13 },
+                  }),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `mobile-pwa-outbox-save-retry-${item.id}`,
+                    disabled: retryingItemId === item.id,
+                    onClick: () => saveAndRetryOutboxItem(item, draftOrderCode),
+                    style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0369a1' },
+                  }, 'Lưu & Thử lại'),
+                ) : null,
                 h('div', { style: { display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' } },
                   h('button', {
                     type: 'button',
                     'data-testid': `mobile-pwa-outbox-retry-${item.id}`,
                     disabled: retryingItemId === item.id,
                     onClick: () => retrySingleOutboxItem(item),
-                    style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#0369a1' },
+                    style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0369a1' },
                   }, retryingItemId === item.id ? 'Đang thử lại...' : 'Thử lại'),
+                  h('button', {
+                    type: 'button',
+                    'data-testid': `mobile-pwa-outbox-export-${item.id}`,
+                    onClick: () => exportOutboxItemJson(item),
+                    style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
+                  }, 'Xuất JSON'),
                   isConfirmingDelete
                     ? h('div', { style: { display: 'flex', gap: 6 } },
                         h('button', {
@@ -2284,24 +2882,28 @@ function createMobileFieldPwaPage(client, React, app) {
                             await deleteSingleOutboxItem(item.id);
                             setConfirmDeleteOutboxId(null);
                           },
-                          style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#dc2626', borderColor: '#ef4444' },
+                          style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#dc2626', borderColor: '#ef4444' },
                         }, 'Xác nhận xóa?'),
                         h('button', {
                           type: 'button',
                           'data-testid': `mobile-pwa-outbox-delete-cancel-${item.id}`,
                           onClick: () => setConfirmDeleteOutboxId(null),
-                          style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12 },
+                          style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
                         }, 'Hủy'),
                       )
                     : h('button', {
                         type: 'button',
                         'data-testid': `mobile-pwa-outbox-delete-${item.id}`,
                         onClick: () => setConfirmDeleteOutboxId(item.id),
-                        style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#7f1d1d', borderColor: '#ef4444' },
+                        style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#7f1d1d', borderColor: '#ef4444' },
                       }, 'Xóa'),
                 ),
               );
             }),
+        exportedOutboxItem ? h('pre', {
+          'data-testid': 'mobile-pwa-outbox-exported-preview',
+          style: { fontSize: 11, background: '#020617', color: '#cbd5e1', padding: 8, borderRadius: 6, overflowX: 'auto', marginTop: 8 },
+        }, exportedOutboxItem.json) : null,
       ) : null,
 
       // Unauthenticated / Expired Session Banner
@@ -2329,8 +2931,8 @@ function createMobileFieldPwaPage(client, React, app) {
             display: 'inline-flex',
             alignItems: 'center',
             justifyContent: 'center',
-            minHeight: 36,
-            padding: '6px 14px',
+            minHeight: 44,
+            padding: '8px 14px',
             borderRadius: 8,
             background: '#ffffff',
             color: '#991b1b',
@@ -2392,7 +2994,7 @@ function createMobileFieldPwaPage(client, React, app) {
             'data-testid': 'mobile-pwa-ops-refresh-btn',
             disabled: opsLoading,
             onClick: refreshOpsSummary,
-            style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12 },
+            style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
           }, opsLoading ? 'Đang tải...' : 'Làm mới') : null,
         ),
         opsErrors.length > 0 && !authExpired ? h('div', {
@@ -2416,7 +3018,7 @@ function createMobileFieldPwaPage(client, React, app) {
             type: 'button',
             'data-testid': 'mobile-pwa-ops-retry-btn',
             onClick: refreshOpsSummary,
-            style: { ...btnSecondaryStyle, minHeight: 28, padding: '2px 10px', fontSize: 11, flexShrink: 0 },
+            style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, flexShrink: 0 },
           }, 'Thử lại'),
         ) : null,
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 } },
@@ -2432,8 +3034,8 @@ function createMobileFieldPwaPage(client, React, app) {
             'data-testid': `mobile-pwa-ops-tab-${tab.key}`,
             onClick: () => setOpsTab(tab.key),
             style: {
-              minHeight: 34,
-              padding: '5px 10px',
+              minHeight: 44,
+              padding: '6px 12px',
               borderRadius: 999,
               border: `1px solid ${opsTab === tab.key ? '#38bdf8' : '#475569'}`,
               background: opsTab === tab.key ? '#0369a1' : '#0f172a',
@@ -2474,14 +3076,14 @@ function createMobileFieldPwaPage(client, React, app) {
                       'data-testid': `mobile-pwa-approval-approve-${apKey}`,
                       disabled: busy,
                       onClick: () => decideMobileApproval(ap, 'approved'),
-                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 38, padding: '6px 10px', fontSize: 13, background: '#15803d', borderColor: '#16a34a' },
+                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 44, padding: '6px 10px', fontSize: 13, background: '#15803d', borderColor: '#16a34a' },
                     }, busy ? 'Đang xử lý...' : 'Phê duyệt'),
                     h('button', {
                       type: 'button',
                       'data-testid': `mobile-pwa-approval-reject-${apKey}`,
                       disabled: busy,
                       onClick: () => decideMobileApproval(ap, 'rejected'),
-                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 38, padding: '6px 10px', fontSize: 13, background: '#991b1b', borderColor: '#dc2626' },
+                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 44, padding: '6px 10px', fontSize: 13, background: '#991b1b', borderColor: '#dc2626' },
                     }, 'Từ chối'),
                   ),
                 );
@@ -2514,7 +3116,7 @@ function createMobileFieldPwaPage(client, React, app) {
                     type: 'button',
                     'data-testid': `mobile-pwa-delivery-select-${ordKey}`,
                     onClick: () => selectOrderForEpod(ord),
-                    style: { ...btnSecondaryStyle, width: '100%', minHeight: 36, marginTop: 8, padding: '6px 10px', fontSize: 12, background: '#0369a1', borderColor: '#0284c7' },
+                    style: { ...btnSecondaryStyle, width: '100%', minHeight: 44, marginTop: 8, padding: '6px 10px', fontSize: 12, background: '#0369a1', borderColor: '#0284c7' },
                   }, 'Chọn giao ePOD'),
                 );
               }),
@@ -2523,7 +3125,56 @@ function createMobileFieldPwaPage(client, React, app) {
           'data-testid': 'mobile-pwa-incidents-section',
           style: { marginBottom: 10 },
         },
-          h('div', { style: { fontSize: 12, fontWeight: 700, color: '#fca5a5', marginBottom: 6, textTransform: 'uppercase' } }, `Sự cố hiện trường (${incidentCases.length})`),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 8 } },
+            h('div', { style: { fontSize: 12, fontWeight: 700, color: '#fca5a5', textTransform: 'uppercase' } }, `Sự cố hiện trường (${incidentCases.length})`),
+            (canCreateIncidents && isAuthenticatedMobileClient(apiClient, storageRef.current) && !authExpired) ? h('button', {
+              type: 'button',
+              'data-testid': 'mobile-pwa-incident-create-toggle',
+              onClick: () => setCreateIncidentOpen((v) => !v),
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#991b1b', borderColor: '#dc2626' },
+            }, createIncidentOpen ? 'Đóng form' : '+ Báo cáo sự cố') : null,
+          ),
+          createIncidentOpen ? h('div', {
+            'data-testid': 'mobile-pwa-incident-create-form',
+            style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #ef4444', marginBottom: 10 },
+          },
+            h('input', {
+              type: 'text',
+              'data-testid': 'mobile-pwa-incident-new-title',
+              value: newIncidentTitle,
+              onChange: (e) => setNewIncidentTitle(e?.target?.value ?? ''),
+              placeholder: 'Mô tả sự cố hiện trường...',
+              style: { ...inputStyle, minHeight: 44, fontSize: 13 },
+            }),
+            h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 } },
+              h('input', {
+                type: 'text',
+                'data-testid': 'mobile-pwa-incident-new-entity',
+                value: newIncidentEntity,
+                onChange: (e) => setNewIncidentEntity(e?.target?.value ?? ''),
+                placeholder: 'URN / Mã thiết bị',
+                style: { ...inputStyle, marginBottom: 0, minHeight: 44, fontSize: 12 },
+              }),
+              h('select', {
+                'data-testid': 'mobile-pwa-incident-new-severity',
+                value: newIncidentSeverity,
+                onChange: (e) => setNewIncidentSeverity(e?.target?.value ?? 'high'),
+                style: { ...inputStyle, marginBottom: 0, minHeight: 44, fontSize: 12 },
+              },
+                h('option', { value: 'low' }, 'Thấp'),
+                h('option', { value: 'medium' }, 'Trung bình'),
+                h('option', { value: 'high' }, 'Cao'),
+                h('option', { value: 'critical' }, 'Khẩn cấp'),
+              ),
+            ),
+            h('button', {
+              type: 'button',
+              'data-testid': 'mobile-pwa-incident-new-submit',
+              disabled: incidentCreateBusy,
+              onClick: submitQuickIncident,
+              style: { ...btnPrimaryStyle, minHeight: 44, fontSize: 13, background: '#dc2626' },
+            }, incidentCreateBusy ? 'Đang gửi...' : 'Gửi báo cáo sự cố'),
+          ) : null,
           incidentsRestricted
             ? h('div', { style: { fontSize: 12, color: '#fbbf24', padding: '6px 0' } }, 'Vai trò hiện tại không có quyền xem sự cố IoT.')
             : incidentCases.length === 0
@@ -2548,7 +3199,7 @@ function createMobileFieldPwaPage(client, React, app) {
                         type: 'button',
                         'data-testid': `mobile-pwa-incident-open-${incKey}`,
                         onClick: () => openIncidentDetail(inc),
-                        style: { ...btnSecondaryStyle, flex: 1, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#1e293b' },
+                        style: { ...btnSecondaryStyle, flex: 1, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#1e293b' },
                       }, 'Chi tiết & xử lý'),
                     ),
                   );
@@ -2564,35 +3215,35 @@ function createMobileFieldPwaPage(client, React, app) {
               type: 'button',
               'data-testid': 'mobile-pwa-incident-detail-close',
               onClick: () => setSelectedIncident(null),
-              style: { ...btnSecondaryStyle, minHeight: 30, padding: '4px 10px', fontSize: 12 },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
             }, 'Đóng'),
           ),
           h('div', { style: { fontSize: 12, color: '#cbd5e1', marginBottom: 6 } }, `Mức độ: ${selectedIncident.severity || 'medium'} · Trạng thái: ${selectedIncident.status || 'open'}`),
           selectedIncident.proposal ? h('div', { style: { fontSize: 12, color: '#fde68a', marginBottom: 6 } }, `Đề xuất: ${selectedIncident.proposal}`) : null,
           selectedIncident.resolutionNote ? h('div', { style: { fontSize: 12, color: '#93c5fd', marginBottom: 6 } }, `Ghi chú: ${selectedIncident.resolutionNote}`) : null,
           h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 8 } },
-            (selectedIncident.assetId != null || selectedIncident.assetEntityId) ? h('button', {
+            (canControlTwin && (selectedIncident.assetId != null || selectedIncident.assetEntityId)) ? h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-incident-fill-twin',
               onClick: () => {
                 setTwinAssetId(String(selectedIncident.assetId ?? selectedIncident.assetEntityId));
                 setStatusNotice({ type: 'info', text: 'Đã điền mã tài sản vào khung Digital Twin.' });
               },
-              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#0369a1' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0369a1' },
             }, 'Điền vào Digital Twin') : null,
             !incidentsRestricted ? h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-incident-ack',
               disabled: detailBusy,
               onClick: () => handleIncidentAlarmAction('ack'),
-              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#b45309' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#b45309' },
             }, 'Xác nhận (Ack)') : null,
             !incidentsRestricted ? h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-incident-clear',
               disabled: detailBusy,
               onClick: () => handleIncidentAlarmAction('clear'),
-              style: { ...btnSecondaryStyle, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#15803d' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#15803d' },
             }, 'Đóng cảnh báo') : null,
           ),
           h('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 4 } }, 'Trao đổi hiện trường (Chatter)'),
@@ -2609,14 +3260,14 @@ function createMobileFieldPwaPage(client, React, app) {
               value: detailNote,
               onChange: (e) => setDetailNote(e?.target?.value ?? ''),
               placeholder: 'Nhập ghi chú xử lý...',
-              style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 36, fontSize: 12 },
+              style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 44, fontSize: 12 },
             }),
             h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-incident-note-submit',
               disabled: detailBusy,
               onClick: submitDetailNote,
-              style: { ...btnSecondaryStyle, minHeight: 36, padding: '4px 10px', fontSize: 12, background: '#0284c7' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0284c7' },
             }, 'Gửi ghi chú'),
           ),
         ) : null,
@@ -2629,7 +3280,7 @@ function createMobileFieldPwaPage(client, React, app) {
               type: 'button',
               'data-testid': 'mobile-pwa-ticket-create-toggle',
               onClick: () => setCreateTicketOpen((v) => !v),
-              style: { ...btnSecondaryStyle, minHeight: 30, padding: '3px 10px', fontSize: 11, background: '#0369a1' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0369a1' },
             }, createTicketOpen ? 'Đóng form' : '+ Tạo phiếu dịch vụ') : null,
           ),
           createTicketOpen ? h('div', {
@@ -2642,14 +3293,14 @@ function createMobileFieldPwaPage(client, React, app) {
               value: newTicketName,
               onChange: (e) => setNewTicketName(e?.target?.value ?? ''),
               placeholder: 'Tiêu đề phiếu dịch vụ...',
-              style: { ...inputStyle, minHeight: 38, fontSize: 13 },
+              style: { ...inputStyle, minHeight: 44, fontSize: 13 },
             }),
             h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 8 } },
               h('select', {
                 'data-testid': 'mobile-pwa-ticket-new-type',
                 value: newTicketType,
                 onChange: (e) => setNewTicketType(e?.target?.value ?? 'it_support'),
-                style: { ...inputStyle, marginBottom: 0, minHeight: 36, fontSize: 12 },
+                style: { ...inputStyle, marginBottom: 0, minHeight: 44, fontSize: 12 },
               },
                 h('option', { value: 'it_support' }, 'Hỗ trợ CNTT'),
                 h('option', { value: 'facilities' }, 'Cơ sở vật chất'),
@@ -2660,11 +3311,14 @@ function createMobileFieldPwaPage(client, React, app) {
                 'data-testid': 'mobile-pwa-ticket-new-priority',
                 value: newTicketPriority,
                 onChange: (e) => setNewTicketPriority(e?.target?.value ?? 'medium'),
-                style: { ...inputStyle, marginBottom: 0, minHeight: 36, fontSize: 12 },
+                style: { ...inputStyle, marginBottom: 0, minHeight: 44, fontSize: 12 },
               },
                 h('option', { value: 'low' }, 'Thấp'),
+                h('option', { value: 'normal' }, 'Bình thường'),
                 h('option', { value: 'medium' }, 'Trung bình'),
                 h('option', { value: 'high' }, 'Cao'),
+                h('option', { value: 'urgent' }, 'Khẩn'),
+                h('option', { value: 'critical' }, 'Rất khẩn cấp'),
               ),
             ),
             h('input', {
@@ -2673,14 +3327,14 @@ function createMobileFieldPwaPage(client, React, app) {
               value: newTicketDesc,
               onChange: (e) => setNewTicketDesc(e?.target?.value ?? ''),
               placeholder: 'Mô tả sự cố / yêu cầu kỹ thuật...',
-              style: { ...inputStyle, minHeight: 38, fontSize: 13 },
+              style: { ...inputStyle, minHeight: 44, fontSize: 13 },
             }),
             h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-ticket-new-submit',
               disabled: ticketCreateBusy,
               onClick: submitNewServiceTicket,
-              style: { ...btnPrimaryStyle, minHeight: 38, fontSize: 13 },
+              style: { ...btnPrimaryStyle, minHeight: 44, fontSize: 13 },
             }, ticketCreateBusy ? 'Đang tạo...' : 'Lưu phiếu dịch vụ'),
           ) : null,
           serviceTickets.length === 0
@@ -2705,7 +3359,7 @@ function createMobileFieldPwaPage(client, React, app) {
                       type: 'button',
                       'data-testid': `mobile-pwa-ticket-open-${tktKey}`,
                       onClick: () => openTicketDetail(tkt),
-                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 34, padding: '4px 10px', fontSize: 12, background: '#1e293b' },
+                      style: { ...btnSecondaryStyle, flex: 1, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#1e293b' },
                     }, 'Chi tiết & thao tác'),
                   ),
                 );
@@ -2721,7 +3375,7 @@ function createMobileFieldPwaPage(client, React, app) {
               type: 'button',
               'data-testid': 'mobile-pwa-ticket-detail-close',
               onClick: () => setSelectedTicket(null),
-              style: { ...btnSecondaryStyle, minHeight: 30, padding: '4px 10px', fontSize: 12 },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
             }, 'Đóng'),
           ),
           h('div', { style: { fontSize: 12, color: '#cbd5e1', marginBottom: 6 } }, `Loại: ${selectedTicket.serviceType || 'it_support'} · Ưu tiên: ${selectedTicket.priority || 'medium'} · Trạng thái: ${selectedTicket.status || 'draft'}`),
@@ -2732,7 +3386,7 @@ function createMobileFieldPwaPage(client, React, app) {
             'data-testid': 'mobile-pwa-ticket-submit-voucher',
             disabled: detailBusy,
             onClick: submitTicketVoucher,
-            style: { ...btnSecondaryStyle, width: '100%', minHeight: 36, marginBottom: 8, padding: '6px 10px', fontSize: 12, background: '#15803d', borderColor: '#16a34a' },
+            style: { ...btnSecondaryStyle, width: '100%', minHeight: 44, marginBottom: 8, padding: '6px 12px', fontSize: 12, background: '#15803d', borderColor: '#16a34a' },
           }, detailBusy ? 'Đang trình duyệt...' : 'Trình duyệt phiếu') : null,
           h('div', { style: { fontSize: 12, fontWeight: 700, marginBottom: 4 } }, 'Trao đổi & ghi chú'),
           detailChatterLoading
@@ -2748,14 +3402,14 @@ function createMobileFieldPwaPage(client, React, app) {
               value: detailNote,
               onChange: (e) => setDetailNote(e?.target?.value ?? ''),
               placeholder: 'Thêm ghi chú phiếu dịch vụ...',
-              style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 36, fontSize: 12 },
+              style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 44, fontSize: 12 },
             }),
             h('button', {
               type: 'button',
               'data-testid': 'mobile-pwa-ticket-note-submit',
               disabled: detailBusy,
               onClick: submitDetailNote,
-              style: { ...btnSecondaryStyle, minHeight: 36, padding: '4px 10px', fontSize: 12, background: '#0284c7' },
+              style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#0284c7' },
             }, 'Lưu ghi chú'),
           ),
         ) : null,
@@ -2910,12 +3564,33 @@ function createMobileFieldPwaPage(client, React, app) {
               style: { ...inputStyle, marginBottom: 4 },
             }),
           ),
+          h('label', {
+            style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#cbd5e1', marginTop: 6, marginBottom: 6, cursor: 'pointer' },
+          },
+            h('input', {
+              type: 'checkbox',
+              'data-testid': 'mobile-pwa-gps-unavailable-checkbox',
+              checked: gpsUnavailable,
+              onChange: (e) => setGpsUnavailable(Boolean(e?.target?.checked)),
+            }),
+            'Không có tín hiệu GPS (ví dụ: kho lạnh ngầm)',
+          ),
+          gpsUnavailable ? h('input', {
+            type: 'text',
+            'data-testid': 'mobile-pwa-gps-unavailable-reason',
+            value: gpsUnavailableReason,
+            onChange: (e) => setGpsUnavailableReason(e?.target?.value ?? ''),
+            placeholder: 'Nhập lý do không lấy được GPS...',
+            style: { ...inputStyle, marginBottom: 6, minHeight: 44, fontSize: 13 },
+          }) : null,
           h('div', {
             'data-testid': 'mobile-pwa-gps-display',
             style: { fontSize: 12, color: '#94a3b8' },
-          }, gpsLat && gpsLng
-            ? `GPS: ${gpsLat}, ${gpsLng}${gpsAccuracyM != null ? ` (±${gpsAccuracyM}m)` : ''}`
-            : 'Chưa có tọa độ GPS.'),
+          }, gpsUnavailable
+            ? `Bỏ qua GPS: ${gpsUnavailableReason || 'Vui lòng nhập lý do'}`
+            : (gpsLat && gpsLng
+              ? `GPS: ${gpsLat}, ${gpsLng}${gpsAccuracyM != null ? ` (±${gpsAccuracyM}m)` : ''}`
+              : 'Chưa có tọa độ GPS.')),
         ),
 
         // Camera Photo Evidence Capture
@@ -2927,13 +3602,13 @@ function createMobileFieldPwaPage(client, React, app) {
                 type: 'button',
                 'data-testid': 'mobile-pwa-photo-camera-btn',
                 onClick: photoCameraActive ? stopPhotoCamera : startPhotoCamera,
-                style: { ...btnSecondaryStyle, minHeight: 36, padding: '6px 10px', fontSize: 12 },
+                style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
               }, photoCameraActive ? 'Tắt Camera ảnh' : 'Chụp bằng Camera'),
               evidencePhotoDataUrl ? h('button', {
                 type: 'button',
                 'data-testid': 'mobile-pwa-photo-clear',
                 onClick: () => setEvidencePhotoDataUrl(''),
-                style: { ...btnSecondaryStyle, minHeight: 36, padding: '6px 10px', fontSize: 12, background: '#7f1d1d' },
+                style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, background: '#7f1d1d' },
               }, 'Xóa ảnh') : null,
             ),
           ),
@@ -3031,8 +3706,8 @@ function createMobileFieldPwaPage(client, React, app) {
         receipt.ledgerSeq != null ? h('div', { style: { fontSize: 12, color: '#a7f3d0' } }, `Sổ cái Ledger Seq #${receipt.ledgerSeq}`) : null,
       ) : null,
 
-      // Quick Digital Twin Setpoint Card
-      h('section', { style: cardStyle },
+      // Quick Digital Twin Setpoint Card (gated by latticeAssets:update)
+      canControlTwin ? h('section', { style: cardStyle },
         h('div', { style: { fontSize: 14, fontWeight: 700, marginBottom: 8 } }, '3. Điều khiển nhanh Digital Twin Kho lạnh'),
         h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
           h('input', {
@@ -3060,7 +3735,7 @@ function createMobileFieldPwaPage(client, React, app) {
           onClick: submitTwinDesired,
           style: { ...btnSecondaryStyle, width: '100%', opacity: twinBusy ? 0.65 : 1 },
         }, twinBusy ? 'Đang gửi lệnh...' : 'Gửi lệnh Digital Twin'),
-      ),
+      ) : null,
 
       // Collapsible Floating AI Assistant Drawer + Pill (never buries above-the-fold cards)
       aiOpen ? h('section', {
@@ -3068,7 +3743,7 @@ function createMobileFieldPwaPage(client, React, app) {
         style: {
           position: 'fixed',
           right: 12,
-          bottom: 66,
+          bottom: 66 + keyboardOffsetPx,
           width: 'calc(100vw - 24px)',
           maxWidth: 380,
           background: '#1e293b',
@@ -3085,7 +3760,7 @@ function createMobileFieldPwaPage(client, React, app) {
             type: 'button',
             'data-testid': 'mobile-pwa-ai-close',
             onClick: () => setAiOpen(false),
-            style: { ...btnSecondaryStyle, minHeight: 30, padding: '4px 10px', fontSize: 12 },
+            style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12 },
           }, 'Thu gọn'),
         ),
         aiMessages.length > 0 ? h('div', {
@@ -3109,6 +3784,35 @@ function createMobileFieldPwaPage(client, React, app) {
             },
           }, msg.text);
         })) : null,
+        aiBusy ? h('div', {
+          'data-testid': 'mobile-pwa-ai-loading',
+          style: { fontSize: 12, color: '#38bdf8', padding: '6px 8px', marginBottom: 8 },
+        }, 'Đang xử lý câu hỏi...') : null,
+        (!aiBusy && aiErrorState) ? h('div', {
+          role: 'alert',
+          'data-testid': 'mobile-pwa-ai-error-card',
+          style: {
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 8,
+            padding: '8px 10px',
+            borderRadius: 8,
+            background: '#7f1d1d',
+            border: '1px solid #ef4444',
+            color: '#fee2e2',
+            fontSize: 12,
+            marginBottom: 8,
+          },
+        },
+          h('span', null, aiErrorState.message),
+          h('button', {
+            type: 'button',
+            'data-testid': 'mobile-pwa-ai-retry-btn',
+            onClick: () => submitMobileAiPrompt(null, aiErrorState.prompt),
+            style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 12px', fontSize: 12, flexShrink: 0, background: '#991b1b', borderColor: '#fca5a5' },
+          }, 'Thử lại'),
+        ) : null,
         h('form', {
           'data-testid': 'mobile-pwa-ai-form',
           onSubmit: submitMobileAiPrompt,
@@ -3120,13 +3824,13 @@ function createMobileFieldPwaPage(client, React, app) {
             value: aiPrompt,
             onChange: (e) => setAiPrompt(e?.target?.value ?? ''),
             placeholder: 'Hỏi AI về đơn giao nhận hoặc sự cố...',
-            style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 38, fontSize: 13 },
+            style: { ...inputStyle, marginBottom: 0, flex: 1, minHeight: 44, fontSize: 13 },
           }),
           h('button', {
             type: 'submit',
             'data-testid': 'mobile-pwa-ai-send',
             disabled: aiBusy,
-            style: { ...btnSecondaryStyle, minHeight: 38, padding: '6px 12px', background: '#0284c7', borderColor: '#0284c7', fontSize: 12 },
+            style: { ...btnSecondaryStyle, minHeight: 44, padding: '6px 14px', background: '#0284c7', borderColor: '#0284c7', fontSize: 12 },
           }, aiBusy ? '...' : 'Gửi'),
         ),
       ) : null,
@@ -3137,9 +3841,9 @@ function createMobileFieldPwaPage(client, React, app) {
         style: {
           position: 'fixed',
           right: 14,
-          bottom: 14,
+          bottom: 14 + keyboardOffsetPx,
           zIndex: 1046,
-          minHeight: 40,
+          minHeight: 44,
           padding: '8px 14px',
           borderRadius: 999,
           border: '1px solid #38bdf8',
@@ -3168,8 +3872,12 @@ module.exports = {
   listOutboxItems,
   removeOutboxItem,
   updateOutboxStatus,
+  updateOutboxItem,
   parseFieldQrPayload,
   buildEpodPayload,
+  extractConflictData,
+  decodeJwtPayload,
+  isJwtTokenExpired,
   resolveClientAuthToken,
   isAuthenticatedMobileClient,
   createMobileFieldPwaPage,

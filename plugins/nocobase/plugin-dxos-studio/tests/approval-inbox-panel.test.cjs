@@ -545,3 +545,160 @@ test('proposals tab, evidence badges, reviewed status, and Asia/Ho_Chi_Minh (+07
   await collectNodes(card, (n) => n.props?.['data-testid'] === 'dxos-approval-approve-prop:77')[0].props.onClick();
   assert.ok(requests.some((r) => r.url === 'dxosApprovals:decide' && r.data.source === 'proposals' && r.data.decision === 'approve'));
 });
+
+test('P1-04: ApprovalInboxPanel supports proposal review CTA, bulk select/approve/reject, search, and Policy Management Drawer (no ldx_admin)', async () => {
+  const { createApprovalInboxPanel } = require(SOURCE_PATH);
+  const harness = createReactHarness();
+  const inboxItems = [
+    { itemKey: 'prop:81', id: 81, source: 'proposals', title: 'Proposal PO-81', status: 'pending', riskLevel: 'low' },
+    { itemKey: 'biz:82', id: 82, source: 'business', title: 'Order PO-82', status: 'pending', riskLevel: 'high' },
+  ];
+  let policies = [
+    { id: 1, policyKey: 'po-default', name: 'PO Default', targetCollection: 'latticeOrders', slaMinutes: 120, escalateToRole: 'ldx_manager' },
+  ];
+
+  const { client, requests } = createApiMock({
+    'get dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
+    'get dxosApprovals:listInbox': async () => ({
+      organizationId: 'org-a',
+      items: inboxItems,
+      total: 2,
+      counts: { business: 1, proposals: 1, ai_hitl: 0, flow: 0, total: 2 },
+    }),
+    'post dxosApprovals:decide': async (req) => ({ ok: true, decision: req.data.decision }),
+    'get dxosApprovals:listPolicies': async () => ({ items: policies }),
+    'post dxosApprovals:savePolicy': async (req) => {
+      policies = [...policies, req.data];
+      return req.data;
+    },
+    'post dxosApprovals:deletePolicy': async (req) => {
+      policies = policies.filter((p) => p.policyKey !== req.data.policyKey);
+      return { deleted: true };
+    },
+    'post dxosApprovals:evaluateSlaNow': async () => ({ checkedCount: 2, escalatedCount: 1 }),
+  });
+
+  const Panel = createApprovalInboxPanel(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+
+  // counts.total fallback on 'all' tab
+  const allTab = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-source-all')[0];
+  assert.ok(textOf(allTab).includes('Tất cả (2)'));
+
+  // Search input triggers listInbox with search param
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-search-input')[0].props.onChange({ target: { value: 'PO-81' } });
+  tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:listInbox' && r.params?.search === 'PO-81'));
+
+  // Review CTA on proposal
+  const reviewBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-review-prop:81')[0];
+  assert.ok(reviewBtn, 'Proposal card must render Review CTA');
+  await reviewBtn.props.onClick();
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:decide' && r.data.itemKey === 'prop:81' && r.data.decision === 'review'));
+
+  // Select all & bulk approve
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-select-all')[0].props.onChange({ target: { checked: true } });
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-bulk-approve')[0].props.onClick();
+  const bulkApproveCalls = requests.filter((r) => r.url === 'dxosApprovals:decide' && r.data.decision === 'approve');
+  assert.equal(bulkApproveCalls.length, 2);
+
+  // Open Policy Management Drawer & verify ldx_admin is excluded from escalateToRole options
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-policies-btn')[0].props.onClick();
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const drawer = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-policies-drawer')[0];
+  assert.ok(drawer);
+  const escalateSelect = collectNodes(drawer, (n) => n.props?.['data-testid'] === 'dxos-policy-escalate-select')[0];
+  const roleVals = collectNodes(escalateSelect, (n) => n.type === 'option').map((o) => o.props.value);
+  assert.equal(roleVals.includes('ldx_admin'), false, 'Forbidden role ldx_admin must not appear in escalateToRole options');
+  assert.ok(roleVals.includes('ldx_manager'));
+
+  // Save policy + evaluate SLA now
+  collectNodes(drawer, (n) => n.props?.['data-testid'] === 'dxos-policy-key-input')[0].props.onChange({ target: { value: 'po-urgent' } });
+  collectNodes(drawer, (n) => n.props?.['data-testid'] === 'dxos-policy-name-input')[0].props.onChange({ target: { value: 'PO Urgent' } });
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-policy-form')[0].props.onSubmit({ preventDefault() {} });
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:savePolicy' && r.data.policyKey === 'po-urgent'));
+
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-eval-sla-btn')[0].props.onClick();
+  assert.ok(requests.some((r) => r.url === 'dxosApprovals:evaluateSlaNow'));
+});
+
+test('ApprovalInboxPanel skips dxosDelegations:activeForUser when organizationId is empty', async () => {
+  const { createApprovalInboxPanel } = require(SOURCE_PATH);
+  const harness = createReactHarness();
+  const { client, requests } = createApiMock({
+    'get dxosStudio:listEmployees': async () => ({ items: [], organizations: [] }),
+    'get dxosApprovals:listInbox': async () => ({ items: [], total: 0, counts: {} }),
+    'get dxosDelegations:activeForUser': async (req) => {
+      if (!req.params?.organizationId) {
+        const err = new Error('DELEGATION_ORG_REQUIRED');
+        err.response = { status: 400 };
+        throw err;
+      }
+      return { items: [], roles: [] };
+    },
+  });
+
+  const Panel = createApprovalInboxPanel(client, harness.React, {}, {});
+  await harness.mountAndFlush(Panel, { selectedOrg: '', organizations: [] });
+  assert.equal(requests.some((r) => r.url === 'dxosApprovals:listInbox'), true);
+  assert.equal(requests.some((r) => r.url === 'dxosDelegations:activeForUser'), false);
+});
+
+test('T1-STUDIO-05: ApprovalInboxPanel exposes data-counts-ready=false before hydration, true after settle, and keeps counts across tab switches', async () => {
+  const { createApprovalInboxPanel } = require(SOURCE_PATH);
+  const harness = createReactHarness();
+  const { client } = createApiMock({
+    'get dxosDelegations:activeForUser': async () => ({ items: [], roles: [] }),
+    'get dxosApprovals:listInbox': async (req) => ({
+      organizationId: 'org-a',
+      items: req.params?.source === 'business'
+        ? [{ itemKey: 'biz-1', source: 'business', title: 'Biz 1', status: 'pending', riskLevel: 'low' }]
+        : [],
+      total: 4,
+      counts: { all: 4, total: 4, business: 1, ai_hitl: 1, flow: 1, proposals: 1 },
+    }),
+  });
+
+  const Panel = createApprovalInboxPanel(client, harness.React, {}, {});
+  const preTree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const preInbox = collectNodes(preTree, (n) => n.props?.['data-testid'] === 'dxos-approval-inbox')[0];
+  assert.equal(preInbox.props['data-counts-ready'], 'false');
+
+  let tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const hydratedInbox = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-inbox')[0];
+  assert.equal(hydratedInbox.props['data-counts-ready'], 'true');
+
+  const initialLabels = Object.fromEntries(
+    ['all', 'business', 'ai_hitl', 'flow', 'proposals'].map((k) => [
+      k,
+      textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-approvals-source-${k}`)[0]),
+    ]),
+  );
+  assert.equal(initialLabels.ai_hitl, 'AI HITL (1)');
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approvals-source-business')[0].props.onClick();
+  tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const afterInbox = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-inbox')[0];
+  assert.equal(afterInbox.props['data-counts-ready'], 'true');
+  for (const k of ['all', 'business', 'ai_hitl', 'flow', 'proposals']) {
+    const afterLabel = textOf(collectNodes(tree, (n) => n.props?.['data-testid'] === `dxos-approvals-source-${k}`)[0]);
+    assert.equal(afterLabel, initialLabels[k], `Tab ${k} label must remain unchanged on business tab click`);
+  }
+});
+
+test('T1-STUDIO-05: ApprovalInboxPanel marks data-counts-ready=true even if initial listInbox rejects', async () => {
+  const { createApprovalInboxPanel } = require(SOURCE_PATH);
+  const harness = createReactHarness();
+  const { client } = createApiMock({
+    'get dxosApprovals:listInbox': async () => {
+      throw new Error('503 inbox unavailable');
+    },
+  });
+
+  const Panel = createApprovalInboxPanel(client, harness.React, {}, {});
+  const tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const inbox = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-approval-inbox')[0];
+  assert.equal(inbox.props['data-counts-ready'], 'true');
+});

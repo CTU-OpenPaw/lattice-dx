@@ -19,6 +19,7 @@
   const { createConnectedAppsPanel } = require('./flow/connected-apps-panel');
   const { createPublicFormBuilderPanel, PublicFormBuilderPanel } = require('./public-form-builder');
   const { createApprovalInboxPanel, ApprovalInboxPanel } = require('./approval-inbox-panel');
+  const { renderFlowForbiddenCard, resolveFlowUiAccess } = require('./flow-inspector-extras');
 
   function createWorkflowConnectorsPage(app) {
     const h = React.createElement;
@@ -26,11 +27,16 @@
     const useApi = typeof client?.useAPIClient === 'function' ? client.useAPIClient : () => app?.apiClient || null;
     return function WorkflowConnectorsPage() {
       const api = useApi();
+      const uiPerms = typeof client?.useUIConfigurationPermissions === 'function' ? client.useUIConfigurationPermissions() : null;
+      const userCtx = typeof client?.useCurrentUserContext === 'function' ? client.useCurrentUserContext() : null;
+      const { uiDenied, isAdminRole } = resolveFlowUiAccess({ uiPerms, userCtx, api, app });
+      const [forbidden, setForbidden] = React.useState(false);
       const [selectedOrg, setSelectedOrg] = React.useState('');
       const [organizations, setOrganizations] = React.useState([]);
       const [orgReady, setOrgReady] = React.useState(false);
       React.useEffect(() => {
-        if (!api?.request) { setOrgReady(true); return; }
+        if (uiDenied) { setOrgReady(true); return; }
+        if (!api?.request || !isAdminRole) { setOrgReady(true); return; }
         api.request({ url: 'dxosStudio:listEmployees', method: 'get', skipNotify: true })
           .then((res) => {
             const orgs = res?.data?.data?.organizations || res?.data?.organizations || [];
@@ -39,13 +45,23 @@
               setSelectedOrg((cur) => cur || orgs[0]);
             }
           })
-          .catch(() => {})
+          .catch(() => {
+            // Non-admin managers lack dxosStudio:listEmployees; ConnectedAppsPanel handles actual dxosVault/dxosN8n ACLs
+          })
           .finally(() => setOrgReady(true));
-      }, [Boolean(api?.request)]);
+      }, [Boolean(api?.request), uiDenied, isAdminRole]);
       const openRoute = (p) => { if (app?.router?.navigate) app.router.navigate(p); else if (typeof window !== 'undefined' && window.location) window.location.assign(app?.getRouteUrl?.(p) || p); };
+      if (forbidden || uiDenied) {
+        return renderFlowForbiddenCard(h, {
+          testId: 'dxos-workflow-connectors-forbidden',
+          title: '403 — Chỉ Quản trị viên mới truy cập được Connectors & n8n',
+          description: 'Tài khoản hiện tại không có quyền quản trị kết nối tích hợp.',
+          onBack: () => openRoute('/admin/lattice-workspace'),
+        });
+      }
       return h('div', { 'data-testid': 'dxos-workflow-connectors-tab', style: { padding: 14, background: '#f8fafc', minHeight: 520 } },
         orgReady
-          ? h(ConnectedAppsPanel, { api, selectedOrg, organizations, openRoute })
+          ? h(ConnectedAppsPanel, { api, selectedOrg, organizations, openRoute, onForbidden: () => setForbidden(true) })
           : h('div', { style: { padding: 20, fontSize: 13, color: '#64748b' } }, 'Đang tải danh sách tổ chức & Connected Apps…'),
       );
     };

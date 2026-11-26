@@ -363,15 +363,37 @@ test('employees without custom portals fall back to Workspace without looping, a
   assert.equal(unauthSetup.lastGate.type, 'AdminProvider');
 });
 
-test('PortalAdminProvider aligns with allowConfigure/pm snippets and respects !ui.* negations', async () => {
+test('PortalAdminProvider aligns with allowConfigure/pm snippets, redirects root/builders from bare /admin to Workspace v2, and keeps deep links intact', async () => {
   const pmBuilder = harness({
     allow: false, pathname: '/admin', runEffects: true,
     roleCheck: async () => ({ data: { data: { allowConfigure: true, snippets: ['pm'] } } }),
   });
   pmBuilder.render();
   await new Promise(resolve => setImmediate(resolve));
-  pmBuilder.render();
-  assert.equal(pmBuilder.lastGate.type, 'AdminProvider');
+  const redirectUi = pmBuilder.render();
+  assert.equal(redirectUi.props.className, 'ldx-portal-redirecting');
+  assert.notEqual(pmBuilder.lastGate.type, 'AdminProvider');
+  assert.deepEqual(pmBuilder.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
+
+  const rootSlash = harness({
+    allow: true, pathname: '/admin/', runEffects: true,
+    roleCheck: async () => ({ data: { data: { allowAll: true } } }),
+  });
+  rootSlash.render();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(rootSlash.navigations.at(-1), { to: '/admin/lattice-workspace', opts: { replace: true } });
+
+  for (const deepPath of ['/admin/settings/dxos-studio', '/admin/lattice-workspace', '/admin/demo']) {
+    const deepSetup = harness({
+      allow: false, pathname: deepPath, runEffects: true,
+      roleCheck: async () => ({ data: { data: { allowConfigure: true, snippets: ['pm'] } } }),
+    });
+    deepSetup.render();
+    await new Promise(resolve => setImmediate(resolve));
+    deepSetup.render();
+    assert.equal(deepSetup.lastGate.type, 'AdminProvider', `Deep link ${deepPath} must render AdminProvider`);
+    assert.equal(deepSetup.navigations.some(n => n.to === '/admin/lattice-workspace'), false, `Deep link ${deepPath} must not redirect`);
+  }
 
   const negatedUi = harness({
     allow: false, pathname: '/admin', runEffects: true, portals: [],

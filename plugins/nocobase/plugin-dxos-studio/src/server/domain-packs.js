@@ -86,7 +86,7 @@ const BUSINESS_PACK_CATALOG = Object.freeze([
     packKey: 'cmms-maintenance',
     name: 'Bảo trì Thiết bị CMMS Chuỗi lạnh',
     description: 'Phiếu công việc bảo trì thiết bị, định tuyến ưu tiên DMN, tự động hóa cảnh báo chuỗi lạnh và cổng làm việc /p/cmms.',
-    version: '0.4.1',
+    version: '0.4.2',
     components: {
       collection: 'latticeCustomWorkOrders',
       dmnTableKey: 'cmms_priority_routing_v1',
@@ -98,7 +98,7 @@ const BUSINESS_PACK_CATALOG = Object.freeze([
     packKey: 'coldchain-partner-settlement',
     name: 'Đối soát Bồi thường Đối tác Chuỗi lạnh & n8n 2 chiều',
     description: 'Hồ sơ yêu cầu bồi thường đối tác (latticeCustomPartnerClaims), chính sách DMN, luồng điều phối n8n LatticeFlow v2 và cổng /p/partner-claims.',
-    version: '0.4.1',
+    version: '0.4.2',
     components: {
       collection: 'latticeCustomPartnerClaims',
       dmnTableKey: 'coldchain_settlement_policy_v1',
@@ -606,14 +606,14 @@ async function installBusinessPackAction(db, ctx, next, { foundation, requireBui
   return next();
 }
 
-async function seedBusinessPackSamples(db, { organizationId, packKey = 'all', foundation } = {}) {
+async function seedBusinessPackSamples(db, { organizationId, packKey = 'all', foundation, transaction = null } = {}) {
   const orgId = String(organizationId || '').trim();
   if (!orgId) return { workOrdersSeeded: 0, partnerClaimsSeeded: 0 };
   const result = { workOrdersSeeded: 0, partnerClaimsSeeded: 0 };
   const seedCmms = packKey === 'all' || packKey === 'cmms-maintenance';
   const seedClaims = packKey === 'all' || packKey === 'coldchain-partner-settlement';
-  await runWithOptionalRls(db, orgId, async (transaction) => {
-    const txOpt = transaction ? { transaction } : {};
+  const executeSeed = async (tx) => {
+    const txOpt = tx ? { transaction: tx } : {};
     if (seedCmms) {
       const woRepo = db.getRepository?.('latticeCustomWorkOrders');
       if (woRepo && typeof woRepo.findOne === 'function' && typeof woRepo.create === 'function') {
@@ -694,7 +694,12 @@ async function seedBusinessPackSamples(db, { organizationId, packKey = 'all', fo
         }
       }
     }
-  }, foundation);
+  };
+  if (transaction) {
+    await executeSeed(transaction);
+  } else {
+    await runWithOptionalRls(db, orgId, executeSeed, foundation);
+  }
   return result;
 }
 

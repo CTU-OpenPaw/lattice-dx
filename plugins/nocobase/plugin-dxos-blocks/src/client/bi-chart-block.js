@@ -12,6 +12,7 @@ const {
   SAFE_COLLECTION_RE,
   fetchCollectionsMeta,
   subscribeCollectionsMeta,
+  formatBiFieldLabel,
   extractBiFieldOptions,
   stripDevBracketTags,
   formatStatusLabel,
@@ -601,10 +602,16 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       return [...map.values()];
     }, [collectionsMeta, activeCollection]);
 
+    const resolveFieldLabel = React.useCallback((fname) => {
+      if (!fname) return '';
+      const matched = allFieldOptions.find((o) => o.value === fname);
+      return matched ? matched.label : formatBiFieldLabel(fname);
+    }, [allFieldOptions]);
+
     const groupBySelectOptions = React.useMemo(() => {
       const opts = allFieldOptions.slice();
       if (effectiveGroupBy && !opts.some((o) => o.value === effectiveGroupBy)) {
-        opts.unshift({ value: effectiveGroupBy, label: effectiveGroupBy });
+        opts.unshift({ value: effectiveGroupBy, label: formatBiFieldLabel(effectiveGroupBy) });
       }
       return opts;
     }, [allFieldOptions, effectiveGroupBy]);
@@ -612,7 +619,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
     const secondarySelectOptions = React.useMemo(() => {
       const opts = allFieldOptions.filter((o) => o.value !== effectiveGroupBy);
       if (effectiveSecondaryGroupBy && effectiveSecondaryGroupBy !== effectiveGroupBy && !opts.some((o) => o.value === effectiveSecondaryGroupBy)) {
-        opts.unshift({ value: effectiveSecondaryGroupBy, label: effectiveSecondaryGroupBy });
+        opts.unshift({ value: effectiveSecondaryGroupBy, label: formatBiFieldLabel(effectiveSecondaryGroupBy) });
       }
       return opts;
     }, [allFieldOptions, effectiveGroupBy, effectiveSecondaryGroupBy]);
@@ -620,7 +627,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
     const metricFieldSelectOptions = React.useMemo(() => {
       const opts = numericFieldOptions.slice();
       if (effectiveMetricField && !opts.some((o) => o.value === effectiveMetricField)) {
-        opts.unshift({ value: effectiveMetricField, label: effectiveMetricField });
+        opts.unshift({ value: effectiveMetricField, label: formatBiFieldLabel(effectiveMetricField) });
       }
       return opts;
     }, [numericFieldOptions, effectiveMetricField]);
@@ -701,7 +708,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       reqTracker.drillSeq += 1;
       const mySeq = reqTracker.drillSeq;
       const filter = buildDrilldownFilter(payload.filter, conditions, fieldTypeMap);
-      const label = titleLabel || conditions.map((c) => `${c.field}: ${c.value ?? '(Trống)'}`).join(' · ') || collectionTitle;
+      const label = titleLabel || conditions.map((c) => `${resolveFieldLabel(c.field)}: ${c.value ?? '(Trống)'}`).join(' · ') || collectionTitle;
       setDrilldown({ open: true, title: label, conditions, loading: true, items: [], error: '' });
       try {
         const res = await api.request({
@@ -710,7 +717,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           params: {
             pageSize: 20,
             sort: ['-id'],
-            ...(filter ? { filter } : {}),
+            ...(filter ? { filter: JSON.stringify(filter) } : {}),
           },
           skipNotify: true,
         });
@@ -729,7 +736,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
         });
       }
       return undefined;
-    }, [api, activeCollection, payload.filter, fieldTypeMap, collectionTitle, reqTracker]);
+    }, [api, activeCollection, payload.filter, fieldTypeMap, collectionTitle, reqTracker, resolveFieldLabel]);
 
     const limitOptions = React.useMemo(() => {
       const presets = new Set([10, 20, 50, 100, 200, 500, activeLimit, configLimit]);
@@ -751,7 +758,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           viewBox: `0 0 ${geo.width} ${geo.height}`,
           style: { width: '100%', height: 'auto', maxHeight: 260, display: 'block', overflow: 'visible' },
           role: 'img',
-          'aria-label': `${cfg.title} Bar Chart`,
+          'aria-label': `${cleanTitle} Bar Chart`,
         },
           ...geo.ticks.map((t, i) => h('g', { key: `tick-${i}` },
             h('line', { x1: geo.pad.left, y1: t.y, x2: geo.width - geo.pad.right, y2: t.y, stroke: '#e2e8f0', strokeDasharray: '3 3' }),
@@ -770,7 +777,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
               opacity: activeHoverKey && activeHoverKey !== bar.key ? 0.45 : 1,
               onMouseEnter: () => setActiveHoverKey(bar.key),
               onMouseLeave: () => setActiveHoverKey(''),
-              onClick: () => openDrilldown([{ field: effectiveGroupBy, value: bar.key }], `${effectiveGroupBy}: ${bar.label}`),
+              onClick: () => openDrilldown([{ field: effectiveGroupBy, value: bar.key }], `${resolveFieldLabel(effectiveGroupBy)}: ${bar.label}`),
               style: { cursor: 'pointer', transition: 'opacity 120ms ease' },
             }, h('title', null, `${bar.label}: ${formatMetricNumber(bar.value)} (${bar.count} dòng)`)),
             h('text', {
@@ -786,7 +793,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           ...geo.bars.map((b, idx) => h('button', {
             key: `leg-${idx}`,
             type: 'button',
-            onClick: () => openDrilldown([{ field: effectiveGroupBy, value: b.key }], `${effectiveGroupBy}: ${b.label}`),
+            onClick: () => openDrilldown([{ field: effectiveGroupBy, value: b.key }], `${resolveFieldLabel(effectiveGroupBy)}: ${b.label}`),
             style: {
               display: 'inline-flex', alignItems: 'center', gap: 5,
               border: '1px solid #e2e8f0', background: '#f8fafc', borderRadius: 999, padding: '2px 8px',
@@ -807,7 +814,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           viewBox: `0 0 ${geo.width} ${geo.height}`,
           style: { width: '100%', height: 'auto', maxHeight: 260, display: 'block', overflow: 'visible' },
           role: 'img',
-          'aria-label': `${cfg.title} Line Chart`,
+          'aria-label': `${cleanTitle} Line Chart`,
         },
           ...geo.ticks.map((t, i) => h('g', { key: `ltick-${i}` },
             h('line', { x1: geo.pad.left, y1: t.y, x2: geo.width - geo.pad.right, y2: t.y, stroke: '#e2e8f0', strokeDasharray: '3 3' }),
@@ -833,7 +840,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
               strokeWidth: 1.5,
               onMouseEnter: () => setActiveHoverKey(pt.key),
               onMouseLeave: () => setActiveHoverKey(''),
-              onClick: () => openDrilldown([{ field: effectiveGroupBy, value: pt.key }], `${effectiveGroupBy}: ${pt.label}`),
+              onClick: () => openDrilldown([{ field: effectiveGroupBy, value: pt.key }], `${resolveFieldLabel(effectiveGroupBy)}: ${pt.label}`),
               style: { cursor: 'pointer' },
             }, h('title', null, `${pt.label}: ${formatMetricNumber(pt.value)}`)),
             h('text', {
@@ -858,7 +865,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           viewBox: '0 0 240 240',
           style: { width: 210, height: 210, flexShrink: 0 },
           role: 'img',
-          'aria-label': `${cfg.title} Pie Chart`,
+          'aria-label': `${cleanTitle} Pie Chart`,
         },
           ...geo.slices.map((s, idx) => (s.isFullCircle
             ? h('circle', {
@@ -870,7 +877,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
                 fill: 'none',
                 stroke: s.color,
                 strokeWidth: geo.r - geo.innerR,
-                onClick: () => openDrilldown([{ field: effectiveGroupBy, value: s.key }], `${effectiveGroupBy}: ${s.label}`),
+                onClick: () => openDrilldown([{ field: effectiveGroupBy, value: s.key }], `${resolveFieldLabel(effectiveGroupBy)}: ${s.label}`),
                 style: { cursor: 'pointer' },
               }, h('title', null, `${s.label}: ${formatMetricNumber(s.value)} (100%)`))
             : h('path', {
@@ -880,7 +887,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
                 fill: s.color,
                 stroke: '#ffffff',
                 strokeWidth: 1.5,
-                onClick: () => openDrilldown([{ field: effectiveGroupBy, value: s.key }], `${effectiveGroupBy}: ${s.label}`),
+                onClick: () => openDrilldown([{ field: effectiveGroupBy, value: s.key }], `${resolveFieldLabel(effectiveGroupBy)}: ${s.label}`),
                 style: { cursor: 'pointer' },
               }, h('title', null, `${s.label}: ${formatMetricNumber(s.value)} (${(s.pct * 100).toFixed(1)}%)`)))),
           h('text', { x: geo.cx, y: geo.cy - 4, textAnchor: 'middle', fontSize: 11, fill: '#64748b' }, 'Tổng'),
@@ -890,7 +897,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
           ...geo.slices.map((s, idx) => h('button', {
             key: `pie-leg-${idx}`,
             type: 'button',
-            onClick: () => openDrilldown([{ field: effectiveGroupBy, value: s.key }], `${effectiveGroupBy}: ${s.label}`),
+            onClick: () => openDrilldown([{ field: effectiveGroupBy, value: s.key }], `${resolveFieldLabel(effectiveGroupBy)}: ${s.label}`),
             style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, padding: '6px 8px', background: '#f8fafc', borderRadius: 6, border: '1px solid #e2e8f0', cursor: 'pointer', width: '100%' },
           },
             h('span', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, color: '#0f172a' } },
@@ -911,7 +918,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       },
         h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', justifyContent: 'space-between', gap: 12, padding: 14, borderRadius: 10, background: '#f0f9ff', border: '1px solid #bae6fd' } },
           h('div', null,
-            h('div', { style: { fontSize: 12, color: '#0369a1', fontWeight: 600 } }, `${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` · ${payload.metric.field}` : ''}`),
+            h('div', { style: { fontSize: 12, color: '#0369a1', fontWeight: 600 } }, `${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` · ${resolveFieldLabel(payload.metric.field)}` : ''}`),
             h('div', { 'data-testid': 'dxos-bi-kpi-value', style: { fontSize: 32, fontWeight: 800, color: '#0f172a', lineHeight: 1.15, marginTop: 4 } }, formatMetricNumber(kpiValue)),
           ),
           h('div', { style: { fontSize: 12, color: '#475569' } }, `${formatMetricNumber(totalRows)} bản ghi`),
@@ -943,7 +950,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
         h('table', { style: { width: '100%', borderCollapse: 'collapse', fontSize: 12 } },
           h('thead', null,
             h('tr', { style: { background: '#f1f5f9' } },
-              h('th', { style: { textAlign: 'left', padding: '8px 10px', border: '1px solid #cbd5e1', color: '#0f172a' } }, `${pivotMatrix?.rowField || payload.groupBy || 'Hàng'} \\ ${pivotMatrix?.colField || payload.secondaryGroupBy || 'Cột'}`),
+              h('th', { style: { textAlign: 'left', padding: '8px 10px', border: '1px solid #cbd5e1', color: '#0f172a' } }, `${resolveFieldLabel(pivotMatrix?.rowField || payload.groupBy) || 'Hàng'} \\ ${resolveFieldLabel(pivotMatrix?.colField || payload.secondaryGroupBy) || 'Cột'}`),
               ...columns.map((cKey) => h('th', { key: `col-${cKey}`, style: { textAlign: 'right', padding: '8px 10px', border: '1px solid #cbd5e1', color: '#0f172a' } }, cKey)),
               h('th', { style: { textAlign: 'right', padding: '8px 10px', border: '1px solid #cbd5e1', background: '#e2e8f0', color: '#0f172a' } }, 'Tổng hàng'),
             ),
@@ -1010,7 +1017,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
         h('div', null,
           h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' } }, cleanTitle),
-          h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, `${collectionTitle} · ${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` (${payload.metric.field})` : ''}`),
+          h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, `${collectionTitle} · ${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` (${resolveFieldLabel(payload.metric.field)})` : ''}`),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' } },
           ...BI_CHART_TYPES.map((ct) => h('button', {

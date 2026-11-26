@@ -111,15 +111,26 @@ function buildSnippet(text, queryOrMaxLen = 160, maybeMaxLen = 160) {
   return `${clean.slice(0, maxLen).trim()}…`;
 }
 
-function buildParaChunkPoolEntries(chunks = [], { organizationId, visibleDocMap = new Map(), ownOnly = false, val } = {}) {
+function isParaDocStatusActive(row, readFn) {
+  const read = typeof readFn === 'function' ? readFn : (r, k) => (typeof r?.get === 'function' ? r.get(k) : r?.[k]);
+  const st = read(row, 'status');
+  if (st == null) return true;
+  const clean = String(st).trim().toLowerCase();
+  return !clean || clean === 'active';
+}
+
+function buildParaChunkPoolEntries(chunks = [], { organizationId, visibleDocMap = new Map(), hiddenDocIds = null, ownOnly = false, val } = {}) {
   const read = typeof val === 'function' ? val : (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
   const entries = [];
   for (const chunk of Array.isArray(chunks) ? chunks : []) {
     if (!chunk || read(chunk, 'organizationId') !== organizationId) continue;
     if (read(chunk, 'active') === false) continue;
+    if (!isParaDocStatusActive(chunk, read)) continue;
 
     const docId = read(chunk, 'documentId');
+    if (docId != null && hiddenDocIds instanceof Set && hiddenDocIds.has(String(docId))) continue;
     const parentDoc = docId != null ? (visibleDocMap.get(String(docId)) || null) : null;
+    if (parentDoc && (read(parentDoc, 'active') === false || !isParaDocStatusActive(parentDoc, read))) continue;
     if (ownOnly && !parentDoc) continue;
 
     const chunkId = read(chunk, 'id');
@@ -162,30 +173,35 @@ function buildParaChunkPoolEntries(chunks = [], { organizationId, visibleDocMap 
   return entries;
 }
 
-const PGVECTOR_TABLE_SPECS = new Map([
-  ['latticeParaChunks', 1536],
-  ['latticeParaDocuments', 256],
-]);
-const ALLOWED_PGVECTOR_TABLES = new Set(PGVECTOR_TABLE_SPECS.keys());
+const ALLOWED_PGVECTOR_TABLES = new Set(['latticeParaChunks', 'latticeParaDocuments']);
 
 /**
  * Safely probes PostgreSQL pgvector cosine similarity over allowlisted P.A.R.A. tables.
- * Enforces exact vector dimension matching (1536 for latticeParaChunks, 256 for latticeParaDocuments)
- * and returns [] on non-postgres dialects, invalid embeddings, or dimension mismatches.
+ * Supports flexible neural vector dimensions (8..8192) on latticeParaChunks with explicit
+ * "embeddingDim" isolation, while preserving 256-dim deterministic fallback rejection on chunks.
  */
-async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, table = 'latticeParaChunks', paraSpace = null, limit = 20 } = {}) {
+async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, table = 'latticeParaChunks', paraSpace = null, limit = 20, embeddingDim = null } = {}) {
   const tableName = typeof table === 'string' && table.trim() ? table.trim() : 'latticeParaChunks';
   if (!ALLOWED_PGVECTOR_TABLES.has(tableName)) return [];
-  const expectedDim = PGVECTOR_TABLE_SPECS.get(tableName);
 
   const orgId = typeof organizationId === 'string' ? organizationId.trim() : '';
   if (!orgId) return [];
   if (db?.sequelize?.getDialect?.() !== 'postgres' || typeof db?.sequelize?.query !== 'function') {
     return [];
   }
-  if (!Array.isArray(queryEmbedding) || queryEmbedding.length !== expectedDim) {
+  if (!Array.isArray(queryEmbedding) || queryEmbedding.length < 8 || queryEmbedding.length > 8192) {
     return [];
   }
+  const explicitDim = embeddingDim != null && Number.isInteger(Number(embeddingDim)) ? Number(embeddingDim) : null;
+  if (explicitDim != null) {
+    if (explicitDim < 8 || explicitDim > 8192 || queryEmbedding.length !== explicitDim) return [];
+  } else if (tableName === 'latticeParaDocuments') {
+    if (queryEmbedding.length !== EMBEDDING_DIM) return [];
+  } else if (tableName === 'latticeParaChunks') {
+    // Reject un-parameterized 256-dim deterministic vectors on neural chunk index
+    if (queryEmbedding.length === EMBEDDING_DIM) return [];
+  }
+
   let magSq = 0;
   const floats = new Array(queryEmbedding.length);
   for (let i = 0; i < queryEmbedding.length; i += 1) {
@@ -199,31 +215,38 @@ async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, ta
   const vectorLiteral = `[${floats.join(',')}]`;
   const safeLimit = Math.max(1, Math.min(100, Math.floor(Number(limit) || 20)));
   const cleanSpace = typeof paraSpace === 'string' && paraSpace.trim() ? paraSpace.trim() : null;
+  const targetDim = queryEmbedding.length;
   const replacements = {
     organizationId: orgId,
     vectorLiteral,
     limit: safeLimit,
+    ...(tableName === 'latticeParaChunks' ? { embeddingDim: targetDim } : {}),
     ...(cleanSpace ? { paraSpace: cleanSpace } : {}),
   };
-  const spaceClause = cleanSpace ? '\n      AND "paraSpace" = :paraSpace' : '';
+  const spaceClauseDoc = cleanSpace ? '\n      AND "paraSpace" = :paraSpace' : '';
+  const spaceClauseChunk = cleanSpace ? '\n      AND c."paraSpace" = :paraSpace' : '';
   const sql = tableName === 'latticeParaDocuments'
     ? `SELECT id, "organizationId", code, title, "paraSpace",
            summary, "contentMarkdown", tags, status, "searchText", "embeddingJson",
            1 - (embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
     FROM "latticeParaDocuments"
     WHERE active = true
+      AND (status IS NULL OR status = 'active')
       AND embedding IS NOT NULL
-      AND "organizationId" = :organizationId${spaceClause}
+      AND "organizationId" = :organizationId${spaceClauseDoc}
     ORDER BY embedding <=> CAST(:vectorLiteral AS vector) ASC
     LIMIT :limit`
-    : `SELECT id, "documentId", "organizationId", code, title, "paraSpace",
-           "chunkIndex", "sectionTitle", "pageNumber", content, "embeddingJson",
-           1 - (embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
-    FROM "latticeParaChunks"
-    WHERE active = true
-      AND embedding IS NOT NULL
-      AND "organizationId" = :organizationId${spaceClause}
-    ORDER BY embedding <=> CAST(:vectorLiteral AS vector) ASC
+    : `SELECT c.id, c."documentId", c."organizationId", c.code, c.title, c."paraSpace",
+           c."chunkIndex", c."sectionTitle", c."pageNumber", c.content, c."embeddingJson",
+           1 - (c.embedding <=> CAST(:vectorLiteral AS vector)) AS "pgVectorSim"
+    FROM "latticeParaChunks" c
+    LEFT JOIN "latticeParaDocuments" d ON d.id = c."documentId"
+    WHERE c.active = true
+      AND c.embedding IS NOT NULL
+      AND c."organizationId" = :organizationId
+      AND c."embeddingDim" = :embeddingDim
+      AND (d.id IS NULL OR (d.active IS DISTINCT FROM false AND (d.status IS NULL OR d.status = 'active')))${spaceClauseChunk}
+    ORDER BY c.embedding <=> CAST(:vectorLiteral AS vector) ASC
     LIMIT :limit`;
 
   try {
@@ -233,6 +256,7 @@ async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, ta
     return rows.filter((row) => {
       if (!row || read(row, 'organizationId') !== orgId) return false;
       if (read(row, 'active') === false) return false;
+      if (!isParaDocStatusActive(row, read)) return false;
       if (cleanSpace && read(row, 'paraSpace') !== cleanSpace) return false;
       return true;
     });
@@ -241,7 +265,20 @@ async function executePgVectorParaQuery(db, { organizationId, queryEmbedding, ta
   }
 }
 
-function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
+function escapeSearchRegExp(str) {
+  return String(str || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function hasBoundaryPhraseMatch(normText, normQuery, tokenSet) {
+  if (!normText || !normQuery) return false;
+  if (!/[\s/_.-]/.test(normQuery)) {
+    return tokenSet.has(normQuery);
+  }
+  const re = new RegExp(`(?:^|[\\s/_.-])${escapeSearchRegExp(normQuery)}(?:$|[\\s/_.-])`);
+  return re.test(normText);
+}
+
+function rankHybridRecords(query, candidates = [], { limit = 8, k = 60, neuralEmbedding = null } = {}) {
   const list = Array.isArray(candidates) ? candidates : [];
   const cap = Math.max(1, Math.min(30, Number(limit) || 8));
   const queryNorm = normalizeSearchText(query);
@@ -250,28 +287,34 @@ function rankHybridRecords(query, candidates = [], { limit = 8, k = 60 } = {}) {
   }
   const queryTokens = tokenizeVietnamese(query);
   const queryVec = computeEmbedding(queryNorm);
+  const hasQueryNeural = Array.isArray(neuralEmbedding) && neuralEmbedding.length >= 8;
 
   const scoredPool = [];
   for (const cand of list) {
     const hayNorm = normalizeSearchText(cand.hayText);
     const titleNorm = normalizeSearchText(cand.titleText);
+    const hayTokens = new Set(hayNorm.split(/[\s/_.-]+/).filter(Boolean));
+    const titleTokens = new Set(titleNorm.split(/[\s/_.-]+/).filter(Boolean));
     let lex = 0;
-    if (hayNorm.includes(queryNorm)) lex += 6;
-    if (titleNorm.includes(queryNorm)) lex += 4;
+    if (hasBoundaryPhraseMatch(hayNorm, queryNorm, hayTokens)) lex += 6;
+    if (hasBoundaryPhraseMatch(titleNorm, queryNorm, titleTokens)) lex += 4;
     let matched = 0;
     for (const tok of queryTokens) {
-      if (hayNorm.includes(tok)) {
+      if (hayTokens.has(tok)) {
         matched += 1;
-        lex += titleNorm.includes(tok) ? 2.5 : 1.5;
+        lex += titleTokens.has(tok) ? 2.5 : 1.5;
       }
     }
     if (queryTokens.length > 0 && matched === queryTokens.length) lex += 3;
     const hasPgSim = cand.pgVectorSim != null && Number.isFinite(Number(cand.pgVectorSim));
+    const hasNeuralMatch = hasQueryNeural && Array.isArray(cand.embedding) && cand.embedding.length === neuralEmbedding.length;
     const vec = Array.isArray(cand.embedding) && cand.embedding.length === EMBEDDING_DIM
       ? cand.embedding
       : computeEmbedding(hayNorm);
-    const sem = hasPgSim ? Number(cand.pgVectorSim) : cosineSimilarity(queryVec, vec);
-    if (lex > 0 || sem >= 0.24) {
+    const sem = hasPgSim
+      ? Number(cand.pgVectorSim)
+      : (hasNeuralMatch ? cosineSimilarity(neuralEmbedding, cand.embedding) : cosineSimilarity(queryVec, vec));
+    if (lex > 0 || ((hasPgSim || hasNeuralMatch) && sem >= 0.24)) {
       scoredPool.push({ cand, lex, sem });
     }
   }
@@ -301,6 +344,7 @@ module.exports = {
   normalizeSearchText,
   computeEmbedding,
   cosineSimilarity,
+  isParaDocStatusActive,
   executePgVectorParaQuery,
   rankHybridRecords,
   buildParaChunkPoolEntries,

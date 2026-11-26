@@ -130,7 +130,11 @@ function createConnectedAppsPanel(client, React, _antd, app) {
       if (!isFresh()) return;
       if (reqs[0].status === 'fulfilled' && Array.isArray(unwrap(reqs[0].value).items) && unwrap(reqs[0].value).items.length) setCatalog(unwrap(reqs[0].value).items);
       if (reqs[1].status === 'fulfilled') setConnectors(Array.isArray(unwrap(reqs[1].value).items) ? unwrap(reqs[1].value).items : []);
-      else reportFb({ type: 'error', text: errMsg(reqs[1].reason, 'Không tải được Connector Vault.') });
+      else {
+        const st = Number(reqs[1].reason?.response?.status ?? reqs[1].reason?.status);
+        if (st === 403 || st === 401) { props.onForbidden?.(); setLoading(false); return; }
+        reportFb({ type: 'error', text: errMsg(reqs[1].reason, 'Không tải được Connector Vault.') });
+      }
       const statusData = reqs[2].status === 'fulfilled' ? unwrap(reqs[2].value) : null;
       setN8nStatus(statusData);
       const pickArr = (r) => (r.status === 'fulfilled' ? (Array.isArray(unwrap(r.value).data) ? unwrap(r.value).data : (unwrap(r.value).items || [])) : []);

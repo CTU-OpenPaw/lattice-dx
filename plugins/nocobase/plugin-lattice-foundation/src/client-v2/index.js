@@ -16,6 +16,7 @@
   'use strict';
   const actions = require('../client/actions');
   const {createWorkspaceApi} = require('../client/workspace-api');
+  const {installSignInApiGuards} = require('../client/native-branding');
   const mobileFieldPwa = require('./mobile-field-pwa');
   const {createMobileFieldPwaPage} = mobileFieldPwa;
   const publicTrack = require('./public-track-page');
@@ -24,6 +25,7 @@
   const {createPublicFormPage} = publicForm;
   class LatticeFoundationClientV2 extends client.Plugin {
     async load() {
+      installSignInApiGuards(this.app);
       const MobileFieldPwaPage = createMobileFieldPwaPage(client, React, this.app);
       const PublicTrackPage = createPublicTrackPage(client, React, this.app);
       const PublicFormPage = createPublicFormPage(client, React, this.app);
@@ -36,6 +38,7 @@
           path: '/mobile',
           Component: MobileFieldPwaPage,
           element: undefined,
+          skipAuthCheck: true,
         });
         router.add = (name, route) => (
           isMobileRootRoute(name, route)
@@ -48,8 +51,8 @@
           const existingMobile = router.routes?.mobile;
           origAdd('mobile', buildMobileOverrideRoute(existingMobile));
         }
-        origAdd('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage });
-        origAdd('dxos-mobile-field-sub', { path: '/mobile/*', Component: MobileFieldPwaPage });
+        origAdd('dxos-mobile-field', { path: '/mobile', Component: MobileFieldPwaPage, skipAuthCheck: true });
+        origAdd('dxos-mobile-field-sub', { path: '/mobile/*', Component: MobileFieldPwaPage, skipAuthCheck: true });
         origAdd('dxos-public-track', { path: '/track/:code', Component: PublicTrackPage, skipAuthCheck: true });
         origAdd('dxos-public-track-root', { path: '/track', Component: PublicTrackPage, skipAuthCheck: true });
         origAdd('dxos-public-form', { path: '/form/:slug', Component: PublicFormPage, skipAuthCheck: true });

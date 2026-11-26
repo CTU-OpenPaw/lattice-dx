@@ -1243,3 +1243,73 @@ test('I2 & M1-M6: SSRF trailing-dot/0.1.2.3, secondary XML XXE, encrypted ZIP, b
     (err) => err.status === 400 && err.code === 'ATTACHMENT_TOO_LARGE',
   );
 });
+
+test('P1-10 & P1-11: latticeStockLots never borrows ORD- primaryCode/code, and encrypted/scanned/ObjStm PDFs emit explicit errors/warnings', async () => {
+  const {
+    extractStructuredFormFields,
+    extractWithMultimodalOcr,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/document-extractor.js'));
+
+  // P1-10: ORD- order code must NOT populate fields.lotCode or fields.code for latticeStockLots
+  const orderTextAsLot = extractStructuredFormFields(
+    'Mã đơn: ORD-2026-990\nSKU-VAC-01\t120 hộp\t2027-12-31',
+    { targetCollection: 'latticeStockLots' },
+  );
+  assert.equal(orderTextAsLot.fields.lotCode, undefined);
+  assert.equal(orderTextAsLot.fields.code, undefined);
+  assert.equal(orderTextAsLot.fields.sku, 'SKU-VAC-01');
+  assert.equal(orderTextAsLot.fields.qtyOnHand, 120);
+  assert.equal(orderTextAsLot.fields.unit, 'hộp');
+  assert.equal(orderTextAsLot.fields.expiryDate, '2027-12-31');
+
+  // Explicit Lot label without LOT- prefix still works without emitting fields.code
+  const explicitLotLabel = extractStructuredFormFields(
+    'Mã lô: BATCH-COLD-09\nSKU-VAC-02\t50 hộp\t2028-01-15',
+    { targetCollection: 'latticeStockLots' },
+  );
+  assert.equal(explicitLotLabel.fields.lotCode, 'BATCH-COLD-09');
+  assert.equal(explicitLotLabel.fields.code, undefined);
+
+  // P1-11: Encrypted PDF (/Encrypt) throws explicit 400 PDF_ENCRYPTED_UNSUPPORTED
+  const encryptedPdf = Buffer.from(
+    '%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Filter /Standard /Encrypt 3 0 R >> endobj\ntrailer << /Root 1 0 R /Encrypt 3 0 R >>\n%%EOF\n',
+    'latin1',
+  );
+  await assert.rejects(
+    () => extractWithMultimodalOcr({
+      buffer: encryptedPdf,
+      filename: 'secret.pdf',
+      mimeType: 'application/pdf',
+      targetCollection: 'latticeOrders',
+      env: {},
+    }),
+    (err) => err.status === 400 && err.code === 'PDF_ENCRYPTED_UNSUPPORTED',
+  );
+
+  // P1-11: Scanned PDF without metadata and ObjStm PDF without text emit actionable warnings in OCR
+  const scannedNoMetaPdf = Buffer.from(
+    '%PDF-1.4\n1 0 obj << /Subtype /Image /Length 4 >>\nstream\nABCD\nendstream\nendobj\n%%EOF\n',
+    'latin1',
+  );
+  const scannedRes = await extractWithMultimodalOcr({
+    buffer: scannedNoMetaPdf,
+    filename: 'scan-only.pdf',
+    mimeType: 'application/pdf',
+    targetCollection: 'latticeOrders',
+    env: {},
+  });
+  assert.ok(scannedRes.warnings.includes('PDF_SCANNED_OCR_REQUIRED'));
+
+  const objStmNoTextPdf = Buffer.from(
+    '%PDF-1.5\n1 0 obj << /Type /ObjStm /Length 4 >>\nstream\nABCD\nendstream\nendobj\n%%EOF\n',
+    'latin1',
+  );
+  const objStmRes = await extractWithMultimodalOcr({
+    buffer: objStmNoTextPdf,
+    filename: 'objstm.pdf',
+    mimeType: 'application/pdf',
+    targetCollection: 'latticeOrders',
+    env: {},
+  });
+  assert.ok(objStmRes.warnings.includes('PDF_OBJSTM_NO_TEXT'));
+});

@@ -233,6 +233,24 @@ function createSystemShell(client, React) {
         },
         "Hệ thống đã xuất bản",
       ),
+      h(
+        "a",
+        {
+          href: "/admin/lattice-workspace",
+          "data-testid": "ldx-back-workspace-v2",
+          style: {
+            marginLeft: "auto",
+            color: "#1d4ed8",
+            fontWeight: 600,
+            background: "#eff6ff",
+            border: "1px solid #bfdbfe",
+            borderRadius: 6,
+            padding: "6px 12px",
+            textDecoration: "none",
+          },
+        },
+        "← Quay lại Workspace v2",
+      ),
     );
 
     if (!connection?.connected) {

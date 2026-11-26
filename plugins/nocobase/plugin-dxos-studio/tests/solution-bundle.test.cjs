@@ -383,9 +383,9 @@ test('v2 schema export + backward-compatible v1/v2 validation + privilege escala
   assert.equal(ACCEPTED_SCHEMA_VERSIONS.has('latticedx.solution-bundle/v3'), true);
 
   const { db } = makeSolutionBundleDbHarness();
-  const v3Bundle = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.1' });
+  const v3Bundle = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.2' });
   assert.equal(v3Bundle.metadata.schemaVersion, 'latticedx.solution-bundle/v3');
-  assert.equal(v3Bundle.metadata.platformVersion, '0.4.1');
+  assert.equal(v3Bundle.metadata.platformVersion, '0.4.2');
   assert.equal(validateSolutionBundle(v3Bundle).valid, true);
 
   // Accepts v1 and v2 bundles cleanly
@@ -1128,7 +1128,7 @@ test('exportSolutionBundle unwraps Sequelize Model instances inside desktopRoute
     return origGetRepo(name);
   };
 
-  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.1' });
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.2' });
   assert.equal(Array.isArray(exported.routesAndBlocks?.routes), true);
   assert.equal(exported.routesAndBlocks.routes.some((r) => r.title === 'Ops Page' && r.layoutUid === 'ldx-portal-work'), true);
 });
@@ -1177,7 +1177,7 @@ test('toObj preserves diamond DAG shared Model references, terminates cycles, an
     return origGetRepo(name);
   };
 
-  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.1' });
+  const exported = await exportSolutionBundle(db, { organizationId: 'org-a', platformVersion: '0.4.2' });
   const hit = exported.routesAndBlocks.routes.find((r) => r.title === 'Diamond Route' && r.layoutUid === 'ldx-portal-work');
   assert.ok(hit);
 });

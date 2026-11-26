@@ -2,6 +2,27 @@
 
 Tài liệu ghi nhận lịch sử phát triển của **LatticeDX** (Apache-2.0), phục vụ kỳ thi OLP PMNM 2026 (VFOSSA).
 
+## [0.4.2] — 2026-11-26 — Full P0/P1 Audit Remediation, UX Completion & Live 124/124 E2E Hardening
+
+- **Toàn vẹn Dữ liệu, Bảo mật Đa Tenant, PG16 `FORCE RLS` (56 Bảng), Node-RED & PITR (`P0-01`, `P0-06`, `P0-07`, `P0-08`, `P0-09`, `P1-17`, `P2-01`, `P3-02`, `P3-03`):**
+  - Chặn `DROP TABLE` xuyên tenant trong `teardownBuiltApp(keepData=false)` (`app-builder-orchestrator.js`) bằng kiểm tra toàn hệ thống qua `withOptionalSystemRls` + kiểm tra bản ghi bảng vật lý trước DDL, đồng thời dọn sạch route/role/`db.removeCollection`.
+  - Nâng cấp PG16 `FORCE ROW LEVEL SECURITY` lên **`56` bảng tĩnh** (bổ sung `latticeAiQuotaPolicies` & `latticeUiSnapshots`), đóng toàn bộ 6 điểm thoát transaction RLS (`voucher-lifecycle`, `event-bus`, `proactive-triage`, `solution-bundle`, `ai-hitl-executors`, `studio-resource:646`), loại bỏ `.catch(() => {})` ở `saveQuotaPolicy` và chuyển kế toán hạn mức AI sang DB bền vững.
+  - Khóa quyền truy cập `ldx_employee` khỏi LatticeFlow Studio (`FlowStudioApp`, `WorkflowConnectorsPage` và toàn bộ action đọc/chạy `dxosAutomations`), gắn ACL cho `dxosDmn:listTables`, chuẩn hóa `403` cross-org ở `dxosApiKeys:list`, khóa `dxosAi:surfaceEvents` theo `${organizationId}::${portalSlug}`, và thêm `redirect: 'error'` + DNS SSRF guard cho `ai-llm-health.js`.
+  - Buộc `NODERED_ADMIN_PASS_HASH` fail-closed trên production + mã hóa AES-256-CTR `flows_cred.json`; hoàn thiện `scripts/pitr-backup.mjs --backend=local-gz` & `pitr-archive.sh` cho WAL `.gz`; bỏ trigger CI chạy trùng `feat/**` push+PR trong `.github/workflows/ci.yml` & `codeql.yml` (nâng `codeql-action@v4`); và sửa lệnh demo `pnpm acceptance:broker-automation-builder` + số liệu tài liệu.
+
+- **Auth, Onboarding, Public Portals & Mobile Field PWA (`/v/mobile`) (`P0-02`, `P0-03`, `P0-05`, `P0-10`, `P1-12`, `P1-15`, `P1-16`, `P2-04`, `P3-01`, `P3-05`):**
+  - Chuyển lỗi đồng bộ `400/403/404/409/422` trên `/v/mobile` Outbox sang trạng thái **`quarantined`** (cho sửa mã đơn / xuất JSON dự phòng, tuyệt đối không xóa mất ePOD), giải mã `exp` JWT + dừng ngay ở lỗi `401` đầu tiên + giữ nguyên ePOD khi hết phiên, thêm hỗ trợ `gpsUnavailable` kho lạnh, giao diện xử lý `409 Conflict`, Outbox cho sự cố/ticket, ẩn Digital Twin theo ACL, SSR `<link rel="manifest">` + PNG `192/512` + nút chạm `>= 44px` + ngăn AI `100dvh`.
+  - Xử lý an toàn QR `/v/track/:code?verify=...` trên cả SSR & React (xác thực chữ ký Ed25519 công khai không vượt rào `trackingToken` cho dữ liệu ePOD/PII, có nút ẩn/hiện mã); nâng cấp `/v/form/:slug` hỗ trợ tệp đính kèm, tra cứu thủ công, nút `"Gửi hồ sơ khác"` và lỗi tiếng Việt.
+  - Tự động chuyển hướng `root` từ `/admin` → `/admin/lattice-workspace`, bổ sung Setup Checklist cho Blank-Slate, tắt `401` thừa trên `/signin` + Việt hóa lỗi đăng nhập, trả `200` cảnh báo sạch cho `enterpriseAuth:configuration` + hoàn thiện `MappingSettings`/`client-v2`, và gắn breadcrumb `"Quay lại Workspace v2"` cho `/lattice/*`.
+
+- **12 Native BlockModels, P.A.R.A. RAG/OCR, DX-OS AI Studio, Control Studio & LatticeFlow v2 (`P0-04`, `P1-01`..`P1-14`, `P2-07`..`P2-09`, `P3-04`):**
+  - Sửa `DxosParaVaultView` hiển thị đúng `contentMarkdown` có phân trang; bổ sung `dxosWms:releaseLotByQa` & chọn `organizationId` cho `root` ở `WmsOps`, CTA duyệt trực tiếp trên `AiProposal`/`WorkflowTasks`, đẩy `BiChart aggregateQuery` & `Ctrl+K globalSearch` xuống SQL có tham số, bật `minify: true` cho bundle `plugin-dxos-blocks` & `plugin-dxos-studio`.
+  - Khắc phục OCR-to-Record (`latticeStockLots` giữ đúng `qtyOnHand`/`productName`/`lotCode` user sửa); lọc `status = 'active'` trong Hybrid RAG, trả rỗng khi không khớp token, mở chiều `pgvector` linh hoạt `8..8192`, che PII `doc.summary` và báo lỗi rõ với PDF mã hóa/scan.
+  - Đóng gói đủ **`163` ca Eval** vào runtime Eval Lab, đồng bộ lọc Audit Log, bổ sung `executionResult`/`expiresAt`/`failed`/`executing` ở HITL, giới hạn `rollbackEnterpriseApp` theo `blockUids` của app, thêm `dxosAi:listLlmServices`, tắt spam `503 local-9router` và thêm thẻ lỗi + nút `"Thử lại"` cho AI Chat.
+  - Xây dựng giao diện hoàn chỉnh cho **Omnichannel Notify (`dxosNotify`, `notify-panel.js`)**, ô `options` + **`dxosForms:listSubmissions` Viewer** cho Public Form Builder, hỗ trợ DMN `UNIQUE`/`PRIORITY` + mô phỏng bản nháp, giữ nguyên badge đếm cả 4 nguồn + `review` + Policy Drawer cho Unified Approval Inbox, PKI `expectedKeyId` + `rotateKey` + xuất Merkle JSON, sửa GitOps Bundle v3 self-roundtrip (`ldx_manager` + `latticeConnectors` + upload file + cây Diff), nút Copy PAT & xem Outbox payload, sửa clip ngang & deep-link `?tab=dmn`.
+  - Nâng cấp LatticeFlow v2: con trỏ resume bền vững `loopCursor` cho `control.loop` chứa HITL/delay, `control.merge` `first_completed` không chặn, full schema `ai.agent`, bộ dựng điều kiện/ánh xạ theo dòng cho `if`/`switch`/`transform`, đồng bộ validator tiếng Việt client/server và sửa múi giờ `toggleRule`.
+  - Bổ sung tài liệu hướng dẫn tự kiểm thử E2E toàn hệ thống [`docs/E2E_TESTING_GUIDE_HUNG.md`](docs/E2E_TESTING_GUIDE_HUNG.md); nghiệm thu **`124/124` live Docker Playwright/API E2E PASS**, Tier 5 **`NO_GAPS`**, **`2,509/2,509`** unit/integration tests (`1,128` Vitest + `1,381` Node) và **`163/163` (100%)** NL Eval.
+
 ## [0.4.1] — 2026-11-26 — Deep System Audit, End-to-End Feature Completion & Multi-Portal UX Upgrade
 
 - **M1 — Hạ tầng, Xác thực Công khai, Enterprise Auth & 257/257 SBOM License Resolution:**

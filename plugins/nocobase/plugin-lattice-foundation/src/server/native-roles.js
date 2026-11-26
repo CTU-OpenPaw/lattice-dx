@@ -88,4 +88,67 @@ async function installIncidentPortalReadGrants(db) {
     }
   });
 }
-module.exports={rolePresets,installRolePresets,migrateUnusedLegacyRoles,isLegacyPreset,installIncidentPortalReadGrants};
+async function installIncidentManagerActionGrants(db) {
+  if (!db || typeof db.getRepository !== 'function' || typeof db.sequelize?.transaction !== 'function') return;
+  const roles = db.getRepository('roles');
+  const resources = db.getRepository('dataSourcesRolesResources');
+  if (!roles || !resources) return;
+  const viewFields = ['id', 'code', 'name', 'severity', 'status', 'assetId', 'assetEntityId'];
+  const writeFields = fieldsFor('latticeIncidentCases').filter((field) => !protectedWrites.has(field));
+  const actionsRepo = db.getRepository('dataSourcesRolesResourcesActions');
+  await db.sequelize.transaction(async (transaction) => {
+    for (const roleName of ['ldx_manager', 'ldx_admin']) {
+      if (!(await roles.findOne({ filter: { name: roleName }, transaction }))) continue;
+      const filter = { name: 'latticeIncidentCases', roleName, dataSourceKey: 'main' };
+      const existing = await resources.findOne({ filter, appends: ['actions'], transaction });
+      if (!existing) {
+        await resources.create({
+          values: {
+            ...filter,
+            usingActionsConfig: true,
+            actions: [
+              { name: 'view', fields: viewFields },
+              { name: 'create', fields: writeFields },
+              { name: 'update', fields: writeFields },
+            ],
+          },
+          transaction,
+        });
+        continue;
+      }
+      const rawActions = typeof existing.get === 'function' ? existing.get('actions') : existing.actions;
+      const normalized = (Array.isArray(rawActions) ? rawActions : []).map((a) => {
+        const plain = typeof a?.toJSON === 'function' ? a.toJSON() : a;
+        return typeof plain === 'string'
+          ? { name: plain }
+          : {
+              name: plain?.name,
+              ...(Array.isArray(plain?.fields) ? { fields: [...plain.fields] } : {}),
+              ...(plain?.scope ? { scope: plain.scope } : {}),
+              ...(plain?.scopeId != null ? { scopeId: plain.scopeId } : {}),
+            };
+      }).filter((a) => Boolean(a.name));
+      const missing = [];
+      if (!normalized.some((a) => a.name === 'view')) missing.push({ name: 'view', fields: viewFields });
+      if (!normalized.some((a) => a.name === 'create')) missing.push({ name: 'create', fields: writeFields });
+      if (!normalized.some((a) => a.name === 'update')) missing.push({ name: 'update', fields: writeFields });
+      if (!missing.length) continue;
+      const nextActions = [...normalized, ...missing];
+      if (typeof resources.update === 'function') {
+        await resources.update({
+          filter,
+          values: { usingActionsConfig: true, actions: nextActions },
+          updateAssociationValues: ['actions'],
+          transaction,
+        });
+      } else if (actionsRepo && typeof actionsRepo.create === 'function' && existing.id != null) {
+        for (const act of missing) {
+          await actionsRepo.create({ values: { ...act, rolesResourceId: existing.id }, transaction });
+        }
+      } else if (Array.isArray(existing.actions)) {
+        existing.actions.push(...missing);
+      }
+    }
+  });
+}
+module.exports={rolePresets,installRolePresets,migrateUnusedLegacyRoles,isLegacyPreset,installIncidentPortalReadGrants,installIncidentManagerActionGrants};

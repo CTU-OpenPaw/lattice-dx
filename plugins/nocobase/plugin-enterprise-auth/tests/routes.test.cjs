@@ -271,3 +271,69 @@ test('callback reconciles and removes managed ldx_* roles when Keycloak user has
     else process.env.DX_NATIVE_AUTH_GROUP_ROLE_MAP=prevMap;
   }
 });
+
+test('configuration returns HTTP 200 configured:false warning on invalid/mismatched env, and link returns 400 instead of 500',async()=>{
+  const prevInternal=process.env.DX_NATIVE_AUTH_INTERNAL_ISSUER;
+  process.env.DX_NATIVE_AUTH_INTERNAL_ISSUER='http://keycloak:8080/other-realm';
+  try{
+    const f=fixture();
+    const cfgCtx=f.ctx();
+    await f.actions.configuration(cfgCtx);
+    assert.equal(cfgCtx.body.configured,false);
+    assert.equal(cfgCtx.body.issuer,'http://localhost:8081/realms/lattice');
+    assert.equal(cfgCtx.body.clientId,'dx-native');
+    assert.equal(cfgCtx.body.callback,'http://localhost:13000/api/enterpriseAuth:callback');
+    assert.match(cfgCtx.body.warning,/Internal transport|keycloak/i);
+
+    const linkCtx=f.ctx();
+    linkCtx.method='POST';
+    linkCtx.action.params.values={authenticator:'native-keycloak',subject:'kc-sub-99',userId:'12'};
+    await assert.rejects(()=>f.actions.link(linkCtx),{status:400});
+  }finally{
+    if(prevInternal===undefined)delete process.env.DX_NATIVE_AUTH_INTERNAL_ISSUER;
+    else process.env.DX_NATIVE_AUTH_INTERNAL_ISSUER=prevInternal;
+  }
+});
+
+test('listLinkTargets enforces root and returns authenticators + users with employee/org info, and listMappings enriches rows',async()=>{
+  const items=new Map();
+  const cache={get:async k=>items.get(k),set:async(k,v)=>items.set(k,v),del:async k=>items.delete(k)};
+  const mappings=[
+    {id:1,authenticator:'native-keycloak',uuid:'kc-1',userId:12,meta:{issuer:'http://localhost:8081/realms/lattice'},createdAt:'2026-11-22T00:00:00Z'},
+  ];
+  let role='root';
+  const app={
+    db:{
+      getRepository:name=>{
+        if(name==='authenticators')return {find:async()=>[{name:'native-keycloak',title:'Keycloak SSO',enabled:true,authType:'lattice-keycloak'}]};
+        if(name==='usersAuthenticators')return {find:async()=>mappings};
+        if(name==='users')return {find:async()=>[{id:12,username:'driver.a',nickname:'Nguyễn Văn A',email:'driver.a@lattice.local'}]};
+        if(name==='latticeEmployees')return {find:async()=>[{id:8,userId:12,code:'EMP-012',name:'Nguyễn Văn A',organizationId:'org-coldchain',active:true}]};
+        return {find:async()=>[]};
+      },
+    },
+    lockManager:{runExclusive:async(k,fn)=>fn()},
+  };
+  const {createActions}=load('routes.js',{'./oidc':{createOidc:()=>({})}});
+  const actions=createActions(app,cache,Symbol('v'));
+
+  role='ldx_employee';
+  const deniedCtx={method:'GET',query:{},action:{params:{values:{}}},state:{currentUser:{id:2},currentRole:role},set:()=>{},throw(s,m){throw Object.assign(Error(m),{status:s});}};
+  await assert.rejects(()=>actions.listLinkTargets(deniedCtx),{status:403});
+
+  role='root';
+  const targetsCtx={method:'GET',query:{},action:{params:{values:{}}},state:{currentUser:{id:1},currentRole:role},set:()=>{},throw(s,m){throw Object.assign(Error(m),{status:s});}};
+  await actions.listLinkTargets(targetsCtx);
+  assert.equal(targetsCtx.body.authenticators.length,1);
+  assert.equal(targetsCtx.body.authenticators[0].name,'native-keycloak');
+  assert.equal(targetsCtx.body.users.length,1);
+  assert.equal(targetsCtx.body.users[0].employeeCode,'EMP-012');
+  assert.equal(targetsCtx.body.users[0].organizationId,'org-coldchain');
+
+  const listCtx={method:'GET',query:{},action:{params:{values:{}}},state:{currentUser:{id:1},currentRole:role},set:()=>{},throw(s,m){throw Object.assign(Error(m),{status:s});}};
+  await actions.listMappings(listCtx);
+  assert.equal(listCtx.body.items[0].username,'driver.a');
+  assert.equal(listCtx.body.items[0].email,'driver.a@lattice.local');
+  assert.equal(listCtx.body.items[0].employeeName,'Nguyễn Văn A');
+  assert.equal(listCtx.body.items[0].organizationId,'org-coldchain');
+});

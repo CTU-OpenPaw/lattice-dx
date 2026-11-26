@@ -1,6 +1,6 @@
 # NocoBase plugins
 
-Thư mục này chứa trọn bộ **7 plugin gốc chuẩn `Apache-2.0` (`0.4.1`)** do CTU-OpenPaw phát triển cho **LatticeDX** trên host runtime **NocoBase `2.2.50`**, khai báo `"nocobase": { "sdkProvidedByHost": true }`, giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`), và kèm đầy đủ `LICENSE` + `README.md` riêng cho từng plugin:
+Thư mục này chứa trọn bộ **7 plugin gốc chuẩn `Apache-2.0` (`0.4.2`)** do CTU-OpenPaw phát triển cho **LatticeDX** trên host runtime **NocoBase `2.2.50`**, khai báo `"nocobase": { "sdkProvidedByHost": true }`, giữ nguyên nhận diện **Điều 5.2 NocoBase** (`Powered by NocoBase`, `v2.2.50`, `https://www.nocobase.com`, `License settings`), và kèm đầy đủ `LICENSE` + `README.md` riêng cho từng plugin:
 
 - `@latticedx/plugin-action-bridge` (`action-bridge/`)
 - `@latticedx/plugin-lattice-foundation` (`plugin-lattice-foundation/`)

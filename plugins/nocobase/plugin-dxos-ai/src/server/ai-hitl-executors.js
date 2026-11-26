@@ -233,7 +233,16 @@ async function assertApproverCollectionUpdateAcl(targetDb, ctx, actor, collectio
   throw failTool('DXOS_ACL_DENIED', 403, `Vai trò hiện tại không có quyền cập nhật (update) trên ${cols.join(', ')}.`);
 }
 
-async function runInOptionalTx(targetDb, fn) {
+async function runInOptionalTx(targetDb, organizationId, fn) {
+  if (typeof fn !== 'function') throw new TypeError('runInOptionalTx requires a callback function.');
+  if (organizationId) {
+    const pgRls = (() => {
+      try { return require('./ai-rls').loadFoundationPgRls?.(); } catch { return null; }
+    })();
+    if (pgRls && typeof pgRls.canUsePgRlsSession === 'function' && pgRls.canUsePgRlsSession(targetDb)) {
+      return runWithTenantRls(targetDb, organizationId, fn);
+    }
+  }
   if (typeof targetDb?.sequelize?.transaction === 'function') {
     return targetDb.sequelize.transaction(async (transaction) => fn(transaction || null));
   }
@@ -339,7 +348,7 @@ async function executeTwinSetpointApproval(targetDb, ctx, actor, row, rawArgs) {
   const cleanPatch = validateFallbackDesiredPatch(desiredPatch);
   const resolvedEntityId = assetEntityId || `urn:ngsi-ld:Asset:${row.organizationId}:native:${assetId}`;
 
-  return runInOptionalTx(targetDb, async (transaction) => {
+  return runInOptionalTx(targetDb, row.organizationId, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
     let targetShadow = existingShadow;
     if (!targetShadow && typeof shadowRepo.findOne === 'function') {
@@ -496,7 +505,7 @@ async function executeWmsHoldLotApproval(targetDb, ctx, actor, row, rawArgs) {
   }
 
   if (!lotRepo) throw failTool('WMS_REPO_UNAVAILABLE', 503, 'Kho lô hàng (latticeStockLots) chưa sẵn sàng.');
-  return runInOptionalTx(targetDb, async (transaction) => {
+  return runInOptionalTx(targetDb, row.organizationId, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
     const filter = lotId != null ? { organizationId: row.organizationId, id: lotId } : { organizationId: row.organizationId, lotCode };
     const lot = typeof lotRepo.findOne === 'function' ? await lotRepo.findOne({ filter, ...txOpt }) : null;
@@ -580,7 +589,7 @@ async function executeAlarmActionApproval(targetDb, ctx, actor, row, rawArgs) {
     }
   }
 
-  return runInOptionalTx(targetDb, async (transaction) => {
+  return runInOptionalTx(targetDb, row.organizationId, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
     const targetId = val(alarmRow, 'id');
     const freshAlarm = typeof incRepo.findOne === 'function' && targetId != null
@@ -854,10 +863,11 @@ function createHitlDecisionHelpers({ resolveDb, readActionPayload }) {
       if (row.requesterUserId != null && row.organizationId) {
         const empRepo = targetDb?.getRepository?.('latticeEmployees');
         if (empRepo && typeof empRepo.find === 'function') {
-          const empRows = (await empRepo.find({
+          const empRows = (await runWithTenantRls(targetDb, row.organizationId, (transaction) => empRepo.find({
             filter: { userId: Number(row.requesterUserId), organizationId: row.organizationId, active: true },
             limit: 5,
-          })) || [];
+            ...(transaction ? { transaction } : {}),
+          }))) || [];
           const matchedEmp = empRows.find(
             (e) => Number(val(e, 'userId')) === Number(row.requesterUserId)
               && val(e, 'organizationId') === row.organizationId

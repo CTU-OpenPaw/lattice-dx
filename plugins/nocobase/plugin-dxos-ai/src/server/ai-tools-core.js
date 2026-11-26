@@ -17,8 +17,7 @@ const {
   estimateTokens,
   normalizeTokenUsage,
   estimateCostUsd,
-  checkAndConsumeAiQuota,
-  hydrateQuotaBucketFromDb,
+  checkAndConsumeAiQuotaPersistent,
   recordQuotaUsagePersistent,
 } = require('./ai-governance');
 const { createBuilderTools } = require('./ai-builder-tools');
@@ -331,8 +330,7 @@ function createAuditedTool(spec) {
           }
         }
         if (!isHitlApprovedReplay) {
-          await hydrateQuotaBucketFromDb(db, actor.organizationId);
-          checkAndConsumeAiQuota(actor, { estimatedPromptTokens: promptTokens, env: process.env });
+          await checkAndConsumeAiQuotaPersistent(db, actor, { estimatedPromptTokens: promptTokens, env: process.env });
         }
         let normalizedRawArgs = rawArgs;
         if (typeof normalizedRawArgs === 'string' && normalizedRawArgs.trim().startsWith('{')) {

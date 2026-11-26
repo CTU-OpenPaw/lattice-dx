@@ -456,6 +456,7 @@ test('Caddyfile, APISIX prod config, Postgres least-privilege/PITR, and Keycloak
   assert.match(nginxRoutesSh, /location = \/\.well-known\/agent-card\.json/);
   assert.match(nginxRoutesSh, /location \^~ \/v\/form/);
   assert.match(nginxRoutesSh, /location \^~ \/v\/track/);
+  assert.match(nginxRoutesSh, /location \^~ \/v\/mobile/);
   assert.match(nginxRoutesSh, /location \^~ \/track/);
   assert.match(nginxRoutesSh, /location \^~ \/form[\s\S]*absolute_redirect off;[\s\S]*return 302 \/v\$request_uri;/);
   assert.match(nginxRoutesSh, /nginx -t/);

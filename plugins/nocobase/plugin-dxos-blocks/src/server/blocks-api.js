@@ -28,7 +28,7 @@ const {
   runBulkImportDryRun,
   commitBulkImport,
 } = require('./bulk-import');
-const { runWithOptionalRls } = require('./blocks-rls');
+const { runWithOptionalRls, loadFoundationPgRls } = require('./blocks-rls');
 
 const ALLOWED_PROPOSAL_COLLECTIONS = new Set([
   'latticeAssets',
@@ -353,13 +353,257 @@ const OWN_SCOPED_COLLECTIONS = new Set(['latticeRequests', 'latticeOrders', 'lat
 const ORG_WIDE_PROPOSAL_ROLES = new Set(['root', 'admin', 'ldx_admin', 'ldx_director', 'ldx_manager', 'ldx_dispatcher']);
 
 const GLOBAL_SEARCH_SPECS = [
-  { collection: 'latticeRequests', category: 'Yêu cầu mua sắm', path: '/p/procurement' },
-  { collection: 'latticeOrders', category: 'Đơn Logistics', path: '/p/logistics' },
-  { collection: 'latticeAssets', category: 'Tài sản', path: '/p/procurement' },
-  { collection: 'latticeIncidentCases', category: 'Sự cố IoT', path: '/p/incidents' },
-  { collection: 'latticeServiceTickets', category: 'Dịch vụ nội bộ', path: '/p/services' },
-  { collection: 'latticeParaDocuments', category: 'Tài liệu P.A.R.A.', path: '/p/services' },
+  {
+    collection: 'latticeRequests',
+    category: 'Yêu cầu mua sắm',
+    path: '/p/procurement',
+    searchCols: ['code', 'name', 'description'],
+    titleCol: 'name',
+    descCol: 'description',
+  },
+  {
+    collection: 'latticeOrders',
+    category: 'Đơn Logistics',
+    path: '/p/logistics',
+    searchCols: ['code', 'name', 'description'],
+    titleCol: 'name',
+    descCol: 'description',
+  },
+  {
+    collection: 'latticeAssets',
+    category: 'Tài sản',
+    path: '/p/procurement',
+    searchCols: ['code', 'name'],
+    titleCol: 'name',
+    descCol: null,
+  },
+  {
+    collection: 'latticeIncidentCases',
+    category: 'Sự cố IoT',
+    path: '/p/incidents',
+    searchCols: ['code', 'name'],
+    titleCol: 'name',
+    descCol: null,
+  },
+  {
+    collection: 'latticeServiceTickets',
+    category: 'Dịch vụ nội bộ',
+    path: '/p/services',
+    searchCols: ['code', 'name', 'description'],
+    titleCol: 'name',
+    descCol: 'description',
+  },
+  {
+    collection: 'latticeParaDocuments',
+    category: 'Tài liệu P.A.R.A.',
+    path: '/p/services',
+    searchCols: ['code', 'title', 'summary', 'searchText'],
+    titleCol: 'title',
+    descCol: 'summary',
+    activeOnly: true,
+  },
 ];
+
+const SAFE_SQL_IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/;
+const VI_ACCENT_FROM = 'àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ';
+const VI_ACCENT_TO =   'aaaaaaaaaaaaaaaaaeeeeeeeeeeeiiiiiooooooooooooooooouuuuuuuuuuuyyyyyd';
+
+function escapeSqlLikePattern(raw) {
+  return String(raw ?? '').replace(/[\\%_]/g, (ch) => `\\${ch}`);
+}
+
+function quoteSqlIdent(name) {
+  const clean = String(name || '').trim();
+  if (!SAFE_SQL_IDENT_RE.test(clean)) {
+    throw fail('DXOS_INVALID_FIELD', 400, `Định danh SQL "${clean}" không hợp lệ.`);
+  }
+  return `"${clean}"`;
+}
+
+function canUsePgSqlPath(db, collection) {
+  if (typeof db?.sequelize?.query !== 'function') return false;
+  if (typeof db.sequelize.getDialect === 'function' && db.sequelize.getDialect() !== 'postgres') return false;
+  const model = db?.getModel?.(collection);
+  return Boolean(model && typeof model.getTableName === 'function');
+}
+
+function resolvePgTableAndCols(db, collection) {
+  const model = db.getModel(collection);
+  const rawTbl = model.getTableName();
+  const schemaName = rawTbl && typeof rawTbl === 'object' ? rawTbl.schema : null;
+  const tableName = typeof rawTbl === 'string' ? rawTbl : rawTbl?.tableName;
+  if (!SAFE_SQL_IDENT_RE.test(String(tableName || ''))) {
+    throw fail('DXOS_COLLECTION_FORBIDDEN', 403);
+  }
+  const tableSql = schemaName && SAFE_SQL_IDENT_RE.test(String(schemaName))
+    ? `${quoteSqlIdent(schemaName)}.${quoteSqlIdent(tableName)}`
+    : quoteSqlIdent(tableName);
+  const rawAttrs = model?.rawAttributes && typeof model.rawAttributes === 'object' ? model.rawAttributes : null;
+  const getColSql = (fname) => {
+    const attr = rawAttrs && Object.hasOwn(rawAttrs, fname) ? rawAttrs[fname] : null;
+    const phys = String(attr?.field || fname).trim();
+    return { phys, sql: quoteSqlIdent(phys), attr };
+  };
+  return { tableSql, rawAttrs, getColSql };
+}
+
+function extractSqlRows(raw) {
+  return Array.isArray(raw?.[0]) ? raw[0] : (Array.isArray(raw) ? raw : []);
+}
+
+async function runInOptionalSavepoint(db, transaction, fn) {
+  const pgRls = loadFoundationPgRls();
+  if (transaction && pgRls && typeof pgRls.runInRlsSavepoint === 'function') {
+    return pgRls.runInRlsSavepoint(db, fn);
+  }
+  return fn(transaction || null);
+}
+
+function compileAggregateSqlWhere({ effectiveOrg, enforceOwnScope, ownerClauses, safeFilter, getColSql, bind }) {
+  const topParts = [];
+  if (effectiveOrg) {
+    topParts.push(`${getColSql('organizationId').sql} = ${bind(effectiveOrg)}`);
+  }
+  if (enforceOwnScope) {
+    if (Array.isArray(ownerClauses) && ownerClauses.length) {
+      const ownerParts = ownerClauses.map((cl) => {
+        const [[f, v]] = Object.entries(cl);
+        return `${getColSql(f).sql} = ${bind(v)}`;
+      });
+      topParts.push(`(${ownerParts.join(' OR ')})`);
+    } else {
+      topParts.push('1=0');
+    }
+  }
+
+  const compileColRef = (colObj) => {
+    if (!colObj || typeof colObj !== 'object' || typeof colObj.$col !== 'string' || !colObj.$col.trim()) {
+      return null;
+    }
+    return getColSql(colObj.$col.trim()).sql;
+  };
+
+  const compileFieldExpr = (fieldSql, cond) => {
+    if (cond === null) return `${fieldSql} IS NULL`;
+    if (cond === undefined) return '1=1';
+    if (typeof cond !== 'object' || cond instanceof Date) {
+      return `${fieldSql} = ${bind(cond instanceof Date ? cond.toISOString() : cond)}`;
+    }
+    if (Array.isArray(cond)) {
+      if (!cond.length) return '1=0';
+      return `${fieldSql} IN (${cond.map((v) => bind(v)).join(', ')})`;
+    }
+    const entries = Object.entries(cond);
+    if (!entries.length) return '1=1';
+    const subParts = [];
+    for (const [opKey, opVal] of entries) {
+      if (opKey === '$eq') {
+        const refSql = compileColRef(opVal);
+        if (refSql) subParts.push(`${fieldSql} = ${refSql}`);
+        else if (opVal === null) subParts.push(`${fieldSql} IS NULL`);
+        else subParts.push(`${fieldSql} = ${bind(opVal)}`);
+      } else if (opKey === '$ne') {
+        const refSql = compileColRef(opVal);
+        if (refSql) subParts.push(`${fieldSql} IS DISTINCT FROM ${refSql}`);
+        else if (opVal === null) subParts.push(`${fieldSql} IS NOT NULL`);
+        else subParts.push(`${fieldSql} IS DISTINCT FROM ${bind(opVal)}`);
+      } else if (opKey === '$gt' || opKey === '$gte' || opKey === '$lt' || opKey === '$lte') {
+        const cmpMap = { $gt: '>', $gte: '>=', $lt: '<', $lte: '<=' };
+        const refSql = compileColRef(opVal);
+        if (refSql) subParts.push(`${fieldSql} ${cmpMap[opKey]} ${refSql}`);
+        else subParts.push(`${fieldSql} ${cmpMap[opKey]} ${bind(opVal)}`);
+      } else if (opKey === '$in') {
+        if (!Array.isArray(opVal)) return null;
+        if (!opVal.length) subParts.push('1=0');
+        else subParts.push(`${fieldSql} IN (${opVal.map((v) => bind(v)).join(', ')})`);
+      } else if (opKey === '$notIn') {
+        if (!Array.isArray(opVal)) return null;
+        if (!opVal.length) subParts.push('1=1');
+        else subParts.push(`(${fieldSql} IS NULL OR ${fieldSql} NOT IN (${opVal.map((v) => bind(v)).join(', ')}))`);
+      } else if (opKey === '$between' || opKey === '$notBetween') {
+        if (!Array.isArray(opVal) || opVal.length !== 2) return null;
+        const kw = opKey === '$between' ? 'BETWEEN' : 'NOT BETWEEN';
+        subParts.push(`${fieldSql} ${kw} ${bind(opVal[0])} AND ${bind(opVal[1])}`);
+      } else if (opKey === '$is') {
+        if (opVal === null) subParts.push(`${fieldSql} IS NULL`);
+        else if (opVal === true) subParts.push(`${fieldSql} IS TRUE`);
+        else if (opVal === false) subParts.push(`${fieldSql} IS FALSE`);
+        else return null;
+      } else if (opKey === '$like' || opKey === '$iLike') {
+        const opSql = opKey === '$like' ? 'LIKE' : 'ILIKE';
+        subParts.push(`CAST(${fieldSql} AS text) ${opSql} ${bind(String(opVal ?? ''))}`);
+      } else if (opKey === '$includes') {
+        subParts.push(`CAST(${fieldSql} AS text) ILIKE ${bind(`%${escapeSqlLikePattern(opVal)}%`)} ESCAPE '\\'`);
+      } else if (opKey === '$col') {
+        const refSql = compileColRef({ $col: opVal });
+        if (!refSql) return null;
+        subParts.push(`${fieldSql} = ${refSql}`);
+      } else {
+        return null;
+      }
+    }
+    return subParts.length === 1 ? subParts[0] : `(${subParts.join(' AND ')})`;
+  };
+
+  const compileAst = (node) => {
+    if (!node || typeof node !== 'object' || Array.isArray(node)) return '1=1';
+    const keys = Object.getOwnPropertyNames(node);
+    if (!keys.length) return '1=1';
+    const parts = [];
+    for (const k of keys) {
+      const v = node[k];
+      if (k === '$and') {
+        if (!Array.isArray(v)) return null;
+        if (!v.length) {
+          parts.push('1=1');
+        } else {
+          const subs = [];
+          for (const item of v) {
+            const c = compileAst(item);
+            if (!c) return null;
+            subs.push(c);
+          }
+          parts.push(`(${subs.join(' AND ')})`);
+        }
+      } else if (k === '$or') {
+        if (!Array.isArray(v)) return null;
+        if (!v.length) {
+          parts.push('1=0');
+        } else {
+          const subs = [];
+          for (const item of v) {
+            const c = compileAst(item);
+            if (!c) return null;
+            subs.push(c);
+          }
+          parts.push(`(${subs.join(' OR ')})`);
+        }
+      } else if (k === '$not') {
+        const inner = compileAst(v);
+        if (!inner) return null;
+        parts.push(`NOT (${inner})`);
+      } else if (k.startsWith('$')) {
+        return null;
+      } else {
+        const expr = compileFieldExpr(getColSql(k).sql, v);
+        if (!expr) return null;
+        parts.push(expr);
+      }
+    }
+    return parts.length === 1 ? parts[0] : `(${parts.join(' AND ')})`;
+  };
+
+  if (safeFilter && typeof safeFilter === 'object' && !Array.isArray(safeFilter) && Object.keys(safeFilter).length) {
+    const filterSql = compileAst(safeFilter);
+    if (!filterSql) return { supported: false, whereSql: '' };
+    topParts.push(filterSql);
+  }
+
+  return {
+    supported: true,
+    whereSql: topParts.length ? topParts.join(' AND ') : '1=1',
+  };
+}
 
 function foldSearchVi(text) {
   return String(text || '')
@@ -903,14 +1147,106 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
       const BATCH_SIZE = 200;
       const MAX_SCAN = 2000;
-      const buckets = await runWithOptionalRls(db, organizationId || null, async () => {
+      const buckets = await runWithOptionalRls(db, organizationId || null, async (transaction) => {
         const out = [];
         for (const spec of GLOBAL_SEARCH_SPECS) {
           if (!isRoot && !(await hasViewPermission(db, ctx, spec.collection, 'view'))) continue;
-          const repo = db?.getRepository?.(spec.collection);
-          if (!repo) continue;
           const enforceOwnScope = !isRoot && OWN_SCOPED_COLLECTIONS.has(spec.collection) && !ORG_WIDE_PROPOSAL_ROLES.has(activeRole);
           const ownerClauses = enforceOwnScope ? buildOwnerFilterClauses(db, spec.collection, actor) : [];
+
+          if (canUsePgSqlPath(db, spec.collection)) {
+            let sqlSucceeded = false;
+            let sqlMatched = [];
+            try {
+              sqlMatched = await runInOptionalSavepoint(db, transaction, async (spTx) => {
+                if (enforceOwnScope && !ownerClauses.length) return [];
+                const { tableSql, rawAttrs, getColSql } = resolvePgTableAndCols(db, spec.collection);
+                const hasAttr = (c) => !rawAttrs || Object.keys(rawAttrs).length === 0 || Object.hasOwn(rawAttrs, c);
+                const activeSearchCols = spec.searchCols.filter(hasAttr);
+                if (!activeSearchCols.length) return [];
+
+                const replacements = Object.create(null);
+                let pIdx = 0;
+                const bind = (v) => {
+                  const key = `p${pIdx++}`;
+                  replacements[key] = v;
+                  return `:${key}`;
+                };
+
+                const whereParts = [];
+                if (organizationId) {
+                  whereParts.push(`${getColSql('organizationId').sql} = ${bind(organizationId)}`);
+                }
+                if (spec.activeOnly) {
+                  if (hasAttr('active')) whereParts.push(`${getColSql('active').sql} = true`);
+                  if (hasAttr('status')) whereParts.push(`${getColSql('status').sql} = ${bind('active')}`);
+                }
+                if (enforceOwnScope && ownerClauses.length) {
+                  const ownerSql = ownerClauses
+                    .map((cl) => {
+                      const [[f, v]] = Object.entries(cl);
+                      return `${getColSql(f).sql} = ${bind(v)}`;
+                    })
+                    .join(' OR ');
+                  whereParts.push(`(${ownerSql})`);
+                }
+
+                const viFromParam = bind(VI_ACCENT_FROM);
+                const viToParam = bind(VI_ACCENT_TO);
+                for (const tok of tokens) {
+                  const likePat = `%${escapeSqlLikePattern(tok)}%`;
+                  const tokParam = bind(likePat);
+                  const colMatches = activeSearchCols.map((colName) => {
+                    const colSql = getColSql(colName).sql;
+                    if (colName === 'searchText') {
+                      return `COALESCE(CAST(${colSql} AS text), '') LIKE ${tokParam} ESCAPE '\\'`;
+                    }
+                    return `(COALESCE(CAST(${colSql} AS text), '') ILIKE ${tokParam} ESCAPE '\\' OR translate(lower(COALESCE(CAST(${colSql} AS text), '')), ${viFromParam}, ${viToParam}) LIKE ${tokParam} ESCAPE '\\')`;
+                  });
+                  whereParts.push(`(${colMatches.join(' OR ')})`);
+                }
+
+                const selectCols = [
+                  `${getColSql('id').sql} AS "id"`,
+                  hasAttr('code') ? `${getColSql('code').sql} AS "code"` : `''::text AS "code"`,
+                  spec.titleCol && hasAttr(spec.titleCol) ? `${getColSql(spec.titleCol).sql} AS "titleVal"` : `''::text AS "titleVal"`,
+                  hasAttr('status') ? `${getColSql('status').sql} AS "status"` : `''::text AS "status"`,
+                ];
+                const sql = `SELECT ${selectCols.join(', ')} FROM ${tableSql} WHERE ${whereParts.join(' AND ')} ORDER BY ${getColSql('id').sql} DESC LIMIT ${bind(limit)}`;
+                const rawRes = await db.sequelize.query(sql, {
+                  replacements,
+                  ...(spTx ? { transaction: spTx } : {}),
+                });
+                const rows = extractSqlRows(rawRes);
+                return rows.slice(0, limit).map((row) => {
+                  const id = row?.id;
+                  const code = String(row?.code || '').trim();
+                  const title = String(row?.titleVal || code || '').trim();
+                  return {
+                    collection: spec.collection,
+                    id,
+                    code,
+                    title: title || `#${id}`,
+                    status: String(row?.status || ''),
+                    category: spec.category,
+                    path: spec.collection === 'latticeParaDocuments' && id != null
+                      ? `/p/services?paraDocId=${encodeURIComponent(String(id))}`
+                      : spec.path,
+                  };
+                });
+              });
+              sqlSucceeded = true;
+            } catch {
+              sqlSucceeded = false;
+            }
+            if (sqlSucceeded) {
+              if (sqlMatched.length) out.push(sqlMatched);
+              continue;
+            }
+          }
+
+          const repo = db?.getRepository?.(spec.collection);
+          if (!repo) continue;
           let filter = organizationId ? { organizationId } : {};
           if (ownerClauses.length) {
             filter = organizationId
@@ -926,6 +1262,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
               limit: BATCH_SIZE,
               offset,
               sort: ['-id'],
+              ...(transaction ? { transaction } : {}),
             })) || [];
             if (!Array.isArray(rows) || !rows.length) break;
 
@@ -941,6 +1278,9 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
               if (organizationId && val(row, 'organizationId') !== organizationId) continue;
               if (enforceOwnScope && !isRecordOwnedByActor(row, actor)) continue;
+              if (spec.activeOnly && ((val(row, 'status') && val(row, 'status') !== 'active') || val(row, 'active') === false)) {
+                continue;
+              }
               const code = String(val(row, 'code') || '').trim();
               const title = String(val(row, 'title') || val(row, 'name') || code || '').trim();
               const desc = String(val(row, 'description') || val(row, 'summary') || '').trim();
@@ -1534,46 +1874,6 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       const BATCH_SIZE = 500;
       const MAX_SCAN = 5000;
 
-      const queryResult = await runWithOptionalRls(db, effectiveOrg, async (transaction) => {
-        const clauses = [];
-        if (effectiveOrg) clauses.push({ organizationId: effectiveOrg });
-        if (enforceOwnScope) {
-          const ownerClauses = buildOwnerFilterClauses(db, collection, actor);
-          if (ownerClauses.length) clauses.push({ $or: ownerClauses });
-        }
-        if (safeFilter && typeof safeFilter === 'object' && !Array.isArray(safeFilter) && Object.keys(safeFilter).length) {
-          clauses.push(safeFilter);
-        }
-        const dbFilter = clauses.length === 0 ? {} : clauses.length === 1 ? clauses[0] : { $and: clauses };
-
-        const collected = [];
-        let offset = 0;
-        let truncated = false;
-        while (collected.length < MAX_SCAN) {
-          const batch = (await repo.find({
-            filter: dbFilter,
-            limit: BATCH_SIZE,
-            offset,
-            sort: ['-id'],
-            ...(transaction ? { transaction } : {}),
-          })) || [];
-          const scopedBatch = enforceOwnScope
-            ? batch.filter((r) => isRecordOwnedByActor(r, actor))
-            : batch;
-          for (const row of scopedBatch) {
-            collected.push(row);
-            if (collected.length >= MAX_SCAN) break;
-          }
-          if (batch.length < BATCH_SIZE) break;
-          offset += BATCH_SIZE;
-          if (collected.length >= MAX_SCAN) {
-            truncated = true;
-            break;
-          }
-        }
-        return { rows: collected, truncated };
-      });
-
       const createAcc = () => ({ count: 0, nonNullCount: 0, numericCount: 0, sum: 0, min: null, max: null });
       const updateAcc = (acc, rawMetricVal) => {
         acc.count += 1;
@@ -1626,10 +1926,278 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
         return String(raw);
       };
 
+      const mFieldMeta = metricField ? fieldMap.get(metricField) : null;
+      const queryResult = await runWithOptionalRls(db, effectiveOrg, async (transaction) => {
+        const ownerClauses = enforceOwnScope ? buildOwnerFilterClauses(db, collection, actor) : [];
+
+        if (canUsePgSqlPath(db, collection)) {
+          try {
+            const sqlRes = await runInOptionalSavepoint(db, transaction, async (spTx) => {
+              const { tableSql, getColSql } = resolvePgTableAndCols(db, collection);
+              const replacements = Object.create(null);
+              let pIdx = 0;
+              const bind = (v) => {
+                const key = `p${pIdx++}`;
+                replacements[key] = v;
+                return `:${key}`;
+              };
+              const compiled = compileAggregateSqlWhere({
+                effectiveOrg,
+                enforceOwnScope,
+                ownerClauses,
+                safeFilter,
+                getColSql,
+                bind,
+              });
+              if (!compiled.supported) return null;
+
+              const whereSql = compiled.whereSql;
+              let metricSelectSql = '';
+              if (op === 'count') {
+                if (!metricField) {
+                  metricSelectSql = 'COUNT(*)::int AS "count", COUNT(*)::int AS "nonNullCount", COUNT(*)::int AS "value"';
+                } else {
+                  const mColSql = getColSql(metricField).sql;
+                  const nnExpr = `COUNT(NULLIF(CAST(${mColSql} AS text), ''))::int`;
+                  metricSelectSql = `COUNT(*)::int AS "count", ${nnExpr} AS "nonNullCount", ${nnExpr} AS "value"`;
+                }
+              } else {
+                const mColInfo = getColSql(metricField);
+                const mAttrType = String(mColInfo.attr?.type?.key || mColInfo.attr?.type || mFieldMeta?.type || '').toLowerCase();
+                const isNativePgNum = mFieldMeta?.type !== 'formula'
+                  && ['integer', 'bigint', 'float', 'double', 'decimal', 'real', 'numeric', 'number'].includes(mAttrType);
+                const numExpr = isNativePgNum
+                  ? `CAST(${mColInfo.sql} AS double precision)`
+                  : `CASE WHEN trim(CAST(${mColInfo.sql} AS text)) ~ '^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)$' THEN CAST(trim(CAST(${mColInfo.sql} AS text)) AS double precision) END`;
+                const valExpr = op === 'sum'
+                  ? `COALESCE(SUM(${numExpr}), 0)::double precision`
+                  : op === 'avg'
+                    ? `COALESCE(AVG(${numExpr}), 0)::double precision`
+                    : op === 'min'
+                      ? `COALESCE(MIN(${numExpr}), 0)::double precision`
+                      : `COALESCE(MAX(${numExpr}), 0)::double precision`;
+                metricSelectSql = [
+                  'COUNT(*)::int AS "count"',
+                  `COUNT(${numExpr})::int AS "numericCount"`,
+                  `COALESCE(SUM(${numExpr}), 0)::double precision AS "sum"`,
+                  `COALESCE(AVG(${numExpr}), 0)::double precision AS "avg"`,
+                  `COALESCE(MIN(${numExpr}), 0)::double precision AS "min"`,
+                  `COALESCE(MAX(${numExpr}), 0)::double precision AS "max"`,
+                  `${valExpr} AS "value"`,
+                ].join(', ');
+              }
+
+              const accFromSqlRow = (row) => {
+                const count = Number(row?.count || 0);
+                if (op === 'count') {
+                  const nonNullCount = Number(row?.nonNullCount ?? row?.value ?? count);
+                  return { count, nonNullCount, numericCount: 0, sum: 0, min: null, max: null };
+                }
+                const numericCount = Number(row?.numericCount || 0);
+                return {
+                  count,
+                  nonNullCount: count,
+                  numericCount,
+                  sum: Number(row?.sum || 0),
+                  min: numericCount > 0 ? Number(row?.min || 0) : null,
+                  max: numericCount > 0 ? Number(row?.max || 0) : null,
+                };
+              };
+
+              const summaryRaw = await db.sequelize.query(
+                `SELECT ${metricSelectSql} FROM ${tableSql} WHERE ${whereSql}`,
+                { replacements: { ...replacements }, ...(spTx ? { transaction: spTx } : {}) },
+              );
+              const summaryRow = extractSqlRows(summaryRaw)[0] || {};
+              const summaryAcc = accFromSqlRow(summaryRow);
+              const totalRows = summaryAcc.count;
+
+              let series = [];
+              let groupCount = 0;
+              let pivotMatrix = null;
+
+              if (groupBy) {
+                const gColSql = getColSql(groupBy).sql;
+                const groupExpr = `COALESCE(NULLIF(CAST(${gColSql} AS text), ''), '(Trống)')`;
+                const limitParam = bind(limit);
+                const groupRaw = await db.sequelize.query(
+                  `SELECT ${groupExpr} AS "groupKey", ${metricSelectSql}, COUNT(*) OVER()::int AS "totalGroups" FROM ${tableSql} WHERE ${whereSql} GROUP BY 1 ORDER BY "value" DESC, "groupKey" ASC LIMIT ${limitParam}`,
+                  { replacements: { ...replacements }, ...(spTx ? { transaction: spTx } : {}) },
+                );
+                const groupRows = extractSqlRows(groupRaw);
+                groupCount = groupRows.length ? Number(groupRows[0].totalGroups || groupRows.length) : 0;
+                series = groupRows.slice(0, limit).map((r) => {
+                  const key = normGroupKey(r?.groupKey);
+                  const stats = finalizeAcc(accFromSqlRow(r));
+                  return { key, label: key, ...stats };
+                });
+
+                if (chartType === 'pivot' && secondaryGroupBy) {
+                  const rowsList = series.map((s) => s.key);
+                  const secColSql = getColSql(secondaryGroupBy).sql;
+                  const secExpr = `COALESCE(NULLIF(CAST(${secColSql} AS text), ''), '(Trống)')`;
+                  let colsList = [];
+                  if (rowsList.length > 0) {
+                    const colLimitParam = bind(limit);
+                    const colRaw = await db.sequelize.query(
+                      `SELECT ${secExpr} AS "colKey" FROM ${tableSql} WHERE ${whereSql} GROUP BY 1 ORDER BY COUNT(*) DESC, "colKey" ASC LIMIT ${colLimitParam}`,
+                      { replacements: { ...replacements }, ...(spTx ? { transaction: spTx } : {}) },
+                    );
+                    colsList = extractSqlRows(colRaw).map((r) => normGroupKey(r?.colKey)).slice(0, limit);
+                  }
+
+                  const pivotRowColMap = new Map();
+                  if (rowsList.length > 0 && colsList.length > 0) {
+                    const rowInParams = rowsList.map((rk) => bind(rk)).join(', ');
+                    const colInParams = colsList.map((ck) => bind(ck)).join(', ');
+                    const pivotRaw = await db.sequelize.query(
+                      `SELECT ${groupExpr} AS "rowKey", ${secExpr} AS "colKey", ${metricSelectSql} FROM ${tableSql} WHERE ${whereSql} AND ${groupExpr} IN (${rowInParams}) AND ${secExpr} IN (${colInParams}) GROUP BY 1, 2`,
+                      { replacements: { ...replacements }, ...(spTx ? { transaction: spTx } : {}) },
+                    );
+                    for (const pr of extractSqlRows(pivotRaw)) {
+                      const rk = normGroupKey(pr?.rowKey);
+                      const ck = normGroupKey(pr?.colKey);
+                      let cMap = pivotRowColMap.get(rk);
+                      if (!cMap) {
+                        cMap = new Map();
+                        pivotRowColMap.set(rk, cMap);
+                      }
+                      cMap.set(ck, accFromSqlRow(pr));
+                    }
+                  }
+
+                  const cells = Object.create(null);
+                  const rowTotals = Object.create(null);
+                  const colTotalsAcc = new Map();
+                  const grandAcc = createAcc();
+
+                  for (const rKey of rowsList) {
+                    const rowCells = Object.create(null);
+                    const colMap = pivotRowColMap.get(rKey) || new Map();
+                    const rowAcc = createAcc();
+                    for (const cKey of colsList) {
+                      const cAcc = colMap.get(cKey);
+                      const cellVal = cAcc ? finalizeAcc(cAcc).value : 0;
+                      Object.defineProperty(rowCells, cKey, { value: cellVal, enumerable: true, configurable: true, writable: true });
+                      if (cAcc) {
+                        mergeAcc(rowAcc, cAcc);
+                        let totC = colTotalsAcc.get(cKey);
+                        if (!totC) {
+                          totC = createAcc();
+                          colTotalsAcc.set(cKey, totC);
+                        }
+                        mergeAcc(totC, cAcc);
+                        mergeAcc(grandAcc, cAcc);
+                      }
+                    }
+                    Object.defineProperty(cells, rKey, { value: rowCells, enumerable: true, configurable: true, writable: true });
+                    Object.defineProperty(rowTotals, rKey, { value: finalizeAcc(rowAcc).value, enumerable: true, configurable: true, writable: true });
+                  }
+
+                  const colTotals = Object.create(null);
+                  for (const cKey of colsList) {
+                    const cAcc = colTotalsAcc.get(cKey);
+                    Object.defineProperty(colTotals, cKey, {
+                      value: cAcc ? finalizeAcc(cAcc).value : 0,
+                      enumerable: true,
+                      configurable: true,
+                      writable: true,
+                    });
+                  }
+
+                  pivotMatrix = {
+                    rowField: groupBy,
+                    colField: secondaryGroupBy,
+                    rows: rowsList,
+                    columns: colsList,
+                    cells,
+                    rowTotals,
+                    colTotals,
+                    grandTotal: finalizeAcc(grandAcc).value,
+                  };
+                }
+              }
+
+              const summary = {
+                ...finalizeAcc(summaryAcc),
+                op,
+                field: metricField || null,
+                groupCount,
+              };
+              return { sqlDone: true, series, summary, pivotMatrix, totalRows, truncated: false };
+            });
+            if (sqlRes?.sqlDone) {
+              return sqlRes;
+            }
+          } catch {
+            // Fall back cleanly to repo.find path if SQL compilation/execution fails
+          }
+        }
+
+        const clauses = [];
+        if (effectiveOrg) clauses.push({ organizationId: effectiveOrg });
+        if (enforceOwnScope && ownerClauses.length) {
+          clauses.push({ $or: ownerClauses });
+        }
+        if (safeFilter && typeof safeFilter === 'object' && !Array.isArray(safeFilter) && Object.keys(safeFilter).length) {
+          clauses.push(safeFilter);
+        }
+        const dbFilter = clauses.length === 0 ? {} : clauses.length === 1 ? clauses[0] : { $and: clauses };
+
+        const collected = [];
+        let offset = 0;
+        let truncated = false;
+        while (collected.length < MAX_SCAN) {
+          const batch = (await repo.find({
+            filter: dbFilter,
+            limit: BATCH_SIZE,
+            offset,
+            sort: ['-id'],
+            ...(transaction ? { transaction } : {}),
+          })) || [];
+          const scopedBatch = enforceOwnScope
+            ? batch.filter((r) => isRecordOwnedByActor(r, actor))
+            : batch;
+          for (const row of scopedBatch) {
+            collected.push(row);
+            if (collected.length >= MAX_SCAN) break;
+          }
+          if (batch.length < BATCH_SIZE) break;
+          offset += BATCH_SIZE;
+          if (collected.length >= MAX_SCAN) {
+            truncated = true;
+            break;
+          }
+        }
+        return { rows: collected, truncated };
+      });
+
+      if (queryResult.sqlDone) {
+        ctx.body = {
+          ok: true,
+          collection,
+          chartType,
+          series: queryResult.series,
+          summary: queryResult.summary,
+          pivotMatrix: queryResult.pivotMatrix,
+          totalRows: queryResult.totalRows,
+          meta: {
+            organizationId: effectiveOrg,
+            preview: Boolean(isRoot && !effectiveOrg),
+            groupBy: groupBy || null,
+            secondaryGroupBy: chartType === 'pivot' ? secondaryGroupBy : null,
+            metric: { op, ...(metricField ? { field: metricField } : {}) },
+            limit,
+            truncated: false,
+          },
+        };
+        return next();
+      }
+
       const totalAcc = createAcc();
       const groupMap = new Map();
       const pivotRowColMap = new Map();
-      const pivotColsSet = new Set();
+      const pivotColCounts = new Map();
 
       for (const row of queryResult.rows) {
         const rawMetricVal = metricField ? val(row, metricField) : undefined;
@@ -1646,7 +2214,7 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
 
           if (chartType === 'pivot' && secondaryGroupBy) {
             const cKey = normGroupKey(val(row, secondaryGroupBy));
-            pivotColsSet.add(cKey);
+            pivotColCounts.set(cKey, (pivotColCounts.get(cKey) || 0) + 1);
             let colMap = pivotRowColMap.get(gKey);
             if (!colMap) {
               colMap = new Map();
@@ -1684,7 +2252,10 @@ function createDxosBlocksActions(db, { brokerUrl = process.env.DX_NATIVE_CONTEXT
       let pivotMatrix = null;
       if (chartType === 'pivot') {
         const rowsList = series.map((s) => s.key);
-        const colsList = [...pivotColsSet].slice(0, limit);
+        const colsList = [...pivotColCounts.entries()]
+          .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
+          .map(([colKey]) => colKey)
+          .slice(0, limit);
         const cells = Object.create(null);
         const rowTotals = Object.create(null);
         const colTotalsAcc = new Map();

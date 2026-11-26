@@ -21,9 +21,12 @@ module.exports = require('@nocobase/database').defineCollection({
     { name: 'encryptedPrivateKey', type: 'text', allowNull: false },
     { name: 'fingerprintSha256', type: 'string', allowNull: false },
     { name: 'active', type: 'boolean', defaultValue: true },
+    { name: 'status', type: 'string', defaultValue: 'active' },
+    { name: 'retiredAt', type: 'date' },
   ],
   indexes: [
-    { name: 'uidx_lattice_pki_keys_org', fields: ['organizationId'], unique: true },
+    { name: 'uidx_lattice_pki_keys_org_key', fields: ['organizationId', 'keyId'], unique: true },
+    { name: 'idx_lattice_pki_keys_org_active', fields: ['organizationId', 'active'] },
     { name: 'idx_lattice_pki_keys_key_id', fields: ['keyId'] },
   ],
 });

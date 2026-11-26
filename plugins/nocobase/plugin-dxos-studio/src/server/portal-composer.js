@@ -702,17 +702,28 @@ async function composePortals(db, { applyBlueprint }) {
   let createdPages = 0;
   let attachedBlocks = 0;
 
-  for (const page of EXTRA_DATA_PAGES) {
-    if (typeof db.hasCollection === 'function' && !db.hasCollection(page.collection)) continue;
-    const layoutUid = `ldx-portal-${page.slug}`;
-    const linkedIds = await getLinkedIds(layoutUid);
-    if (findExistingPage(routes, layoutUid, page.groupTitle, page.title, linkedIds)) continue;
-    await applyBlueprint(buildTablePageBlueprint(layoutUid, page, `${page.slug}-${page.collection}`));
-    createdPages += 1;
-    routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
-  }
+  const setRouteSort = async (route, sortVal, { updateParentIfNotOverview = false } = {}) => {
+    if (!route || !routesRepo || typeof routesRepo.update !== 'function') return;
+    const rid = val(route, 'id');
+    if (rid != null && Number(val(route, 'sort')) !== sortVal) {
+      await routesRepo.update({ filterByTk: rid, values: { sort: sortVal } });
+    }
+    const pid = val(route, 'parentId');
+    if (pid != null) {
+      const parent = routes.find((r) => String(val(r, 'id')) === String(pid));
+      if (parent && val(parent, 'type') === 'group') {
+        const parentIsOverviewGroup = OVERVIEW_SPECS.some((o) => o.groupTitle === val(parent, 'title'));
+        if (!parentIsOverviewGroup || !updateParentIfNotOverview) {
+          if (Number(val(parent, 'sort')) !== sortVal && (!parentIsOverviewGroup || sortVal <= 10)) {
+            await routesRepo.update({ filterByTk: pid, values: { sort: sortVal } });
+          }
+        }
+      }
+    }
+  };
 
-  for (const ov of OVERVIEW_SPECS) {
+  for (let ovIdx = 0; ovIdx < OVERVIEW_SPECS.length; ovIdx += 1) {
+    const ov = OVERVIEW_SPECS[ovIdx];
     const layoutUid = `ldx-portal-${ov.slug}`;
     const linkedIds = await getLinkedIds(layoutUid);
     let pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title, linkedIds);
@@ -731,10 +742,14 @@ async function composePortals(db, { applyBlueprint }) {
       createdPages += 1;
       tabSchemaUid = res?.target?.tabSchemaUid || null;
       routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
-      if (!tabSchemaUid) {
+      if (!pageRoute) {
         const refreshedLinks = await getLinkedIds(layoutUid);
-        pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title, refreshedLinks);
+        pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title, refreshedLinks)
+          || (res?.target?.routeId != null ? routes.find((r) => String(val(r, 'id')) === String(res.target.routeId)) : null);
       }
+    }
+    if (pageRoute) {
+      await setRouteSort(pageRoute, 1);
     }
     if (!tabSchemaUid && pageRoute) {
       const pid = String(val(pageRoute, 'id'));
@@ -743,6 +758,25 @@ async function composePortals(db, { applyBlueprint }) {
     }
     if (dxosBlocksEnabled && tabSchemaUid) {
       attachedBlocks += await attachDxosBlocksToTab(db, tabSchemaUid, ov.slug, ov.blocks);
+    }
+  }
+
+  for (let extraIdx = 0; extraIdx < EXTRA_DATA_PAGES.length; extraIdx += 1) {
+    const page = EXTRA_DATA_PAGES[extraIdx];
+    if (typeof db.hasCollection === 'function' && !db.hasCollection(page.collection)) continue;
+    const layoutUid = `ldx-portal-${page.slug}`;
+    const linkedIds = await getLinkedIds(layoutUid);
+    let extraRoute = findExistingPage(routes, layoutUid, page.groupTitle, page.title, linkedIds);
+    if (!extraRoute) {
+      const bpRes = await applyBlueprint(buildTablePageBlueprint(layoutUid, page, `${page.slug}-${page.collection}`));
+      createdPages += 1;
+      routes = routesRepo ? await routesRepo.find({ appends: ['uiLayouts'] }) : routes;
+      const refreshedLinks = await getLinkedIds(layoutUid);
+      extraRoute = findExistingPage(routes, layoutUid, page.groupTitle, page.title, refreshedLinks)
+        || (bpRes?.target?.routeId != null ? routes.find((r) => String(val(r, 'id')) === String(bpRes.target.routeId)) : null);
+    }
+    if (extraRoute) {
+      await setRouteSort(extraRoute, 20 + extraIdx, { updateParentIfNotOverview: true });
     }
   }
 
@@ -763,6 +797,52 @@ async function composePortals(db, { applyBlueprint }) {
   return { createdPages, mobilePagesCreated: mobileRes.mobilePagesCreated, attachedBlocks, dxosBlocksAttached: dxosBlocksEnabled };
 }
 
+async function alignPortalOverviewRoutesSort(db) {
+  const routesRepo = db?.getRepository?.('desktopRoutes');
+  if (!routesRepo || typeof routesRepo.find !== 'function' || typeof routesRepo.update !== 'function') {
+    return { updated: 0 };
+  }
+  const linksRepo = db?.getRepository?.('desktopRoutesUiLayouts');
+  let routes = [];
+  try {
+    routes = (await routesRepo.find({ appends: ['uiLayouts'] })) || [];
+  } catch {
+    routes = (await routesRepo.find({})) || [];
+  }
+  if (!Array.isArray(routes) || routes.length === 0) {
+    return { updated: 0 };
+  }
+  const getLinkedIds = async (layoutUid) => {
+    if (!linksRepo || typeof linksRepo.find !== 'function') return new Set();
+    const rows = (await linksRepo.find({ filter: { uiLayoutUid: layoutUid } })) || [];
+    return new Set(rows.map((l) => String(val(l, 'desktopRouteId'))).filter(Boolean));
+  };
+
+  let updated = 0;
+  for (const ov of OVERVIEW_SPECS) {
+    const layoutUid = `ldx-portal-${ov.slug}`;
+    const linkedIds = await getLinkedIds(layoutUid);
+    const pageRoute = findExistingPage(routes, layoutUid, ov.groupTitle, ov.title, linkedIds)
+      || findExistingPage(routes, layoutUid, null, ov.title, linkedIds);
+    if (!pageRoute) continue;
+
+    const rid = val(pageRoute, 'id');
+    if (rid != null && Number(val(pageRoute, 'sort')) !== 1) {
+      await routesRepo.update({ filterByTk: rid, values: { sort: 1 } });
+      updated += 1;
+    }
+    const pid = val(pageRoute, 'parentId');
+    if (pid != null) {
+      const parent = routes.find((r) => String(val(r, 'id')) === String(pid));
+      if (parent && val(parent, 'type') === 'group' && Number(val(parent, 'sort')) !== 1) {
+        await routesRepo.update({ filterByTk: pid, values: { sort: 1 } });
+        updated += 1;
+      }
+    }
+  }
+  return { updated };
+}
+
 module.exports = {
   ALLOWED_DXOS_BLOCK_USES,
   COLLECTION_FIELD_GROUPS,
@@ -772,4 +852,5 @@ module.exports = {
   attachDxosBlocksToTab,
   composeMobilePortal,
   composePortals,
+  alignPortalOverviewRoutesSort,
 };

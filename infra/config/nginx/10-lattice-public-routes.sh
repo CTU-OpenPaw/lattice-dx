@@ -24,7 +24,7 @@ let raw = fs.readFileSync(confPath, "utf8");
 raw = raw.replace(/\n?[ \t]*# BEGIN LATTICEDX PUBLIC ROUTES[\s\S]*?# END LATTICEDX PUBLIC ROUTES[ \t]*\n*/g, "\n");
 raw = raw.replace(/\n?[ \t]*location = \/\.well-known\/agent-card\.json \{[\s\S]*?\n[ \t]*\}[ \t]*\n*/g, "\n");
 
-const proxyDirectives = [
+const buildProxyDirectives = (cacheControlValue) => [
   "        proxy_pass " + upstream + ";",
   "        proxy_http_version 1.1;",
   "        proxy_set_header Upgrade $http_upgrade;",
@@ -34,7 +34,7 @@ const proxyDirectives = [
   "        proxy_set_header Host $final_host;",
   "        proxy_set_header Referer $http_referer;",
   "        proxy_set_header User-Agent $http_user_agent;",
-  "        add_header Cache-Control '\''no-cache, no-store'\'';",
+  "        add_header Cache-Control '\''" + cacheControlValue + "'\'';",
   "        proxy_cache_bypass $http_upgrade;",
   "        proxy_connect_timeout 600;",
   "        proxy_send_timeout 600;",
@@ -42,9 +42,9 @@ const proxyDirectives = [
   "        send_timeout 600;",
 ];
 
-const makeProxyLocation = (matcher) => [
+const makeProxyLocation = (matcher, cacheControlValue = "no-cache, no-store") => [
   "    " + matcher + " {",
-  ...proxyDirectives,
+  ...buildProxyDirectives(cacheControlValue),
   "    }",
   "",
 ].join("\n");
@@ -54,6 +54,7 @@ const block = [
   makeProxyLocation("location = /.well-known/agent-card.json"),
   makeProxyLocation("location ^~ /v/form"),
   makeProxyLocation("location ^~ /v/track"),
+  makeProxyLocation("location ^~ /v/mobile", "no-cache"),
   makeProxyLocation("location ^~ /track"),
   "    location ^~ /form {",
   "        absolute_redirect off;",

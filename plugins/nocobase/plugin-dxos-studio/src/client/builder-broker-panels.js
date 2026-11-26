@@ -130,11 +130,11 @@ function statusTone(status) {
 
 function makeStyles() {
   return {
-    stack: { display: 'grid', gap: 14 },
-    card: { padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', background: '#ffffff', display: 'grid', gap: 12 },
-    subCard: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 10 },
-    grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10 },
-    grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 },
+    stack: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 14 },
+    card: { padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', background: '#ffffff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 12 },
+    subCard: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 10 },
+    grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, minWidth: 0 },
+    grid3: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10, minWidth: 0 },
     kpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 },
     kpiBox: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc' },
     rowBetween: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
@@ -142,10 +142,10 @@ function makeStyles() {
     label: { display: 'block', fontSize: 12, fontWeight: 600, color: '#334155', marginBottom: 4 },
     input: { width: '100%', padding: '7px 9px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box', background: '#ffffff' },
     textarea: { width: '100%', padding: 8, borderRadius: 6, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12, boxSizing: 'border-box', background: '#ffffff' },
-    tableWrap: { width: '100%', overflowX: 'auto' },
-    table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
-    th: { textAlign: 'left', padding: '7px 8px', borderBottom: '2px solid #e2e8f0', color: '#475569', background: '#f8fafc', whiteSpace: 'nowrap' },
-    td: { padding: '7px 8px', borderBottom: '1px solid #f1f5f9', color: '#0f172a', verticalAlign: 'top' },
+    tableWrap: { width: '100%', maxWidth: '100%', overflowX: 'auto', minWidth: 0 },
+    table: { width: '100%', borderCollapse: 'collapse', fontSize: 12, tableLayout: 'auto' },
+    th: { textAlign: 'left', padding: '6px 6px', borderBottom: '2px solid #e2e8f0', color: '#475569', background: '#f8fafc', whiteSpace: 'normal', wordBreak: 'break-word', fontSize: 11 },
+    td: { padding: '6px 6px', borderBottom: '1px solid #f1f5f9', color: '#0f172a', verticalAlign: 'top', wordBreak: 'break-word' },
     badge: (tone = 'neutral') => {
       const palette = {
         ok: { bg: '#dcfce7', color: '#166534', border: '#bbf7d0' },
@@ -167,8 +167,8 @@ function makeStyles() {
       };
     },
     btn: (primary = false, danger = false, disabled = false) => ({
-      padding: '7px 12px',
-      borderRadius: 8,
+      padding: '5px 9px',
+      borderRadius: 7,
       cursor: disabled ? 'not-allowed' : 'pointer',
       fontSize: 12,
       fontWeight: 600,
@@ -852,7 +852,7 @@ function createBrokerAndEventsPanel(client, React, _antd, app) {
                   h('td', { style: S.td }, h('code', null, sub.notificationEndpoint || 'dxosBroker:orionNotify')),
                   h('td', { style: S.td }, h('span', { style: S.badge(sub.active ? 'ok' : 'neutral') }, sub.active ? 'active' : 'paused')),
                   h('td', { style: S.td }, formatTs(sub.lastNotifiedAt)),
-                  h('td', { style: { ...S.td, display: 'flex', gap: 6 } },
+                  h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
                     h('button', {
                       'data-testid': `dxos-broker-orion-sub-toggle-${sub.id}`,
                       type: 'button',
@@ -1624,9 +1624,9 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
               return h('div', {
                 key: idx,
                 'data-testid': `dxos-builder-field-row-${idx}`,
-                style: { display: 'grid', gap: 6, padding: 8, borderRadius: 6, border: '1px solid #e2e8f0', background: '#ffffff' },
+                style: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, gap: 6, padding: 8, borderRadius: 6, border: '1px solid #e2e8f0', background: '#ffffff' },
               },
-                h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 140px 1fr auto auto auto', gap: 8, alignItems: 'center' } },
+                h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))', gap: 8, alignItems: 'center', minWidth: 0 } },
                   h('input', {
                     'data-testid': `dxos-builder-field-name-${idx}`,
                     type: 'text',
@@ -1719,7 +1719,7 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
                     style: S.btn(false, true),
                   }, 'Xóa'),
                 ),
-                isRel ? h('div', { style: { display: 'grid', gridTemplateColumns: isM2m ? 'repeat(4, 1fr)' : 'repeat(2, 1fr)', gap: 8 } },
+                isRel ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8, minWidth: 0 } },
                   h('input', {
                     'data-testid': `dxos-builder-field-target-${idx}`,
                     type: 'text',
@@ -1753,7 +1753,7 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
                     style: S.input,
                   }) : null,
                 ) : null,
-                isFormula ? h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 140px', gap: 8 } },
+                isFormula ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: 8, minWidth: 0 } },
                   h('input', {
                     'data-testid': `dxos-builder-field-formula-${idx}`,
                     type: 'text',
@@ -1769,7 +1769,7 @@ function createDomainBuilderAndTenantsPanel(client, React, _antd, app) {
                     style: S.input,
                   }, ['float', 'integer', 'string', 'boolean'].map((rt) => h('option', { key: rt, value: rt }, rt))),
                 ) : null,
-                !isRel && f.type !== 'boolean' && f.type !== 'json' ? h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 90px 90px 1fr', gap: 8 } },
+                !isRel && f.type !== 'boolean' && f.type !== 'json' ? h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 8, minWidth: 0 } },
                   f.type === 'string' || f.type === 'text' ? h('input', {
                     'data-testid': `dxos-builder-field-pattern-${idx}`,
                     type: 'text',

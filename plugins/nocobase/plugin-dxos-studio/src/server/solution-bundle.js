@@ -10,6 +10,7 @@
 
 const { createHash, randomBytes } = require('node:crypto');
 const net = require('node:net');
+const { loadFoundationModule } = require('./wms-dmn-shared');
 const {
   ALLOWED_FIELD_TYPES,
   ALLOWED_FORMULA_RETURN_TYPES,
@@ -30,7 +31,7 @@ const ACCEPTED_SCHEMA_VERSIONS = new Set([
   'latticedx.solution-bundle/v2',
   'latticedx.solution-bundle/v3',
 ]);
-const DEFAULT_PLATFORM_VERSION = '0.4.1';
+const DEFAULT_PLATFORM_VERSION = '0.4.2';
 const FORBIDDEN_ROLES = new Set(['root', 'admin', 'ldx_admin']);
 const SAFE_ROLE_RE = /^ldx_[a-z0-9_]{2,48}$/;
 const SAFE_PORTAL_UID_RE = /^ldx-portal-[a-z0-9-]+$/;
@@ -76,7 +77,7 @@ const ALLOWED_FLOW_MODEL_USES = new Set([
   'NativeTableBlock', 'NativeFormBlock', 'NativeDetailsBlock', 'BlockModel',
   'table', 'createForm', 'editForm', 'details', 'filterForm', 'kanban', 'chart', 'calendar', 'list', 'gridCard', 'markdown', 'actionPanel',
 ]);
-const VALID_HIT_POLICIES = new Set(['FIRST', 'COLLECT']);
+const VALID_HIT_POLICIES = new Set(['FIRST', 'UNIQUE', 'COLLECT', 'PRIORITY']);
 const VALID_SLA_PRIORITIES = new Set(['critical', 'high', 'normal', 'medium', 'low']);
 const VALID_INCIDENT_SEVERITIES = new Set(['critical', 'high', 'medium', 'low']);
 const VALID_RULE_OPERATORS = new Set([
@@ -340,7 +341,22 @@ function sanitizeCustomField(rawField) {
   };
 }
 
-async function runInTransaction(db, fn) {
+async function runInTransaction(db, fn, { organizationId = null } = {}) {
+  const pgRls = loadFoundationModule('pg-rls');
+  const activeTx = pgRls?.getActiveRlsContext?.()?.transaction || null;
+  if (activeTx && (!pgRls?.getActiveRlsContext?.()?.sequelize || pgRls.getActiveRlsContext().sequelize === db?.sequelize)) {
+    return fn(activeTx);
+  }
+  const canRls = typeof pgRls?.canUsePgRlsSession === 'function' && pgRls.canUsePgRlsSession(db);
+  const cleanOrg = organizationId != null ? String(organizationId).trim() : '';
+  if (canRls) {
+    if (cleanOrg && cleanOrg.toLowerCase() !== 'all' && typeof pgRls.withTenantRlsContext === 'function') {
+      return pgRls.withTenantRlsContext(db, cleanOrg, fn);
+    }
+    if (typeof pgRls.withSystemRlsBypass === 'function') {
+      return pgRls.withSystemRlsBypass(db, fn);
+    }
+  }
   if (db?.sequelize?.transaction) {
     return db.sequelize.transaction(fn);
   }
@@ -783,8 +799,12 @@ async function exportRoutesAndBlocksSection(db, rawPortals) {
   return { routes: normalizedRoutes, flowModels };
 }
 
-async function exportGovernanceSection(db, filterOrg) {
-  const findOpts = filterOrg ? { filter: { organizationId: filterOrg }, limit: 1000 } : { limit: 1000 };
+async function exportGovernanceSection(db, filterOrg, warnings = null, transaction = null) {
+  const findOpts = {
+    ...(filterOrg ? { filter: { organizationId: filterOrg } } : {}),
+    limit: 1000,
+    ...(transaction ? { transaction } : {}),
+  };
   const rawDmn = (await safeRepoFind(db, 'latticeDecisionTables', findOpts)).map(toObj);
   const rawSla = (await safeRepoFind(db, 'latticeSlaPolicies', findOpts)).map(toObj);
   const rawRules = (await safeRepoFind(db, 'latticeIncidentRules', findOpts)).map(toObj);
@@ -811,16 +831,25 @@ async function exportGovernanceSection(db, filterOrg) {
 
   const slaPolicies = rawSla
     .filter((s) => (!filterOrg || s.organizationId === filterOrg) && s.organizationId && s.targetCollection)
-    .map((s) => stripSecretsDeep({
-      organizationId: String(s.organizationId).trim(),
-      targetCollection: String(s.targetCollection).trim(),
-      priority: String(s.priority || 'normal').trim().toLowerCase(),
-      warnAfterMinutes: Number(s.warnAfterMinutes) || 240,
-      breachAfterMinutes: Number(s.breachAfterMinutes) || 1440,
-      escalateToRole: String(s.escalateToRole || 'ldx_manager').trim(),
-      ...(s.notifyChannels != null ? { notifyChannels: s.notifyChannels } : {}),
-      active: s.active !== false,
-    }))
+    .map((s) => {
+      const rawEscalate = String(s.escalateToRole || 'ldx_manager').trim();
+      const normalizedEscalate = FORBIDDEN_ROLES.has(rawEscalate) ? 'ldx_manager' : rawEscalate;
+      if (rawEscalate && normalizedEscalate !== rawEscalate && Array.isArray(warnings)) {
+        warnings.push(
+          `Đã chuẩn hóa SLA escalateToRole "${rawEscalate}" -> "${normalizedEscalate}" cho ${String(s.organizationId).trim()}::${String(s.targetCollection).trim()}::${String(s.priority || 'normal').trim().toLowerCase()}.`,
+        );
+      }
+      return stripSecretsDeep({
+        organizationId: String(s.organizationId).trim(),
+        targetCollection: String(s.targetCollection).trim(),
+        priority: String(s.priority || 'normal').trim().toLowerCase(),
+        warnAfterMinutes: Number(s.warnAfterMinutes) || 240,
+        breachAfterMinutes: Number(s.breachAfterMinutes) || 1440,
+        escalateToRole: normalizedEscalate,
+        ...(s.notifyChannels != null ? { notifyChannels: s.notifyChannels } : {}),
+        active: s.active !== false,
+      });
+    })
     .sort((a, b) => `${a.organizationId}::${a.targetCollection}::${a.priority}`.localeCompare(`${b.organizationId}::${b.targetCollection}::${b.priority}`));
 
   const incidentRules = rawRules
@@ -877,21 +906,69 @@ async function exportGovernanceSection(db, filterOrg) {
   return { decisionTables, slaPolicies, incidentRules, automationRules, webhookSubscriptions };
 }
 
+const CONNECTOR_SECRET_KEYS = new Set([
+  'encryptedSecretsJson',
+  'oauthAccessTokenEnc',
+  'oauthRefreshTokenEnc',
+  'oauthStateNonce',
+  'oauthTokenExpiresAt',
+  'n8nCredentialId',
+]);
+
+function exportSanitizedConnectors(rawConnectors, filterOrg) {
+  return rawConnectors
+    .map(toObj)
+    .filter((c) => (!filterOrg || c.organizationId === filterOrg) && c.organizationId && c.connectorKey)
+    .map((c) => {
+      const cleanCaps = c.capabilitiesJson && typeof c.capabilitiesJson === 'object'
+        ? stripSecretsDeep(c.capabilitiesJson)
+        : null;
+      const cleanOauth = c.oauthConfigJson && typeof c.oauthConfigJson === 'object' && !Array.isArray(c.oauthConfigJson)
+        ? stripSecretsDeep(c.oauthConfigJson)
+        : null;
+      const out = {
+        organizationId: String(c.organizationId).trim(),
+        connectorKey: String(c.connectorKey).trim().toLowerCase(),
+        name: String(c.name || c.connectorKey).trim(),
+        connectorType: String(c.connectorType || 'webhook').trim(),
+        baseUrl: String(c.baseUrl || '').trim(),
+        authType: String(c.authType || 'none').trim(),
+        secretVersion: Number(c.secretVersion) || 1,
+        ...(c.appType ? { appType: String(c.appType).trim() } : {}),
+        ...(cleanCaps ? { capabilitiesJson: cleanCaps } : {}),
+        ...(cleanOauth ? { oauthConfigJson: cleanOauth } : {}),
+        active: c.active !== false,
+        requiresSecretConfig: true,
+      };
+      for (const sk of CONNECTOR_SECRET_KEYS) delete out[sk];
+      return out;
+    })
+    .sort((a, b) => `${a.organizationId}::${a.connectorKey}`.localeCompare(`${b.organizationId}::${b.connectorKey}`));
+}
+
 async function exportSolutionBundle(db, { organizationId = null, platformVersion = DEFAULT_PLATFORM_VERSION } = {}) {
   const rawOrg = organizationId != null ? String(organizationId).trim() : '';
   const filterOrg = rawOrg && rawOrg !== 'all' ? rawOrg : '';
+  const exportWarnings = [];
 
-  const rawRoles = await safeRepoFind(db, 'roles', { limit: 500 });
-  const rawRes = await safeRepoFind(db, 'dataSourcesRolesResources', { limit: 2000, appends: ['actions'] });
-  const rawPortals = await safeRepoFind(db, 'uiLayouts', { limit: 500 });
-  const rawWorkflows = await safeRepoFind(db, 'workflows', { filter: { current: true }, limit: 500 });
-  const rawNodes = await safeRepoFind(db, 'flow_nodes', { limit: 2000 });
+  return runInTransaction(db, async (transaction) => {
+  const txOpt = transaction ? { transaction } : {};
+  const rawRoles = await safeRepoFind(db, 'roles', { limit: 500, ...txOpt });
+  const rawRes = await safeRepoFind(db, 'dataSourcesRolesResources', { limit: 2000, appends: ['actions'], ...txOpt });
+  const rawPortals = await safeRepoFind(db, 'uiLayouts', { limit: 500, ...txOpt });
+  const rawWorkflows = await safeRepoFind(db, 'workflows', { filter: { current: true }, limit: 500, ...txOpt });
+  const rawNodes = await safeRepoFind(db, 'flow_nodes', { limit: 2000, ...txOpt });
   const rawAiProfiles = await safeRepoFind(
     db,
     'latticeAiProfiles',
-    filterOrg ? { filter: { organizationId: filterOrg }, limit: 500 } : { limit: 500 },
+    filterOrg ? { filter: { organizationId: filterOrg }, limit: 500, ...txOpt } : { limit: 500, ...txOpt },
   );
-  const rawCollections = await safeRepoFind(db, 'collections', { limit: 500, appends: ['fields'] });
+  const rawCollections = await safeRepoFind(db, 'collections', { limit: 500, appends: ['fields'], ...txOpt });
+  const rawConnectors = await safeRepoFind(
+    db,
+    'latticeConnectors',
+    filterOrg ? { filter: { organizationId: filterOrg }, limit: 500, ...txOpt } : { limit: 500, ...txOpt },
+  );
 
   const resByRole = new Map();
   for (const r of rawRes) {
@@ -1023,7 +1100,8 @@ async function exportSolutionBundle(db, { organizationId = null, platformVersion
     .sort((a, b) => a.name.localeCompare(b.name));
 
   const routesAndBlocks = await exportRoutesAndBlocksSection(db, rawPortals);
-  const governance = await exportGovernanceSection(db, filterOrg);
+  const governance = await exportGovernanceSection(db, filterOrg, exportWarnings, transaction);
+  const connectors = exportSanitizedConnectors(rawConnectors, filterOrg);
 
   const payload = {
     roles,
@@ -1031,6 +1109,7 @@ async function exportSolutionBundle(db, { organizationId = null, platformVersion
     workflows,
     aiProfiles,
     customCollections,
+    connectors,
     routesAndBlocks,
     governance,
   };
@@ -1043,9 +1122,11 @@ async function exportSolutionBundle(db, { organizationId = null, platformVersion
       organizationId: filterOrg || 'all',
       exportedAt: new Date().toISOString(),
       contentSha256,
+      ...(exportWarnings.length ? { warnings: exportWarnings } : {}),
     },
     ...payload,
   };
+  }, { organizationId: filterOrg || null });
 }
 
 function validateWorkflowNodesDag(nodes, wfLabel = 'workflow') {
@@ -1923,6 +2004,41 @@ function validateSolutionBundle(bundle) {
       }
     }
   }
+  if (bundle.connectors !== undefined) {
+    if (!Array.isArray(bundle.connectors)) {
+      errors.push('connectors must be an array');
+    } else {
+      for (let i = 0; i < bundle.connectors.length; i += 1) {
+        const c = bundle.connectors[i];
+        if (!c || typeof c !== 'object' || Array.isArray(c)) {
+          errors.push(`connectors[${i}] must be an object`);
+          continue;
+        }
+        const key = String(c.connectorKey || '').trim();
+        if (!/^[a-z0-9_-]{2,80}$/i.test(key)) {
+          errors.push(`Invalid connectorKey "${key || '(empty)'}" at connectors[${i}]`);
+        }
+        const org = String(c.organizationId || '').trim();
+        if (!org || !SAFE_ORG_ID_RE.test(org) || org.toLowerCase() === 'all') {
+          errors.push(`Invalid connector organizationId "${org || '(empty)'}" at connectors[${i}]`);
+        }
+        const rawUrl = c.baseUrl != null ? String(c.baseUrl).trim() : '';
+        if (rawUrl) {
+          let parsedOk = false;
+          try {
+            const u = new URL(rawUrl);
+            parsedOk = ['http:', 'https:', 'mqtt:', 'mqtts:', 'smtp:', 'smtps:'].includes(u.protocol);
+          } catch {
+            parsedOk = false;
+          }
+          if (!parsedOk) {
+            errors.push(`Invalid connector baseUrl "${rawUrl}" at connectors[${i}]`);
+          }
+        }
+        validateNoUnsafeCodeOrXss(c, `connectors[${i}]`, errors);
+      }
+    }
+  }
   if (bundle.routesAndBlocks !== undefined) {
     validateRoutesAndBlocks(bundle.routesAndBlocks, errors);
   }
@@ -1932,22 +2048,54 @@ function validateSolutionBundle(bundle) {
   return { valid: errors.length === 0, errors };
 }
 
-function diffSection(curItems = [], incItems = [], keyFn) {
-  const curMap = new Map(curItems.map((item) => [String(keyFn(item)), JSON.stringify(stripSecretsDeep(item))]));
-  const incMap = new Map(incItems.map((item) => [String(keyFn(item)), JSON.stringify(stripSecretsDeep(item))]));
+function diffSectionWithDetails(curItems = [], incItems = [], keyFn) {
+  const curObjMap = new Map();
+  const incObjMap = new Map();
+  for (const item of Array.isArray(curItems) ? curItems : []) {
+    curObjMap.set(String(keyFn(item)), stripSecretsDeep(item) || {});
+  }
+  for (const item of Array.isArray(incItems) ? incItems : []) {
+    incObjMap.set(String(keyFn(item)), stripSecretsDeep(item) || {});
+  }
   const added = [];
   const changed = [];
   const unchanged = [];
   const removed = [];
-  for (const [k, v] of incMap.entries()) {
-    if (!curMap.has(k)) added.push(k);
-    else if (curMap.get(k) !== v) changed.push(k);
-    else unchanged.push(k);
+  const details = {};
+  for (const [k, incObj] of incObjMap.entries()) {
+    if (!curObjMap.has(k)) {
+      added.push(k);
+      details[k] = {
+        action: 'add',
+        fields: Object.keys(incObj).map((field) => ({ field, before: undefined, after: incObj[field] })),
+      };
+    } else {
+      const curObj = curObjMap.get(k);
+      if (JSON.stringify(curObj) !== JSON.stringify(incObj)) {
+        changed.push(k);
+        const allFields = [...new Set([...Object.keys(curObj), ...Object.keys(incObj)])].sort();
+        const fields = [];
+        for (const field of allFields) {
+          if (JSON.stringify(curObj[field]) !== JSON.stringify(incObj[field])) {
+            fields.push({ field, before: curObj[field], after: incObj[field] });
+          }
+        }
+        details[k] = { action: 'change', fields };
+      } else {
+        unchanged.push(k);
+      }
+    }
   }
-  for (const k of curMap.keys()) {
-    if (!incMap.has(k)) removed.push(k);
+  for (const [k, curObj] of curObjMap.entries()) {
+    if (!incObjMap.has(k)) {
+      removed.push(k);
+      details[k] = {
+        action: 'remove',
+        fields: Object.keys(curObj).map((field) => ({ field, before: curObj[field], after: undefined })),
+      };
+    }
   }
-  return { added, changed, unchanged, removed };
+  return { section: { added, changed, unchanged, removed }, details };
 }
 
 function flattenRoleResources(roles = []) {
@@ -1966,53 +2114,62 @@ function flattenRoleResources(roles = []) {
 function diffSolutionBundle(currentBundle, incomingBundle) {
   const cur = currentBundle || {};
   const inc = incomingBundle || {};
-  const sections = {
-    roles: diffSection(cur.roles, inc.roles, (r) => r?.name),
-    portals: diffSection(cur.portals, inc.portals, (p) => p?.uid),
-    workflows: diffSection(cur.workflows, inc.workflows, (w) => w?.key || w?.title),
-    aiProfiles: diffSection(cur.aiProfiles, inc.aiProfiles, (p) => p?.username),
-    customCollections: diffSection(cur.customCollections, inc.customCollections, (c) => c?.name),
-    routes: diffSection(
+  const specs = {
+    roles: diffSectionWithDetails(cur.roles, inc.roles, (r) => r?.name),
+    portals: diffSectionWithDetails(cur.portals, inc.portals, (p) => p?.uid),
+    workflows: diffSectionWithDetails(cur.workflows, inc.workflows, (w) => w?.key || w?.title),
+    aiProfiles: diffSectionWithDetails(cur.aiProfiles, inc.aiProfiles, (p) => p?.username),
+    customCollections: diffSectionWithDetails(cur.customCollections, inc.customCollections, (c) => c?.name),
+    connectors: diffSectionWithDetails(cur.connectors, inc.connectors, (c) => `${c?.organizationId || ''}::${c?.connectorKey || ''}`),
+    routes: diffSectionWithDetails(
       cur.routesAndBlocks?.routes,
       inc.routesAndBlocks?.routes,
       (r) => getScopedRouteKey(r),
     ),
-    flowModels: diffSection(
+    flowModels: diffSectionWithDetails(
       cur.routesAndBlocks?.flowModels,
       inc.routesAndBlocks?.flowModels,
       (m) => m?.uid,
     ),
-    decisionTables: diffSection(
+    decisionTables: diffSectionWithDetails(
       cur.governance?.decisionTables,
       inc.governance?.decisionTables,
       (d) => `${d?.organizationId || ''}::${d?.tableKey || ''}`,
     ),
-    slaPolicies: diffSection(
+    slaPolicies: diffSectionWithDetails(
       cur.governance?.slaPolicies,
       inc.governance?.slaPolicies,
       (s) => `${s?.organizationId || ''}::${s?.targetCollection || ''}::${s?.priority || 'normal'}`,
     ),
-    incidentRules: diffSection(
+    incidentRules: diffSectionWithDetails(
       cur.governance?.incidentRules,
       inc.governance?.incidentRules,
       (r) => `${r?.organizationId || ''}::${r?.code || ''}`,
     ),
-    automationRules: diffSection(
+    automationRules: diffSectionWithDetails(
       cur.governance?.automationRules,
       inc.governance?.automationRules,
       (r) => `${r?.organizationId || ''}::${r?.ruleKey || ''}`,
     ),
-    webhookSubscriptions: diffSection(
+    webhookSubscriptions: diffSectionWithDetails(
       cur.governance?.webhookSubscriptions,
       inc.governance?.webhookSubscriptions,
       (w) => `${w?.organizationId || ''}::${w?.subscriptionKey || ''}`,
     ),
   };
-  const roleResources = diffSection(
+  const sections = {};
+  const details = {};
+  for (const [secName, res] of Object.entries(specs)) {
+    sections[secName] = res.section;
+    details[secName] = res.details;
+  }
+  const roleResourcesRes = diffSectionWithDetails(
     flattenRoleResources(cur.roles),
     flattenRoleResources(inc.roles),
     (rr) => `${rr.roleName}::${rr.dataSourceKey || 'main'}::${rr.name}`,
   );
+  const roleResources = roleResourcesRes.section;
+  details.roleResources = roleResourcesRes.details;
   const summary = { added: 0, changed: 0, unchanged: 0, removed: 0 };
   for (const s of Object.values(sections)) {
     summary.added += s.added.length;
@@ -2023,6 +2180,7 @@ function diffSolutionBundle(currentBundle, incomingBundle) {
   return {
     summary,
     sections,
+    details,
     roleResources,
     routesAndBlocks: {
       routes: sections.routes,
@@ -3437,6 +3595,55 @@ async function applyGovernanceSection(db, governance, targetOrg, { reconcileDele
   };
 }
 
+async function applyConnectorsSection(db, rawConnectors, targetOrg, transaction) {
+  if (!Array.isArray(rawConnectors) || !rawConnectors.length) return 0;
+  const repo = db?.getRepository?.('latticeConnectors');
+  if (!repo || (typeof repo.create !== 'function' && typeof repo.update !== 'function')) return 0;
+  let count = 0;
+  for (const rawConn of rawConnectors) {
+    const clean = stripSecretsDeep(rawConn);
+    const connectorKey = String(clean?.connectorKey || '').trim().toLowerCase();
+    const rawItemOrg = clean?.organizationId != null ? String(clean.organizationId).trim() : '';
+    if (targetOrg && rawItemOrg && rawItemOrg !== targetOrg) {
+      throw failBundle('DXOS_ORG_MISMATCH', 403, `Connector "${connectorKey}" thuộc tổ chức "${rawItemOrg}", không khớp "${targetOrg}".`);
+    }
+    const scopedOrg = targetOrg || rawItemOrg;
+    if (!scopedOrg || scopedOrg.toLowerCase() === 'all' || !connectorKey) continue;
+    const existing = await findOneSafe(repo, { organizationId: scopedOrg, connectorKey }, { transaction });
+    const baseValues = {
+      organizationId: scopedOrg,
+      connectorKey,
+      name: String(clean.name || connectorKey).trim(),
+      connectorType: String(clean.connectorType || 'webhook').trim(),
+      baseUrl: String(clean.baseUrl || '').trim(),
+      authType: String(clean.authType || 'none').trim(),
+      secretVersion: Number(clean.secretVersion) || 1,
+      ...(clean.appType ? { appType: String(clean.appType).trim() } : {}),
+      ...(clean.capabilitiesJson ? { capabilitiesJson: clean.capabilitiesJson } : {}),
+      ...(clean.oauthConfigJson ? { oauthConfigJson: clean.oauthConfigJson } : {}),
+    };
+    if (existing) {
+      if (typeof repo.update === 'function') {
+        await repo.update({
+          filter: { organizationId: scopedOrg, connectorKey },
+          values: baseValues,
+          transaction,
+        });
+      }
+    } else if (typeof repo.create === 'function') {
+      await repo.create({
+        values: {
+          ...baseValues,
+          active: false,
+        },
+        transaction,
+      });
+    }
+    count += 1;
+  }
+  return count;
+}
+
 async function applySolutionBundleSections(
   db,
   bundle,
@@ -3457,6 +3664,7 @@ async function applySolutionBundleSections(
   const wfCounts = await applyWorkflowsSection(db, bundle.workflows, { targetOrg, enableWorkflows }, transaction);
   const customCollectionsUpserted = await applyCustomCollectionsSection(db, bundle.customCollections, targetOrg, transaction);
   const aiProfilesUpserted = await applyAiProfilesSection(db, bundle.aiProfiles, targetOrg, transaction);
+  const connectorsUpserted = await applyConnectorsSection(db, bundle.connectors, targetOrg, transaction);
   const routesBlocksCounts = await applyRoutesAndBlocksSection(
     db,
     bundle.routesAndBlocks,
@@ -3479,6 +3687,7 @@ async function applySolutionBundleSections(
     nodesUpserted: wfCounts.nodesUpserted,
     customCollectionsUpserted,
     aiProfilesUpserted,
+    connectorsUpserted,
     routesUpserted: routesBlocksCounts.routesUpserted,
     flowModelsUpserted: routesBlocksCounts.flowModelsUpserted,
     routesDeleted: routesBlocksCounts.routesDeleted,
@@ -3539,8 +3748,21 @@ async function importSolutionBundle(db, incomingBundle, { dryRun = true, organiz
   }
   const current = await exportSolutionBundle(db, { organizationId: targetOrg });
   const diff = diffSolutionBundle(current, incomingBundle);
+  const warnings = [];
+  if (Array.isArray(incomingBundle.metadata?.warnings)) {
+    for (const w of incomingBundle.metadata.warnings) {
+      if (typeof w === 'string' && w.trim()) warnings.push(w.trim());
+    }
+  }
+  if (Array.isArray(incomingBundle.connectors) && incomingBundle.connectors.length > 0) {
+    for (const c of incomingBundle.connectors) {
+      warnings.push(
+        `Connector "${String(c?.connectorKey || 'unknown')}" (${String(c?.connectorType || 'webhook')}) được xuất không kèm bí mật Vault; cần cấu hình lại secrets/OAuth sau khi import.`,
+      );
+    }
+  }
   if (dryRun !== false) {
-    return { dryRun: true, valid: true, diff, applied: null };
+    return { dryRun: true, valid: true, warnings, diff, applied: null };
   }
 
   const generatedSnapshotUid = `gitops-${Date.now().toString(36)}-${randomBytes(2).toString('hex')}`;
@@ -3553,6 +3775,7 @@ async function importSolutionBundle(db, incomingBundle, { dryRun = true, organiz
       await snapRepo.create({
         values: {
           snapshotUid: generatedSnapshotUid,
+          organizationId: targetOrg || null,
           portalSlug: SNAPSHOT_PORTAL_SLUG,
           pageTitle: targetOrg || 'all',
           note: 'Pre-import GitOps Solution Bundle snapshot',
@@ -3572,18 +3795,19 @@ async function importSolutionBundle(db, incomingBundle, { dryRun = true, organiz
     );
   };
 
-  await runInTransaction(db, runApply);
+  await runInTransaction(db, runApply, { organizationId: targetOrg });
 
   return {
     dryRun: false,
     valid: true,
+    warnings,
     snapshotUid: savedSnapshotUid,
     diff,
     applied,
   };
 }
 
-async function rollbackLastSolutionBundle(db, { organizationId = null, snapshotUid = '' } = {}) {
+async function rollbackLastSolutionBundle(db, { organizationId = null, snapshotUid = '', enableWorkflows = true } = {}) {
   const snapRepo = db?.getRepository?.('latticeUiSnapshots');
   if (!snapRepo) {
     throw failBundle('GITOPS_SNAPSHOT_NOT_FOUND', 404, 'Không tìm thấy kho snapshot latticeUiSnapshots để hoàn tác.');
@@ -3591,39 +3815,43 @@ async function rollbackLastSolutionBundle(db, { organizationId = null, snapshotU
 
   const reqOrg = organizationId != null ? String(organizationId).trim() : '';
   const wantedUid = String(snapshotUid || '').trim();
-  let targetSnap = null;
-  if (wantedUid) {
-    const candidate = await findOneSafe(snapRepo, { snapshotUid: wantedUid });
-    if (candidate && val(candidate, 'portalSlug') === SNAPSHOT_PORTAL_SLUG) {
-      if (reqOrg) {
-        const candidateOrg = String(val(candidate, 'pageTitle') || '').trim();
-        if (!candidateOrg || candidateOrg !== reqOrg) {
-          throw failBundle('GITOPS_SNAPSHOT_NOT_FOUND', 404, 'Không tìm thấy snapshot GitOps thuộc tổ chức được yêu cầu để hoàn tác.');
+  const targetSnap = await runInTransaction(db, async (transaction) => {
+    const txOpt = transaction ? { transaction } : {};
+    if (wantedUid) {
+      const candidate = await findOneSafe(snapRepo, { snapshotUid: wantedUid }, txOpt);
+      if (candidate && val(candidate, 'portalSlug') === SNAPSHOT_PORTAL_SLUG) {
+        if (reqOrg) {
+          const candidateOrg = String(val(candidate, 'pageTitle') || '').trim();
+          if (!candidateOrg || candidateOrg !== reqOrg) {
+            throw failBundle('GITOPS_SNAPSHOT_NOT_FOUND', 404, 'Không tìm thấy snapshot GitOps thuộc tổ chức được yêu cầu để hoàn tác.');
+          }
         }
+        return candidate;
       }
-      targetSnap = candidate;
-    }
-  } else if (typeof snapRepo.find === 'function') {
-    if (reqOrg) {
-      const orgRows = (await snapRepo.find({
-        filter: { portalSlug: SNAPSHOT_PORTAL_SLUG, pageTitle: reqOrg },
-        sort: ['-id'],
-        limit: 50,
-      })) || [];
-      const matchingRows = orgRows.filter(
-        (r) => val(r, 'portalSlug') === SNAPSHOT_PORTAL_SLUG && String(val(r, 'pageTitle') || '').trim() === reqOrg,
-      );
-      targetSnap = pickLatestSnapshotRow(matchingRows);
-    } else {
+    } else if (typeof snapRepo.find === 'function') {
+      if (reqOrg) {
+        const orgRows = (await snapRepo.find({
+          filter: { portalSlug: SNAPSHOT_PORTAL_SLUG, pageTitle: reqOrg },
+          sort: ['-id'],
+          limit: 50,
+          ...txOpt,
+        })) || [];
+        const matchingRows = orgRows.filter(
+          (r) => val(r, 'portalSlug') === SNAPSHOT_PORTAL_SLUG && String(val(r, 'pageTitle') || '').trim() === reqOrg,
+        );
+        return pickLatestSnapshotRow(matchingRows);
+      }
       const anyRows = (await snapRepo.find({
         filter: { portalSlug: SNAPSHOT_PORTAL_SLUG },
         sort: ['-id'],
         limit: 50,
+        ...txOpt,
       })) || [];
       const matchingRows = anyRows.filter((r) => val(r, 'portalSlug') === SNAPSHOT_PORTAL_SLUG);
-      targetSnap = pickLatestSnapshotRow(matchingRows);
+      return pickLatestSnapshotRow(matchingRows);
     }
-  }
+    return null;
+  }, { organizationId: reqOrg || null });
 
   if (!targetSnap) {
     throw failBundle('GITOPS_SNAPSHOT_NOT_FOUND', 404, 'Không tìm thấy snapshot GitOps nào để hoàn tác.');
@@ -3650,10 +3878,10 @@ async function rollbackLastSolutionBundle(db, { organizationId = null, snapshotU
     restored = await applySolutionBundleSections(
       db,
       snapshotBundle,
-      { targetOrg, enableWorkflows: true, reconcileV3Deletions: true },
+      { targetOrg, enableWorkflows: enableWorkflows !== false, reconcileV3Deletions: true },
       transaction,
     );
-  });
+  }, { organizationId: targetOrg });
 
   return {
     rolledBack: true,

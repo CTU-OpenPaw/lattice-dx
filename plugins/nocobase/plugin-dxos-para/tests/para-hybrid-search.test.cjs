@@ -612,3 +612,243 @@ test('flexible DX_EMBEDDING_DIM (768, 1024) and batched embeddings (<= 16 inputs
   assert.equal(hits.length, 1);
   assert.equal(hits[0].embeddingEngine, 'neural');
 });
+
+test('P1-11: executeHybridSearch excludes draft/archived docs and chunks, and returns empty results on zero-token deterministic fallback', async () => {
+  const {
+    executeHybridSearch,
+    rankHybridDocuments,
+    computeDeterministicEmbedding,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/para-hybrid-search.js'));
+
+  const docs = [
+    { id: 1, code: 'SOP-ACTIVE', title: 'Quy trình kho lạnh chuẩn', organizationId: 'org-a', paraSpace: 'resources', status: 'active', active: true, summary: 'Bảo quản vaccine 2-8C' },
+    { id: 2, code: 'SOP-DRAFT', title: 'Quy trình kho lạnh bản nháp', organizationId: 'org-a', paraSpace: 'resources', status: 'draft', active: true, summary: 'Bảo quản vaccine nháp' },
+    { id: 3, code: 'SOP-ARCHIVED', title: 'Quy trình kho lạnh lưu trữ', organizationId: 'org-a', paraSpace: 'resources', status: 'archived', active: true, summary: 'Bảo quản vaccine cũ' },
+  ];
+  const chunks = [
+    {
+      id: 101,
+      documentId: 2,
+      organizationId: 'org-a',
+      code: 'SOP-DRAFT',
+      title: 'Quy trình kho lạnh bản nháp',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      content: 'Quy trình kho lạnh bảo quản vaccine bản nháp mật',
+      embeddingModel: 'fnv1a-256',
+      embeddingEngine: 'deterministic-fallback',
+      embeddingDim: 256,
+      embeddingJson: computeDeterministicEmbedding('Quy trình kho lạnh bảo quản vaccine bản nháp mật'),
+      active: true,
+    },
+    {
+      id: 102,
+      documentId: 3,
+      organizationId: 'org-a',
+      code: 'SOP-ARCHIVED',
+      title: 'Quy trình kho lạnh lưu trữ',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      content: 'Quy trình kho lạnh bảo quản vaccine đã lưu trữ',
+      embeddingModel: 'fnv1a-256',
+      embeddingEngine: 'deterministic-fallback',
+      embeddingDim: 256,
+      embeddingJson: computeDeterministicEmbedding('Quy trình kho lạnh bảo quản vaccine đã lưu trữ'),
+      active: true,
+    },
+  ];
+  const sqlSeen = [];
+  const db = {
+    sequelize: {
+      query: async (sql) => {
+        sqlSeen.push(sql);
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeParaDocuments') return { find: async () => docs };
+      if (name === 'latticeParaChunks') return { find: async () => chunks };
+      return null;
+    },
+  };
+
+  // 1. Draft and archived docs & chunks must be excluded
+  const activeHits = await executeHybridSearch(db, {
+    organizationId: 'org-a',
+    query: 'quy trình kho lạnh vaccine',
+    limit: 10,
+    env: {},
+  });
+  assert.equal(activeHits.length, 1);
+  assert.equal(activeHits[0].code, 'SOP-ACTIVE');
+  assert.ok(sqlSeen.some((s) => /d\.status\s+IS\s+NOT\s+NULL\s+AND\s+d\.status\s*<>\s*'active'/i.test(s)));
+  assert.ok(sqlSeen.some((s) => /\(status\s+IS\s+NULL\s+OR\s+status\s*=\s*'active'\)/i.test(s)));
+
+  // 2. Zero-token garbage query must return [] in deterministic fallback
+  const garbageHits = await executeHybridSearch(db, {
+    organizationId: 'org-a',
+    query: 'xyz_khong_ton_tai_999',
+    limit: 10,
+    env: {},
+  });
+  assert.deepEqual(garbageHits, []);
+  assert.deepEqual(rankHybridDocuments('xyz_khong_ton_tai_999', docs, { limit: 10 }), []);
+  assert.deepEqual(rankHybridDocuments('quy trình kho lạnh', docs, { limit: 10 }).map((d) => d.code), ['SOP-ACTIVE']);
+});
+
+test('P1-11 R2: executeHybridSearch blocks stale active:true chunks of active:false docs even when docRepo honors filter.active', async () => {
+  const {
+    executeHybridSearch,
+    computeDeterministicEmbedding,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/para-hybrid-search.js'));
+
+  const docs = [
+    { id: 1, code: 'SOP-ACT', title: 'Quy trình kho lạnh chuẩn', organizationId: 'org-a', paraSpace: 'resources', status: 'active', active: true, summary: 'Bảo quản vaccine' },
+    { id: 4, code: 'SOP-STALE', title: 'Quy trình kho lạnh cũ', organizationId: 'org-a', paraSpace: 'resources', status: 'draft', active: false, summary: 'Bản cũ đã tắt' },
+    { id: 5, code: 'SOP-SOFT-DEL', title: 'Quy trình kho lạnh ẩn', organizationId: 'org-a', paraSpace: 'resources', status: 'active', active: false, summary: 'Bị soft-delete' },
+  ];
+  const chunks = [
+    {
+      id: 103,
+      documentId: 4,
+      organizationId: 'org-a',
+      code: 'SOP-STALE',
+      title: 'Quy trình kho lạnh cũ',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      content: 'Quy trình kho lạnh bảo quản vaccine cũ rò rỉ',
+      embeddingModel: 'fnv1a-256',
+      embeddingEngine: 'deterministic-fallback',
+      embeddingDim: 256,
+      embeddingJson: computeDeterministicEmbedding('Quy trình kho lạnh bảo quản vaccine cũ rò rỉ'),
+      active: true,
+    },
+    {
+      id: 104,
+      documentId: 5,
+      organizationId: 'org-a',
+      code: 'SOP-SOFT-DEL',
+      title: 'Quy trình kho lạnh ẩn',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      content: 'Quy trình kho lạnh bảo quản vaccine bị ẩn rò rỉ',
+      embeddingModel: 'fnv1a-256',
+      embeddingEngine: 'deterministic-fallback',
+      embeddingDim: 256,
+      embeddingJson: computeDeterministicEmbedding('Quy trình kho lạnh bảo quản vaccine bị ẩn rò rỉ'),
+      active: true,
+    },
+  ];
+  const sqlSeen = [];
+  const db = {
+    sequelize: {
+      query: async (sql) => {
+        sqlSeen.push(sql);
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeParaDocuments') {
+        return {
+          find: async ({ filter = {} } = {}) => docs.filter((d) => (
+            (!filter.organizationId || d.organizationId === filter.organizationId)
+            && (!filter.paraSpace || d.paraSpace === filter.paraSpace)
+            && (filter.active === undefined || d.active === filter.active)
+          )),
+        };
+      }
+      if (name === 'latticeParaChunks') {
+        return {
+          find: async ({ filter = {} } = {}) => chunks.filter((c) => (
+            (!filter.organizationId || c.organizationId === filter.organizationId)
+            && (!filter.paraSpace || c.paraSpace === filter.paraSpace)
+            && (filter.active === undefined || c.active === filter.active)
+          )),
+        };
+      }
+      return null;
+    },
+  };
+
+  const results = await executeHybridSearch(db, {
+    organizationId: 'org-a',
+    query: 'quy trình kho lạnh vaccine',
+    paraSpace: 'resources',
+    limit: 10,
+    env: {},
+  });
+  assert.deepEqual(results.map((r) => r.code), ['SOP-ACT']);
+  assert.ok(sqlSeen.some((s) => /d\.active\s*=\s*false/i.test(s)), 'SQL NOT EXISTS must check d.active = false');
+});
+
+test('T2-PARA-01: lexicalOverlapScore uses whole-token matching so 999 does not substring-match CCCD 079091009999', async () => {
+  const {
+    executeHybridSearch,
+    rankHybridDocuments,
+    computeDeterministicEmbedding,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/para-hybrid-search.js'));
+
+  const content = 'SOP RW04KB5F7B5A65EA3A SĐT: 0987654321 Email: privacy.rw04@example.com CCCD: 079091009999';
+  const docs = [
+    {
+      id: 19,
+      code: 'ACT-RW04-5F7B5A65-AD0E',
+      title: 'Active RW04',
+      organizationId: 'native-ui-lab',
+      paraSpace: 'resources',
+      status: 'active',
+      active: true,
+      summary: content,
+    },
+  ];
+  const chunks = [
+    {
+      id: 156,
+      documentId: 19,
+      organizationId: 'native-ui-lab',
+      code: 'ACT-RW04-5F7B5A65-AD0E',
+      title: 'Active RW04',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      content,
+      embeddingModel: 'fnv1a-256',
+      embeddingEngine: 'deterministic-fallback',
+      embeddingDim: 256,
+      embeddingJson: computeDeterministicEmbedding(content),
+      active: true,
+    },
+  ];
+
+  const db = {
+    sequelize: { query: async () => [[]] },
+    getRepository(name) {
+      if (name === 'latticeParaDocuments') return { find: async () => docs };
+      if (name === 'latticeParaChunks') return { find: async () => chunks };
+      return null;
+    },
+  };
+
+  const garbageHits = await executeHybridSearch(db, {
+    organizationId: 'native-ui-lab',
+    query: 'xyz_khong_ton_tai_999',
+    limit: 10,
+    env: {},
+  });
+  assert.deepEqual(garbageHits, []);
+  assert.deepEqual(await executeHybridSearch(db, {
+    organizationId: 'native-ui-lab',
+    query: '999',
+    limit: 10,
+    env: {},
+  }), []);
+  assert.deepEqual(rankHybridDocuments('xyz_khong_ton_tai_999', docs, { limit: 10 }), []);
+
+  const exactHits = await executeHybridSearch(db, {
+    organizationId: 'native-ui-lab',
+    query: '079091009999',
+    limit: 10,
+    env: {},
+  });
+  assert.equal(exactHits.length, 1);
+  assert.equal(exactHits[0].code, 'ACT-RW04-5F7B5A65-AD0E');
+});

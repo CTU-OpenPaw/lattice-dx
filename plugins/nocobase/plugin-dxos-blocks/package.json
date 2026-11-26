@@ -1,12 +1,12 @@
 {
   "name": "@latticedx/plugin-dxos-blocks",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "license": "Apache-2.0",
   "type": "commonjs",
   "main": "dist/server/index.js",
   "displayName": "LatticeDX DX-OS Configurable Blocks",
-  "description": "Six configurable Native v2 FlowEngine BlockModels for NocoBase UI Editor covering H-P-D-I spaces plus org-scoped telemetry and proposal read endpoints.",
+  "description": "Twelve configurable Native v2 FlowEngine BlockModels for NocoBase UI Editor covering H-P-D-I spaces, WebGIS/Twin, WMS FEFO, BI charts, Creative Studio, and org-scoped telemetry/proposal endpoints.",
   "files": ["dist", "server.js", "client.js", "client-v2.js", "README.md", "LICENSE"],
   "scripts": {
     "build": "node build.mjs",

@@ -733,7 +733,7 @@ test('M3.3 migration 20261205000100 adds latticeUiSnapshots.organizationId and l
   await mig.up();
   assert.equal(sqlCalls.some((s) => s.includes('ALTER TABLE IF EXISTS "latticeUiSnapshots" ADD COLUMN IF NOT EXISTS "organizationId" VARCHAR(80)')), true);
   assert.equal(sqlCalls.some((s) => s.includes('CREATE TABLE IF NOT EXISTS "latticeAiQuotaPolicies"')), true);
-  assert.deepEqual(attachedRls, ['latticeAiQuotaPolicies'], 'Only latticeAiQuotaPolicies attaches FORCE RLS, NOT latticeUiSnapshots');
+  assert.deepEqual([...attachedRls].sort(), ['latticeAiQuotaPolicies', 'latticeUiSnapshots'], 'Both latticeUiSnapshots and latticeAiQuotaPolicies must attach FORCE RLS');
   await mig.down();
   assert.equal(attachedRls.includes('detach:latticeAiQuotaPolicies'), true);
 });

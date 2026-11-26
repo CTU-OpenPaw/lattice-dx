@@ -9,7 +9,7 @@
 'use strict';
 
 const SERVICE_TYPES = ['leave', 'it_support', 'facilities', 'hr_request'];
-const SERVICE_PRIORITIES = ['low', 'medium', 'high'];
+const SERVICE_PRIORITIES = ['low', 'normal', 'medium', 'high', 'urgent', 'critical'];
 
 const serviceTickets = {
   name: 'latticeServiceTickets',
@@ -53,8 +53,11 @@ const serviceTickets = {
         'x-component': 'Select',
         enum: [
           { value: 'low', label: 'Thấp' },
+          { value: 'normal', label: 'Bình thường' },
           { value: 'medium', label: 'Trung bình' },
           { value: 'high', label: 'Cao' },
+          { value: 'urgent', label: 'Khẩn cấp' },
+          { value: 'critical', label: 'Nghiêm trọng' },
         ],
       },
     },

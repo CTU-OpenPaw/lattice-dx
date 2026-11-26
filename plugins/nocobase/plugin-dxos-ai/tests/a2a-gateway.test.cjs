@@ -1212,7 +1212,7 @@ test('resolveRequestOriginFromHeaders and resolveSafeCardEndpointUrl derive safe
   });
   assert.equal(mwRes.ctx.status, 200);
   assert.equal(mwRes.ctx.body.url, 'http://127.0.0.1:13015/api/dxos-a2a');
-  assert.equal(mwRes.ctx.body.version, '0.4.1');
+  assert.equal(mwRes.ctx.body.version, '0.4.2');
 });
 
 test('createGatewayAgentCardRequestHandler handles /.well-known/agent-card.json and /api/dxos-a2a/agent-card.json on GET/HEAD/405 and passes through non-card routes', async () => {
@@ -1244,7 +1244,7 @@ test('createGatewayAgentCardRequestHandler handles /.well-known/agent-card.json 
     assert.equal(res.ended, false);
   }
 
-  // GET /.well-known/agent-card.json -> 200 JSON with 13015 origin & 0.4.1
+  // GET /.well-known/agent-card.json -> 200 JSON with 13015 origin & 0.4.2
   {
     const res = makeMockRes();
     const handled = await handler(
@@ -1262,7 +1262,7 @@ test('createGatewayAgentCardRequestHandler handles /.well-known/agent-card.json 
     assert.equal(res.headers['cache-control'], 'no-store');
     assert.equal(res.headers['x-content-type-options'], 'nosniff');
     const parsed = JSON.parse(res.body);
-    assert.equal(parsed.version, '0.4.1');
+    assert.equal(parsed.version, '0.4.2');
     assert.equal(parsed.url, 'http://127.0.0.1:13015/api/dxos-a2a');
     assert.equal(parsed.skills.length, 7);
   }

@@ -17,13 +17,68 @@ const MAX_OUTBOX_PAYLOAD_BYTES = 320 * 1024;
 const MAX_PHOTO_DATA_URL_BYTES = 512 * 1024;
 const MAX_OUTBOX_TOTAL_BYTES_WITH_PHOTO = 768 * 1024;
 const FORBIDDEN_STORAGE_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
-const VALID_OUTBOX_STATUSES = Object.freeze(['pending', 'syncing', 'failed', 'synced']);
+const VALID_OUTBOX_STATUSES = Object.freeze(['pending', 'syncing', 'failed', 'quarantined', 'synced']);
 const VALID_OUTBOX_STATUS_SET = new Set(VALID_OUTBOX_STATUSES);
+const MASKED_MEDIA_PLACEHOLDER = '[Ảnh/Chữ ký base64 đã ẩn]';
+const DATA_URL_BASE64_RE = /^data:image\/[a-zA-Z0-9.+-]+;base64,/i;
+const MEDIA_DATA_URL_KEY_RE = /(?:dataurl|signaturedataurl|evidencephotodataurl)$/i;
 
 const ALLOWED_OFFLINE_ACTIONS = Object.freeze({
   'wms.epodCapture': Object.freeze({ url: 'dxosWms:epodCapture', method: 'post', label: 'Xác nhận ePOD' }),
   'iot.twinSetDesired': Object.freeze({ url: 'dxosBlocks:twinSetDesired', method: 'post', label: 'Đặt ngưỡng Twin' }),
+  'service.ticketCreate': Object.freeze({ url: 'latticeServiceTickets:create', method: 'post', label: 'Tạo ticket dịch vụ' }),
+  'iot.incidentCreate': Object.freeze({ url: 'dxosBlocks:alarmIngest', method: 'post', label: 'Báo cáo sự cố' }),
 });
+
+function maskConflictMediaFields(value, keyHint = '', depth = 0) {
+  if (depth > 16) return undefined;
+  if (typeof value === 'string') {
+    if (DATA_URL_BASE64_RE.test(value) || (MEDIA_DATA_URL_KEY_RE.test(String(keyHint || '')) && value.length > 0)) {
+      return MASKED_MEDIA_PLACEHOLDER;
+    }
+    return value;
+  }
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const cleanArr = [];
+    for (const entry of value) {
+      const masked = maskConflictMediaFields(entry, '', depth + 1);
+      if (masked !== undefined) cleanArr.push(masked);
+    }
+    return cleanArr;
+  }
+  if (isPlainObject(value)) {
+    const cleanObj = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (FORBIDDEN_STORAGE_KEYS.has(k)) continue;
+      const masked = maskConflictMediaFields(v, k, depth + 1);
+      if (masked !== undefined) cleanObj[k] = masked;
+    }
+    return cleanObj;
+  }
+  return undefined;
+}
+
+function sanitizeConflictData(raw) {
+  if (!isPlainObject(raw)) return null;
+  const stripped = stripForbiddenKeys(raw);
+  const clean = maskConflictMediaFields(stripped);
+  if (!isPlainObject(clean)) return null;
+  try {
+    const serialized = JSON.stringify(clean);
+    if (typeof serialized !== 'string' || serialized.length > 4096) {
+      return {
+        message: typeof clean.message === 'string' ? clean.message.slice(0, 240) : 'Conflict detected',
+        code: typeof clean.code === 'string' ? clean.code.slice(0, 64) : null,
+      };
+    }
+    return JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+}
 
 const memoryOutboxMap = new Map();
 let queueSeqCounter = 0;
@@ -176,6 +231,7 @@ function sanitizeOutboxItem(raw) {
     attempts: Number.isInteger(raw.attempts) && raw.attempts >= 0 ? raw.attempts : 0,
     lastError: typeof raw.lastError === 'string' ? raw.lastError.slice(0, 240) : null,
     httpStatus,
+    conflictData: sanitizeConflictData(raw.conflictData),
   };
 }
 
@@ -305,6 +361,7 @@ function buildNewOutboxItem(entry) {
     attempts: 0,
     lastError: null,
     httpStatus: null,
+    conflictData: null,
   };
 }
 
@@ -580,12 +637,28 @@ function applyOutboxStatusPatch(existing, statusOrPatch) {
     const code = Number(patch.httpStatus);
     nextHttpStatus = Number.isInteger(code) && code >= 100 && code < 600 ? code : null;
   }
+  let nextConflictData = existing.conflictData || null;
+  if (Object.hasOwn(patch, 'conflictData')) {
+    nextConflictData = sanitizeConflictData(patch.conflictData);
+  }
+  let nextPayload = existing.payload;
+  if (Object.hasOwn(patch, 'payload') && isPlainObject(patch.payload)) {
+    const sanitized = sanitizeOutboxItem({
+      ...existing,
+      payload: patch.payload,
+    });
+    if (sanitized && sanitized.payload) {
+      nextPayload = sanitized.payload;
+    }
+  }
   return {
     ...existing,
+    payload: nextPayload,
     status: nextStatus,
     attempts: nextAttempts,
     lastError: nextError,
     httpStatus: nextHttpStatus,
+    conflictData: nextConflictData,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -631,6 +704,10 @@ async function updateOutboxStatus(id, statusOrPatch, opts = {}) {
   return updatedMem;
 }
 
+async function updateOutboxItem(id, updates = {}, opts = {}) {
+  return updateOutboxStatus(id, isPlainObject(updates) ? updates : {}, opts);
+}
+
 module.exports = {
   OUTBOX_DB_NAME,
   OUTBOX_STORE_NAME,
@@ -642,6 +719,9 @@ module.exports = {
   MAX_OUTBOX_TOTAL_BYTES_WITH_PHOTO,
   ALLOWED_OFFLINE_ACTIONS,
   VALID_OUTBOX_STATUSES,
+  MASKED_MEDIA_PLACEHOLDER,
+  maskConflictMediaFields,
+  sanitizeConflictData,
   isQuotaExceededError,
   isValidRasterImageDataUrl,
   isIndexedDbAvailable,
@@ -656,5 +736,6 @@ module.exports = {
   listOutboxItems,
   removeOutboxItem,
   updateOutboxStatus,
+  updateOutboxItem,
   resetMemoryOutboxStore,
 };

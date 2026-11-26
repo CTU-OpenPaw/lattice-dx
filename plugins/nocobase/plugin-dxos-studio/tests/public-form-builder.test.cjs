@@ -182,6 +182,7 @@ test('public-form-builder exports required symbols and obeys Studio security & S
   assert.ok(mod.PUBLIC_FORM_CORE_COLLECTIONS.includes('latticeServiceTickets'));
   assert.ok(Array.isArray(mod.PUBLIC_FORM_FIELD_TYPES));
   assert.ok(mod.PUBLIC_FORM_FIELD_TYPES.includes('email'));
+  assert.ok(mod.PUBLIC_FORM_FIELD_TYPES.includes('file'));
   assert.ok(mod.SLUG_RE instanceof RegExp);
   assert.equal(mod.SLUG_RE.test('partner-intake-01'), true);
   assert.equal(mod.SLUG_RE.test('Bad Slug!'), false);
@@ -464,4 +465,124 @@ test('handles top-level { id } save response, updated status token placeholder, 
   assert.equal(saveCalls, 2);
   assert.equal(saveReqs[0].data.id, undefined);
   assert.equal(saveReqs[1].data.id, 42);
+});
+
+test('P1-02: PublicFormBuilder renders select enumText/maxLength/pattern inputs, Submissions Viewer Drawer, and Live Preview', async () => {
+  const { createPublicFormBuilderPanel } = require(SOURCE_PATH);
+  const harness = createReactHarness();
+  const forms = [
+    {
+      id: 7,
+      organizationId: 'org-a',
+      slug: 'intake-v2',
+      title: 'Intake V2',
+      description: 'Form test P1-02',
+      targetCollection: 'latticeRequests',
+      allowedFieldsJson: [
+        { name: 'subject', label: 'Tiêu đề', type: 'string', required: true, maxLength: 120, pattern: '^[A-Za-z0-9 ]+$' },
+        { name: 'priority', label: 'Mức độ', type: 'select', required: true, options: ['low', 'high', 'urgent'] },
+      ],
+      defaultValuesJson: {},
+      active: true,
+    },
+  ];
+  const { client, requests } = createApiMock({
+    'get dxosForms:list': async () => ({ organizationId: 'org-a', items: forms }),
+    'get dxosBuilder:listDomains': async () => ({ items: [] }),
+    'get dxosForms:listSubmissions': async (req) => ({
+      slug: req.params.slug,
+      total: 1,
+      page: req.params.page || 1,
+      pageSize: 20,
+      items: [
+        {
+          id: 501,
+          submissionCode: 'SUB-501',
+          trackingCode: 'TRK-501',
+          status: 'submitted',
+          submittedAt: '2026-11-26T09:00:00.000Z',
+          payloadJson: { subject: 'Urgent Valve Check', priority: 'urgent' },
+          attachments: [{ fileName: 'photo.jpg', size: 1234 }],
+        },
+      ],
+    }),
+  });
+
+  const Panel = createPublicFormBuilderPanel(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+
+  // Edit existing form -> check select options, maxLength, pattern inputs render and edit cleanly
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-edit-intake-v2')[0].props.onClick();
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const maxLenInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-field-maxlen-0')[0];
+  const patternInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-field-pattern-0')[0];
+  const optionsInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-field-options-1')[0];
+  assert.ok(maxLenInput && patternInput && optionsInput);
+  assert.equal(maxLenInput.props.value, 120);
+  assert.equal(optionsInput.props.value, 'low, high, urgent');
+
+  // Open Live Preview
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-editor-preview-btn')[0].props.onClick();
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const previewCard = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-live-preview')[0];
+  assert.ok(previewCard && textOf(previewCard).includes('Intake V2') && textOf(previewCard).includes('urgent'));
+
+  // Open Submissions Viewer Drawer -> listSubmissions + filter + payload detail
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-submissions-intake-v2')[0].props.onClick();
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  assert.ok(requests.some((r) => r.url === 'dxosForms:listSubmissions' && r.params?.slug === 'intake-v2'));
+  const drawer = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-submissions-drawer')[0];
+  assert.ok(drawer && textOf(drawer).includes('SUB-501'));
+  const detail = collectNodes(drawer, (n) => n.props?.['data-testid'] === 'dxos-forms-submission-detail')[0];
+  assert.ok(detail && textOf(detail).includes('Urgent Valve Check') && textOf(detail).includes('photo.jpg'));
+});
+
+test('P1-02 regression: editing enumText on existing select field updates both Live Preview and dxosForms:save payload', async () => {
+  const { createPublicFormBuilderPanel } = require(SOURCE_PATH);
+  const harness = createReactHarness();
+  const savedForms = [
+    {
+      id: 21,
+      organizationId: 'org-a',
+      slug: 'priority-intake',
+      title: 'Priority Intake',
+      targetCollection: 'latticeRequests',
+      allowedFieldsJson: [
+        { name: 'priority', label: 'Mức ưu tiên', type: 'select', required: true, options: ['low', 'high'] },
+      ],
+      defaultValuesJson: {},
+      active: true,
+    },
+  ];
+  const { client, requests } = createApiMock({
+    'get dxosForms:list': async () => ({ organizationId: 'org-a', items: savedForms }),
+    'get dxosBuilder:listDomains': async () => ({ items: [] }),
+    'post dxosForms:save': async (req) => ({ id: 21, ...req.data }),
+  });
+
+  const Panel = createPublicFormBuilderPanel(client, harness.React, {}, {});
+  let tree = await harness.mountAndFlush(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-edit-priority-intake')[0].props.onClick();
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+
+  const optionsInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-field-options-0')[0];
+  assert.equal(optionsInput.props.value, 'low, high');
+  optionsInput.props.onChange({ target: { value: 'low, medium, urgent' } });
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+
+  // Live Preview must reflect edited options immediately
+  collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-editor-preview-btn')[0].props.onClick();
+  tree = harness.render(Panel, { selectedOrg: 'org-a', organizations: ['org-a'] });
+  const preview = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-live-preview')[0];
+  assert.ok(preview);
+  const previewText = textOf(preview);
+  assert.ok(previewText.includes('medium'), 'Live Preview must render newly added "medium" option');
+  assert.ok(previewText.includes('urgent'), 'Live Preview must render newly added "urgent" option');
+
+  // Save must send updated options array
+  await collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-forms-save-form')[0].props.onSubmit({ preventDefault() {} });
+  const saveReq = requests.find((r) => r.url === 'dxosForms:save');
+  assert.ok(saveReq);
+  assert.deepEqual(saveReq.data.allowedFieldsJson[0].options, ['low', 'medium', 'urgent']);
 });

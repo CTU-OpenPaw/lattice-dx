@@ -2111,3 +2111,430 @@ test('public-form-html places honeypot last before submit and enforces novalidat
     assert.equal(subjErr.textContent, '');
   });
 });
+
+test('P1-02: dxosForms:listSubmissions enforces loggedIn + manager/admin + org RLS, supports search/status/pagination, and strips secrets/base64', async () => {
+  const { registerPublicForms } = require('../src/server/public-forms');
+  const env = createFakeEnv({
+    employees: [
+      { id: 1, userId: 10, organizationId: 'org-a', active: true },
+      { id: 2, userId: 20, organizationId: 'org-a', active: true },
+      { id: 3, userId: 30, organizationId: 'org-b', active: true },
+    ],
+    roles: [
+      { name: 'ldx_manager', allowConfigure: false, snippets: [] },
+      { name: 'ldx_employee', allowConfigure: false, snippets: [] },
+    ],
+    rolesUsers: [
+      { userId: 1, roleName: 'root' },
+      { userId: 10, roleName: 'ldx_manager' },
+      { userId: 20, roleName: 'ldx_employee' },
+      { userId: 30, roleName: 'ldx_manager' },
+    ],
+  });
+  const actions = registerPublicForms(env.app);
+
+  assert.ok(env.aclAllows.some((a) => a.resource === 'dxosForms' && a.scope === 'loggedIn' && a.actions.includes('listSubmissions')));
+
+  // Save a form in org-a with a file field
+  await actions.save({
+    method: 'POST',
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      params: {
+        values: {
+          organizationId: 'org-a',
+          slug: 'intake-files',
+          title: 'Hồ sơ đính kèm',
+          targetCollection: 'latticeRequests',
+          allowedFieldsJson: [
+            { name: 'subject', label: 'Tiêu đề', type: 'string', required: true },
+            { name: 'attachment', label: 'Tệp đính kèm', type: 'file', required: false },
+          ],
+        },
+      },
+    },
+  });
+
+  const pdfBase64 = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n', 'utf8').toString('base64');
+  const submitCtx = {
+    method: 'POST',
+    ip: '10.10.1.5',
+    headers: {},
+    request: {
+      body: {
+        slug: 'intake-files',
+        values: {
+          subject: 'Hồ sơ kho lạnh #1',
+          attachment: {
+            filename: 'packing-list.pdf',
+            mimeType: 'application/pdf',
+            contentBase64: pdfBase64,
+          },
+        },
+      },
+    },
+    action: { params: { slug: 'intake-files' } },
+  };
+  await actions.submit(submitCtx);
+  assert.equal(submitCtx.body.ok, true);
+  assert.equal(submitCtx.body.payloadJson, undefined, 'Receipt must stay Zero-PII');
+  assert.equal(submitCtx.body.attachmentsJson, undefined, 'Receipt must not leak attachments');
+
+  // ldx_employee is denied (403)
+  await assert.rejects(() => actions.listSubmissions({
+    method: 'GET',
+    state: { currentUser: { id: 20 }, currentRole: 'ldx_employee' },
+    action: { params: {} },
+  }), { status: 403 });
+
+  // Cross-org mismatch is denied (403)
+  await assert.rejects(() => actions.listSubmissions({
+    method: 'GET',
+    state: { currentUser: { id: 30 }, currentRole: 'ldx_manager' },
+    action: { params: { organizationId: 'org-a' } },
+  }), { status: 403 });
+
+  // ldx_manager in org-a reads submissions cleanly via GET and POST
+  const listCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 10 }, currentRole: 'ldx_manager' },
+    action: { params: { slug: 'intake-files', search: 'kho lạnh', page: 1, pageSize: 10 } },
+  };
+  await actions.listSubmissions(listCtx);
+  assert.equal(listCtx.body.total, 1);
+  assert.equal(listCtx.body.items.length, 1);
+  assert.equal(listCtx.body.items[0].payload.subject, 'Hồ sơ kho lạnh #1');
+  assert.equal(listCtx.body.items[0].attachments[0].filename, 'packing-list.pdf');
+  assert.equal(listCtx.body.items[0].attachments[0].contentBase64, undefined, 'listSubmissions must omit raw contentBase64');
+  assert.equal(listCtx.body.items[0].statusTokenHash, undefined, 'listSubmissions must never expose statusTokenHash');
+
+  // POST method also works per PROJECT.md contract
+  const postListCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 10 }, currentRole: 'ldx_manager' },
+    action: { params: { values: { slug: 'intake-files', status: 'submitted', page: 1, pageSize: 5 } } },
+  };
+  await actions.listSubmissions(postListCtx);
+  assert.equal(postListCtx.body.total, 1);
+});
+
+test('P1-16: file attachment magic-byte/MIME validation rejects HTML/SVG/spoofed PDF, SSR & React support file input, localizeFormError, reset & manual lookup', async () => {
+  const { registerPublicForms } = require('../src/server/public-forms');
+  const env = createFakeEnv({ rolesUsers: [{ userId: 1, roleName: 'root' }] });
+  const actions = registerPublicForms(env.app);
+  await actions.save({
+    method: 'POST',
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      params: {
+        values: {
+          organizationId: 'org-a',
+          slug: 'file-sec-form',
+          title: 'Biểu mẫu tệp',
+          targetCollection: 'latticeRequests',
+          allowedFieldsJson: [
+            { name: 'subject', label: 'Tiêu đề', type: 'string', required: true },
+            { name: 'docFile', label: 'Chứng từ', type: 'file', required: true },
+          ],
+        },
+      },
+    },
+  });
+
+  // Spoofed PDF (HTML payload claiming application/pdf) must be rejected 400
+  await assert.rejects(() => actions.submit({
+    method: 'POST',
+    ip: '10.10.2.1',
+    headers: {},
+    request: {
+      body: {
+        slug: 'file-sec-form',
+        values: {
+          subject: 'Spoof test',
+          docFile: {
+            filename: 'evil.pdf',
+            mimeType: 'application/pdf',
+            contentBase64: Buffer.from('<html><script>alert(1)</script></html>', 'utf8').toString('base64'),
+          },
+        },
+      },
+    },
+    action: { params: { slug: 'file-sec-form' } },
+  }), { status: 400 });
+
+  // SVG/HTML MIME must be rejected 400
+  await assert.rejects(() => actions.submit({
+    method: 'POST',
+    ip: '10.10.2.2',
+    headers: {},
+    request: {
+      body: {
+        slug: 'file-sec-form',
+        values: {
+          subject: 'Svg test',
+          docFile: {
+            filename: 'xss.svg',
+            mimeType: 'image/svg+xml',
+            contentBase64: Buffer.from('<svg></svg>', 'utf8').toString('base64'),
+          },
+        },
+      },
+    },
+    action: { params: { slug: 'file-sec-form' } },
+  }), { status: 400 });
+
+  // SSR HTML renders file input, reset button, and manual status lookup form with eye toggle
+  const { renderPublicFormHtml } = require('../src/server/public-form-html');
+  const html = renderPublicFormHtml({
+    slug: 'file-sec-form',
+    formMeta: {
+      slug: 'file-sec-form',
+      title: 'Biểu mẫu tệp',
+      fields: [
+        { name: 'subject', label: 'Tiêu đề', type: 'string', required: true },
+        { name: 'docFile', label: 'Chứng từ', type: 'file', required: true },
+      ],
+    },
+    nonce: 'nonce-file-1234',
+  });
+  assert.match(html, /public-form-file-input-/);
+  assert.match(html, /public-form-reset-btn/);
+  assert.match(html, /public-form-manual-status-form/);
+  assert.match(html, /public-form-lookup-token-toggle/);
+
+  // React PublicFormPage renders file input, manual status lookup form, and Vietnamese error localization
+  const { createPublicFormPage } = require('../src/client-v2/public-form-page');
+  let si = 0;
+  const states = [];
+  const effects = [];
+  const fakeReact = {
+    createElement: (type, props, ...children) => ({
+      type,
+      props: props || {},
+      children: children.flat(Infinity).filter((c) => c !== null && c !== undefined && c !== false),
+    }),
+    useState(init) {
+      const i = si++;
+      if (!(i in states)) states[i] = typeof init === 'function' ? init() : init;
+      return [states[i], (u) => { states[i] = typeof u === 'function' ? u(states[i]) : u; }];
+    },
+    useEffect(fn) { effects.push(fn); },
+  };
+  const mockApi = {
+    async request(req) {
+      if (req.url === 'dxosForms:meta') {
+        return {
+          data: {
+            data: {
+              slug: 'file-sec-form',
+              title: 'Biểu mẫu tệp',
+              fields: [
+                { name: 'subject', label: 'Tiêu đề', type: 'string', required: true },
+                { name: 'docFile', label: 'Chứng từ', type: 'file', required: true },
+              ],
+            },
+          },
+        };
+      }
+      return { data: {} };
+    },
+  };
+  const PublicFormPage = createPublicFormPage({ Plugin: class {} }, fakeReact, { apiClient: mockApi });
+  si = 0;
+  PublicFormPage({ apiClient: mockApi, slug: 'file-sec-form' });
+  while (effects.length) await effects.shift()();
+  await new Promise((r) => setImmediate(r));
+  si = 0;
+  const tree = PublicFormPage({ apiClient: mockApi, slug: 'file-sec-form' });
+  const dump = JSON.stringify(tree);
+  assert.ok(dump.includes('public-form-file-input-docFile'));
+  assert.ok(dump.includes('public-form-manual-status-form'));
+  assert.ok(dump.includes('public-form-lookup-token-toggle'));
+});
+
+test('Remediation M2-4 & M2-6: ensurePublicFormSubmissionColumns caches db only after ALTER TABLE succeeds, and text/plain rejects <!-- and <?xml prefixes', async () => {
+  await withMockedNocobase(async () => {
+    const { registerPublicForms, sanitizeSubmissionPayload } = require('../src/server/public-forms');
+
+    // 1. text/plain rejects HTML comment <!-- and <?xml
+    const formDef = {
+      allowedFieldsJson: [{ name: 'noteFile', type: 'file', required: true }],
+    };
+    for (const maliciousText of [
+      '<!-- benign --><script>alert(1)</script>',
+      '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>',
+    ]) {
+      assert.throws(
+        () => sanitizeSubmissionPayload(formDef, {
+          noteFile: {
+            filename: 'note.txt',
+            mimeType: 'text/plain',
+            contentBase64: Buffer.from(maliciousText, 'utf8').toString('base64'),
+          },
+        }),
+        { code: 'FORM_FILE_CONTENT_INVALID', status: 400 },
+      );
+    }
+
+    // 2. ensurePublicFormSubmissionColumns retries ALTER TABLE when initial attempt fails (before db.sync)
+    let tableSynced = false;
+    let alterCalls = 0;
+    const forms = [
+      {
+        id: 77,
+        organizationId: 'org-retry',
+        slug: 'retry-alter-form',
+        title: 'Retry Alter Form',
+        targetCollection: 'latticeRequests',
+        allowedFieldsJson: [{ name: 'name', type: 'string', required: true }],
+        active: true,
+      },
+    ];
+    const submissions = [];
+    const targetRecords = [];
+    const pgDb = {
+      sequelize: {
+        getDialect: () => 'postgres',
+        async query(sql) {
+          if (String(sql).includes('ALTER TABLE "latticePublicFormSubmissions"')) {
+            alterCalls += 1;
+            if (!tableSynced) {
+              throw new Error('relation "latticePublicFormSubmissions" does not exist');
+            }
+          }
+          return [[]];
+        },
+        async transaction(cb) {
+          return cb({});
+        },
+      },
+      getCollection: () => null,
+      getRepository(name) {
+        if (name === 'latticePublicForms') {
+          return {
+            async findOne(opts = {}) {
+              const slug = opts.filter?.slug;
+              return forms.find((f) => f.slug === slug) || null;
+            },
+          };
+        }
+        if (name === 'latticePublicFormSubmissions') {
+          return {
+            async create({ values }) {
+              const row = { id: submissions.length + 1, ...values };
+              submissions.push(row);
+              return row;
+            },
+          };
+        }
+        if (name === 'latticeRequests') {
+          return {
+            async create({ values }) {
+              const row = { id: targetRecords.length + 1, ...values };
+              targetRecords.push(row);
+              return row;
+            },
+          };
+        }
+        return null;
+      },
+    };
+    const app = {
+      db: pgDb,
+      resourceManager: { defined: {}, define(def) { this.defined[def.name] = def; }, use() {} },
+      acl: { allow() {} },
+    };
+    registerPublicForms(app);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(alterCalls, 1, 'Initial registerPublicForms attempt should try ALTER TABLE');
+
+    // Now simulate db.sync() completing
+    tableSynced = true;
+    await app.resourceManager.defined.dxosForms.actions.submit({
+      method: 'POST',
+      ip: '203.0.113.10',
+      headers: {},
+      state: {},
+      request: {
+        body: { slug: 'retry-alter-form', values: { name: 'After Sync' } },
+      },
+      action: { params: {} },
+    });
+    assert.equal(alterCalls, 2, 'Must retry ALTER TABLE on submit after initial failure');
+
+    // Subsequent submit should NOT re-run ALTER TABLE because db was cached after success
+    await app.resourceManager.defined.dxosForms.actions.submit({
+      method: 'POST',
+      ip: '203.0.113.11',
+      headers: {},
+      state: {},
+      request: {
+        body: { slug: 'retry-alter-form', values: { name: 'Cached After Success' } },
+      },
+      action: { params: {} },
+    });
+    assert.equal(alterCalls, 2, 'Must cache db in WeakSet once ALTER TABLE succeeds');
+  });
+});
+
+test('T4-RW-03: public form SSR CSS and client-v2 buttons enforce >= 44px touch targets', () => {
+  const { renderPublicFormHtml } = require('../src/server/public-form-html');
+  const { createPublicFormPage } = require('../src/client-v2/public-form-page');
+
+  const html = renderPublicFormHtml({
+    slug: 'touch-check',
+    formMeta: {
+      slug: 'touch-check',
+      title: 'Touch Target Check',
+      fields: [{ name: 'title', label: 'Tiêu đề', type: 'string', required: true }],
+    },
+  });
+  assert.match(html, /\.dxos-btn\s*\{[^}]*min-height:\s*44px;[^}]*min-width:\s*44px;/);
+  assert.match(html, /\.dxos-btn-secondary\s*\{[^}]*min-height:\s*44px;[^}]*min-width:\s*44px;/);
+  assert.match(html, /\.dxos-btn-success\s*\{[^}]*min-height:\s*44px;[^}]*min-width:\s*44px;/);
+
+  const states = [
+    false, '', {}, '',
+    { slug: 'touch-check', title: 'Touch Check', fields: [{ name: 'title', label: 'Tiêu đề', type: 'string', required: true }] },
+    {}, '', '', false,
+    { submissionCode: 'LDX-FRM-1', statusToken: 'tok-1', status: 'submitted', submittedAt: '2026-11-26T10:00:00Z' },
+    false, null, '', 'LDX-FRM-1', 'tok-1', false,
+  ];
+  let cursor = 0;
+  const fakeReact = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState(init) {
+      const idx = cursor++;
+      if (!(idx in states)) states[idx] = typeof init === 'function' ? init() : init;
+      return [states[idx], (v) => { states[idx] = typeof v === 'function' ? v(states[idx]) : v; }];
+    },
+    useEffect() {},
+  };
+  const Page = createPublicFormPage({}, fakeReact, {});
+  const collectButtons = (node, acc = []) => {
+    if (!node || typeof node !== 'object') return acc;
+    if (node.type === 'button') acc.push(node);
+    for (const c of node.children || []) {
+      if (Array.isArray(c)) c.forEach((x) => collectButtons(x, acc));
+      else collectButtons(c, acc);
+    }
+    return acc;
+  };
+  // Check receipt + lookup buttons
+  const treeWithReceipt = Page({ slug: 'touch-check' });
+  const receiptBtns = collectButtons(treeWithReceipt);
+  assert.ok(receiptBtns.length >= 4);
+  for (const btn of receiptBtns) {
+    assert.ok(Number(btn.props?.style?.minHeight) >= 44, `Button ${btn.props?.['data-testid']} minHeight < 44`);
+    assert.ok(Number(btn.props?.style?.minWidth) >= 44, `Button ${btn.props?.['data-testid']} minWidth < 44`);
+  }
+  // Also check submit button when receipt is null
+  states[9] = null;
+  cursor = 0;
+  const treeWithForm = Page({ slug: 'touch-check' });
+  const submitBtn = collectButtons(treeWithForm).find((b) => b.props?.['data-testid'] === 'public-form-submit-btn');
+  assert.ok(submitBtn);
+  assert.ok(Number(submitBtn.props.style.minHeight) >= 44);
+  assert.ok(Number(submitBtn.props.style.minWidth) >= 44);
+});

@@ -102,8 +102,7 @@ class UiSnapshotsOrgAndQuotaPoliciesMigration extends Migration {
     if (!sequelize || typeof sequelize.transaction !== 'function') return;
     const isPostgres = typeof sequelize.getDialect === 'function' && sequelize.getDialect() === 'postgres';
     await sequelize.transaction(async (transaction) => {
-      // 1. Add nullable organizationId + index to latticeUiSnapshots (app-layer tenant scoping;
-      //    no FORCE RLS until cross-plugin callers set organizationId explicitly)
+      // 1. Add organizationId + index to latticeUiSnapshots and attach PG FORCE RLS
       await sequelize.query(
         'ALTER TABLE IF EXISTS "latticeUiSnapshots" ADD COLUMN IF NOT EXISTS "organizationId" VARCHAR(80);',
         { transaction },
@@ -112,6 +111,9 @@ class UiSnapshotsOrgAndQuotaPoliciesMigration extends Migration {
         'CREATE INDEX IF NOT EXISTS idx_lattice_ui_snapshots_org_portal_created ON "latticeUiSnapshots" ("organizationId", "portalSlug", "createdAt");',
         { transaction },
       ).catch(() => {});
+      if (isPostgres) {
+        await attachTableRls(db, 'latticeUiSnapshots', transaction);
+      }
 
       // 2. Create per-org AI quota policies table with FORCE RLS
       await sequelize.query(`
@@ -144,6 +146,7 @@ class UiSnapshotsOrgAndQuotaPoliciesMigration extends Migration {
     const isPostgres = typeof sequelize.getDialect === 'function' && sequelize.getDialect() === 'postgres';
     await sequelize.transaction(async (transaction) => {
       if (isPostgres) {
+        await detachTableRls(db, 'latticeUiSnapshots', transaction).catch(() => {});
         await detachTableRls(db, QUOTA_POLICY_TABLE, transaction);
       }
       await sequelize.query('DROP INDEX IF EXISTS uidx_lattice_ai_quota_policies_org;', { transaction });

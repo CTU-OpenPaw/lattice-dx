@@ -231,3 +231,118 @@ test('LatticeFoundationPlugin registers and unregisters /v/track gateway handler
     assert.equal(gatewayHandlers.length, 0);
   });
 });
+
+test('P0-05 & P3-05: /v/track/:code?verify=... verifies public Ed25519 proof via POST without bypassing trackingToken, and eye toggle flips token input type', async () => {
+  const { createPublicTrackGatewayHandler } = require('../src/server/public-track-html');
+  const handler = createPublicTrackGatewayHandler();
+  const makeRes = () => {
+    const headers = {};
+    let statusCode = null;
+    let body = '';
+    return {
+      writeHead(code, hdrs) {
+        statusCode = code;
+        for (const [k, v] of Object.entries(hdrs || {})) headers[k.toLowerCase()] = v;
+      },
+      setHeader(k, v) { headers[k.toLowerCase()] = v; },
+      end(chunk = '') { body += String(chunk || ''); },
+      _out: () => ({ statusCode, headers, body }),
+    };
+  };
+
+  const resVerify = makeRes();
+  assert.equal(await handler({ method: 'GET', url: '/v/track/LDX-TRK-9373FB0FE9?verify=abc123def4567890' }, resVerify), true);
+  const html = resVerify._out().body;
+  assert.match(html, /"trackingCode":"LDX-TRK-9373FB0FE9"/);
+  assert.match(html, /"verify":"abc123def4567890"/);
+
+  const scriptMatches = [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)];
+  const bootJson = JSON.parse(scriptMatches[0][1]);
+  const inlineJs = scriptMatches[1][1];
+  const fetchCalls = [];
+  const createdNodes = [];
+  const makeNode = (tag) => {
+    const node = {
+      tagName: String(tag || '').toUpperCase(),
+      attrs: {},
+      children: [],
+      listeners: {},
+      value: '',
+      textContent: '',
+      className: '',
+      classList: {
+        add(c) { node.className += ` ${c}`; },
+        remove(c) { node.className = node.className.replace(c, ''); },
+      },
+      setAttribute(k, v) { node.attrs[k] = v; if (k === 'value') node.value = v; },
+      getAttribute(k) { return node.attrs[k]; },
+      appendChild(c) { node.children.push(c); return c; },
+      removeChild(c) { const i = node.children.indexOf(c); if (i >= 0) node.children.splice(i, 1); },
+      get firstChild() { return node.children[0] || null; },
+      addEventListener(ev, fn) { (node.listeners[ev] ||= []).push(fn); },
+    };
+    createdNodes.push(node);
+    return node;
+  };
+  const rootEl = makeNode('main');
+  const bootEl = { textContent: JSON.stringify(bootJson) };
+  vm.runInNewContext(inlineJs, {
+    URLSearchParams,
+    Date,
+    Promise,
+    Error,
+    window: { location: { search: '?verify=abc123def4567890' } },
+    document: {
+      getElementById: (id) => (id === 'dxos-public-track-root' ? rootEl : (id === 'dxos-track-bootstrap' ? bootEl : null)),
+      createElement: makeNode,
+    },
+    fetch: async (u, opts) => {
+      fetchCalls.push({ u, opts });
+      return {
+        ok: true,
+        json: async () => ({
+          data: {
+            verified: true,
+            publicProofOnly: true,
+            trackingCode: 'LDX-TRK-9373FB0FE9',
+            keyId: 'ed25519-org-a-v1',
+            ledgerEntryHash: 'sha256_proof_1234',
+            signedAt: '2026-11-26T00:00:00.000Z',
+            requiresTokenForDetails: true,
+          },
+        }),
+      };
+    },
+  });
+  await new Promise((r) => setImmediate(r));
+
+  assert.equal(fetchCalls.length, 1);
+  assert.equal(fetchCalls[0].u, '/api/dxosWms:verifyTrackSignature');
+  assert.equal(fetchCalls[0].opts.method, 'POST');
+  assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), {
+    code: 'LDX-TRK-9373FB0FE9',
+    trackingCode: 'LDX-TRK-9373FB0FE9',
+    verify: 'abc123def4567890',
+  });
+  assert.equal(fetchCalls.some((c) => c.u.includes('publicTrack')), false, '?verify= must NEVER bypass trackingToken to call publicTrack');
+
+  const proofCard = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-proof-card');
+  assert.ok(proofCard, 'Expected public-track-proof-card rendered for ?verify=');
+
+  const tokenInput = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-token-input');
+  const toggleBtn = createdNodes.find((n) => n.attrs['data-testid'] === 'public-track-token-toggle');
+  assert.ok(toggleBtn, 'Expected eye toggle button for trackingToken input');
+  assert.equal(tokenInput.attrs.type, 'password');
+  for (const fn of toggleBtn.listeners.click || []) fn();
+  assert.equal(tokenInput.attrs.type, 'text');
+  for (const fn of toggleBtn.listeners.click || []) fn();
+  assert.equal(tokenInput.attrs.type, 'password');
+});
+
+test('T4-RW-02: SSR public-track-html styles enforce >=44px touch targets on inputs and buttons', () => {
+  const { renderPublicTrackHtml } = require('../src/server/public-track-html');
+  const html = renderPublicTrackHtml({ trackingCode: 'LDX-TRK-SSR-44', nonce: 'ssr-touch-44' });
+  assert.match(html, /\.dxos-input\s*\{[^}]*min-height:\s*44px/);
+  assert.match(html, /\.dxos-eye-btn\s*\{[^}]*min-height:\s*44px[^}]*min-width:\s*44px/);
+  assert.match(html, /\.dxos-btn\s*\{[^}]*min-height:\s*44px[^}]*min-width:\s*44px/);
+});

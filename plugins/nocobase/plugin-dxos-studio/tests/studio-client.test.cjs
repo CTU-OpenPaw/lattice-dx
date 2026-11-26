@@ -146,7 +146,7 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
     return Page();
   };
 
-  // Categorized vertical left-rail navigation + 11 tabs + responsive collapse under 1024px
+  // Categorized vertical left-rail navigation + 12 tabs + responsive collapse under 1024px
   const wfTree = renderTab('workflows');
   const sidebar = collectNodes(wfTree, (n) => n.props?.['data-testid'] === 'dxos-studio-sidebar')[0];
   assert.ok(sidebar, 'Expected left-rail sidebar');
@@ -155,7 +155,7 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
   assert.equal(tablists.length, 1);
   assert.equal(tablists[0].props['aria-orientation'], 'vertical');
   const tabs = collectNodes(tablists[0], (n) => n.props?.role === 'tab');
-  assert.equal(tabs.length, 11);
+  assert.equal(tabs.length, 12);
   const wfTab = tabs.find((t) => t.props['data-testid'] === 'dxos-studio-tab-workflows');
   const portTab = tabs.find((t) => t.props['data-testid'] === 'dxos-studio-tab-portals');
   assert.equal(wfTab.props['aria-selected'], true);
@@ -168,6 +168,7 @@ test('plugin-dxos-studio renders accessible single-row tablist/tabs and muted gr
     'dxos-studio-tab-pof',
     'dxos-studio-tab-outbox',
     'dxos-studio-tab-gitops',
+    'dxos-studio-tab-notify',
     'dxos-studio-tab-broker',
     'dxos-studio-tab-automation',
     'dxos-studio-tab-builder',
@@ -351,4 +352,215 @@ test('plugin-dxos-studio Tab 6 renders download .json, rollback button, and per-
   assert.ok(calls.some((c) => c.url === 'dxosStudio:solutionBundleRollback' && c.method === 'post'));
   assert.equal(stateValues.bundleInfo.diff, null);
   assert.equal(stateValues.bundleInfo.applied.roleResourcesUpserted, 1);
+});
+
+test('P1-06, P1-07, P2-07 & P2-09: GitOps upload/warnings/diff-tree, Outbox filter/payload/purge, deep-link, and minified bundle < 800 KB', async () => {
+  const fs = require('node:fs');
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+
+  // Deep-link section/tab parsing via URL search query
+  const prevWin = globalThis.window;
+  try {
+    globalThis.window = { location: { search: '?tab=governance&section=dmn' } };
+    const callsWin = [];
+    let sIdx = 0;
+    const slotsWin = [];
+    const ReactWin = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState: (init) => {
+        const i = sIdx++;
+        if (!(i in slotsWin)) slotsWin[i] = typeof init === 'function' ? init() : init;
+        return [slotsWin[i], (n) => { slotsWin[i] = typeof n === 'function' ? n(slotsWin[i]) : n; }];
+      },
+      useEffect: () => {},
+      useMemo: (fn) => fn(),
+      useCallback: (fn) => fn,
+    };
+    const mockWinClient = { useAPIClient: () => ({ request: async (req) => { callsWin.push(req); return { data: { data: {} } }; } }) };
+    const WinPage = createDxosStudioSettingsPage(mockWinClient, ReactWin, {}, {});
+    const winTree = WinPage();
+    assert.equal(slotsWin[0], 'governance');
+    assert.ok(collectNodes(winTree, (n) => n.props?.['data-testid'] === 'dxos-studio-tab-dmn' && n.props?.['aria-pressed'] === true).length === 1);
+  } finally {
+    globalThis.window = prevWin;
+  }
+
+  // Outbox status filter, payload inspect, pagination & 2-step purge
+  const calls = [];
+  const renderStateful = (activeTab) => {
+    let idx = 0;
+    const slotValues = [];
+    const React = {
+      Fragment: 'Fragment',
+      createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+      useState: (init) => {
+        const cur = idx++;
+        const v = typeof init === 'function' ? init() : init;
+        if (slotValues[cur] === undefined) slotValues[cur] = cur === 0 ? activeTab : v;
+        return [slotValues[cur], (next) => { slotValues[cur] = typeof next === 'function' ? next(slotValues[cur]) : next; }];
+      },
+      useEffect: () => {},
+      useMemo: (fn) => fn(),
+      useCallback: (fn) => fn,
+    };
+    const mockClient = {
+      useAPIClient: () => ({
+        request: async (req) => {
+          calls.push(req);
+          if (req.url === 'dxosStudio:outboxDlqList') {
+            return { data: { data: { total: 40, page: req.params?.page || 1, pageSize: 25, summary: { failed: 1, retry: 1, pending: 0, processing: 0, delivered: 2 }, items: [{ id: 1, eventId: 'evt-1', organizationId: 'org-a', collectionName: 'latticeOrders', recordId: 5, attempts: 3, status: 'failed', errorCode: 'E_CONN', lastError: 'Timeout 5000ms', payloadJson: { orderNo: 'ORD-01' } }] } } };
+          }
+          if (req.url === 'dxosStudio:outboxDlqPurge') {
+            return { data: { data: { purgedCount: 1, state: req.data.state } } };
+          }
+          return { data: { data: {} } };
+        },
+      }),
+    };
+    const PageInner = createDxosStudioSettingsPage(mockClient, React, {}, {});
+    const render = () => {
+      idx = 0;
+      return PageInner();
+    };
+    return { tree: render(), Page: render };
+  };
+
+  const outboxCtx = renderStateful('outbox');
+  // Seed outboxData directly by clicking status filter & refresh
+  const statusSelect = collectNodes(outboxCtx.tree, (n) => n.props?.['data-testid'] === 'dxos-outbox-status-filter')[0];
+  assert.ok(statusSelect);
+  await statusSelect.props.onChange({ target: { value: 'all' } });
+  const outboxNext = outboxCtx.Page();
+  assert.ok(calls.some((c) => c.url === 'dxosStudio:outboxDlqList' && c.params?.state === 'all'));
+  const toggleBtn = collectNodes(outboxNext, (n) => n.props?.['data-testid'] === 'dxos-outbox-payload-toggle-evt-1')[0];
+  assert.ok(toggleBtn);
+  toggleBtn.props.onClick();
+  const outboxExpanded = outboxCtx.Page();
+  const payloadView = collectNodes(outboxExpanded, (n) => n.props?.['data-testid'] === 'dxos-outbox-payload-view-evt-1')[0];
+  assert.ok(payloadView && textOf(payloadView).includes('ORD-01'));
+  assert.ok(textOf(payloadView).includes('Timeout 5000ms'));
+
+  // 2-step purge
+  collectNodes(outboxExpanded, (n) => n.props?.['data-testid'] === 'dxos-outbox-purge-btn')[0].props.onClick();
+  const outboxConfirm = outboxCtx.Page();
+  const confirmPurgeBtn = collectNodes(outboxConfirm, (n) => n.props?.['data-testid'] === 'dxos-outbox-purge-confirm-btn')[0];
+  assert.ok(confirmPurgeBtn);
+  await confirmPurgeBtn.props.onClick();
+  assert.ok(calls.some((c) => c.url === 'dxosStudio:outboxDlqPurge' && c.method === 'post'));
+
+  // P2-07: Purge button disabled when outboxState is pending or processing
+  await statusSelect.props.onChange({ target: { value: 'pending' } });
+  const outboxPending = outboxCtx.Page();
+  const pendingPurgeBtn = collectNodes(outboxPending, (n) => n.props?.['data-testid'] === 'dxos-outbox-purge-btn')[0];
+  assert.ok(pendingPurgeBtn);
+  assert.equal(pendingPurgeBtn.props.disabled, true);
+  assert.ok(textOf(pendingPurgeBtn).includes('Không thể dọn'));
+  await statusSelect.props.onChange({ target: { value: 'processing' } });
+  const outboxProcessing = outboxCtx.Page();
+  const processingPurgeBtn = collectNodes(outboxProcessing, (n) => n.props?.['data-testid'] === 'dxos-outbox-purge-btn')[0];
+  assert.ok(processingPurgeBtn);
+  assert.equal(processingPurgeBtn.props.disabled, true);
+
+  // GitOps upload input, warnings banner, connectors card & item-level diff tree
+  const gitopsCtx = renderStateful('gitops');
+  const fileInput = collectNodes(gitopsCtx.tree, (n) => n.props?.['data-testid'] === 'dxos-studio-gitops-file-input')[0];
+  assert.ok(fileInput);
+  await fileInput.props.onChange({
+    target: {
+      files: [{ name: 'prod-bundle.json', text: async () => '{"metadata":{"schemaVersion":"latticedx.solution-bundle/v3"},"roles":[]}' }],
+    },
+  });
+  const gitopsAfterUpload = gitopsCtx.Page();
+  assert.ok(JSON.stringify(gitopsAfterUpload).includes('prod-bundle.json'));
+
+  // P2-09: Built Studio client bundle must stay < 800 KB when present (minified)
+  const bundlePath = path.join(PLUGIN_ROOT, 'dist/client/index.js');
+  if (fs.existsSync(bundlePath)) {
+    const stats = fs.statSync(bundlePath);
+    assert.ok(stats.size < 800 * 1024, `Studio dist/client/index.js (${stats.size} bytes) must be < 800 KB`);
+  }
+});
+
+test('P1-06 regression: GitOps Diff Tree renders solution-bundle.js item-keyed diff.details (add/change/remove field before->after)', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  let idx = 0;
+  const slots = [];
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const cur = idx++;
+      const v = typeof init === 'function' ? init() : init;
+      if (slots[cur] === undefined) slots[cur] = cur === 0 ? 'gitops' : v;
+      return [slots[cur], (next) => { slots[cur] = typeof next === 'function' ? next(slots[cur]) : next; }];
+    },
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+  };
+  const mockClient = {
+    useAPIClient: () => ({
+      request: async (req) => {
+        if (req.url === 'dxosStudio:solutionBundleImport') {
+          return {
+            data: {
+              data: {
+                dryRun: true,
+                diff: {
+                  summary: { added: 1, changed: 1, unchanged: 0, removed: 1 },
+                  sections: {
+                    slaPolicies: { added: [], changed: ['ticket:normal'], unchanged: [], removed: [] },
+                    roles: { added: ['ldx_qa'], changed: [], unchanged: [], removed: ['ldx_old'] },
+                  },
+                  details: {
+                    slaPolicies: {
+                      'ticket:normal': {
+                        action: 'change',
+                        fields: [{ field: 'warnAfterMinutes', before: 120, after: 90 }],
+                      },
+                    },
+                    roles: {
+                      ldx_qa: {
+                        action: 'add',
+                        fields: [{ field: 'title', before: undefined, after: 'QA Reviewer' }],
+                      },
+                      ldx_old: {
+                        action: 'remove',
+                        fields: [{ field: 'title', before: 'Legacy Role', after: undefined }],
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          };
+        }
+        return { data: { data: {} } };
+      },
+    }),
+  };
+  const PageInner = createDxosStudioSettingsPage(mockClient, React, {}, {});
+  const render = () => {
+    idx = 0;
+    return PageInner();
+  };
+  let tree = render();
+  const textarea = collectNodes(tree, (n) => n.type === 'textarea')[0];
+  textarea.props.onChange({ target: { value: '{"metadata":{"schemaVersion":"latticedx.solution-bundle/v3"}}' } });
+  tree = render();
+  const dryRunBtn = collectNodes(tree, (n) => n.type === 'button' && textOf(n).includes('Kiểm tra Diff'))[0];
+  assert.ok(dryRunBtn);
+  await dryRunBtn.props.onClick();
+  tree = render();
+
+  const diffTree = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-studio-gitops-diff-tree')[0];
+  assert.ok(diffTree, 'dxos-studio-gitops-diff-tree must render after Dry-Run');
+  const diffText = textOf(diffTree);
+  assert.ok(diffText.includes('ticket:normal'), 'Diff tree must render changed item key');
+  assert.ok(diffText.includes('warnAfterMinutes'), 'Diff tree must render changed field name');
+  assert.ok(diffText.includes('120'), 'Diff tree must render field before value');
+  assert.ok(diffText.includes('90'), 'Diff tree must render field after value');
+  assert.ok(diffText.includes('QA Reviewer'), 'Diff tree must render added field value');
+  assert.ok(diffText.includes('Legacy Role'), 'Diff tree must render removed field value');
 });

@@ -185,7 +185,7 @@ async function resolveOrgApproverTargets(db, organizationId, requesterUserId) {
   });
 }
 
-async function notifyApproversOfPendingApproval(db, row) {
+async function notifyApproversOfPendingApproval(db, row, transaction = null) {
   try {
     const notifRepo = db?.getRepository?.('latticeNotifications');
     if (!notifRepo || typeof notifRepo.create !== 'function') return [];
@@ -207,6 +207,7 @@ async function notifyApproversOfPendingApproval(db, row) {
     const title = `Yêu cầu AI chờ duyệt (${operation} ${targetCollection})`.slice(0, 255);
     const body = `${requesterUsername} qua ${aiEmployee} đề xuất ${operation} trên ${targetCollection}${recordTag}.`.slice(0, 4000);
     const created = [];
+    const txOpt = transaction ? { transaction } : {};
     for (const target of targets) {
       const item = await notifRepo.create({
         values: {
@@ -224,6 +225,7 @@ async function notifyApproversOfPendingApproval(db, row) {
           channelsDispatched: ['in_app'],
           active: true,
         },
+        ...txOpt,
       });
       created.push(item);
     }
@@ -244,6 +246,7 @@ async function enqueueAiApproval(db, {
   diffPreview = {},
   riskLevel = 'medium',
   ttlMs = DEFAULT_HITL_TTL_MS,
+  transaction = null,
 } = {}) {
   if (!actor?.userId) throw failHitl('NATIVE_LOGIN_REQUIRED', 401, 'Yêu cầu đăng nhập.');
   if (!actor?.organizationId) throw failHitl('ORG_MEMBERSHIP_REQUIRED', 403, 'Cần phạm vi tổ chức hợp lệ.');
@@ -260,7 +263,8 @@ async function enqueueAiApproval(db, {
   const safeTtl = Math.max(60_000, Number(ttlMs) || DEFAULT_HITL_TTL_MS);
   const expiresAt = new Date(Date.now() + safeTtl);
 
-  const created = await runWithTenantRls(db, actor.organizationId, async () => {
+  const runEnqueue = async (tx = null) => {
+    const txOpt = tx ? { transaction: tx } : {};
     const row = await repo.create({
       values: {
         organizationId: String(actor.organizationId),
@@ -277,10 +281,15 @@ async function enqueueAiApproval(db, {
         status: 'pending',
         expiresAt,
       },
+      ...txOpt,
     });
-    await runInRlsSavepoint(db, () => notifyApproversOfPendingApproval(db, row));
+    await runInRlsSavepoint(db, () => notifyApproversOfPendingApproval(db, row, tx));
     return row;
-  });
+  };
+
+  const created = transaction
+    ? await runEnqueue(transaction)
+    : await runWithTenantRls(db, actor.organizationId, (tx) => runEnqueue(tx));
 
   const serialized = serializeApprovalRow(created);
   await recordAiAuditLog(db, {
@@ -293,6 +302,7 @@ async function enqueueAiApproval(db, {
     argsSummary: { approvalId: serialized.id, targetCollection, targetRecordId, operation },
     status: 'pending',
     resultSummary: `Enqueued HITL approval #${serialized.id} (${operation} ${targetCollection})`,
+    ...(transaction ? { transaction } : {}),
   });
   return serialized;
 }

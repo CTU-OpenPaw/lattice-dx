@@ -117,10 +117,10 @@ function redactPiiText(rawText) {
     [/(Bearer\s+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]'],
     [/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]'],
     [/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]'],
+    [/(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)(?:[A-Z]{2}\d{2}(?:[A-Z0-9]{6,30}|(?:[ -][A-Z0-9]{2,4}){0,7}[ -](?=[A-Z0-9]*\d)[A-Z0-9]{1,4})|\d[\d -]{6,22}\d)(?![0-9A-Za-z-])/gi, '$1[REDACTED_BANK]'],
     [/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]'],
     [/(?<![0-9A-Za-z-])0\d{11}(?![0-9A-Za-z-])/g, '[REDACTED_CCCD]'],
     [/(?<![0-9A-Za-z-])(?:\+?84[\s.-]?|0)(?:3|5|7|8|9)(?:[\s.-]?\d){8}(?![0-9A-Za-z-])/g, '[REDACTED_PHONE]'],
-    [/(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)[A-Z0-9 -]{8,24}(?=\s*[,;.\n]|$)/gi, '$1[REDACTED_BANK]'],
     [/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]'],
   ];
   for (let i = 0; i < rules.length; i += 1) {
@@ -366,42 +366,52 @@ async function saveQuotaPolicy(db, organizationId, rawInput = {}, actor = {}, en
   const patch = validateQuotaLimitsInput(rawInput);
   const current = await getQuotaLimitsForOrg(db, org, env);
   const nextLimits = getQuotaLimits(env, { ...current, ...patch });
-  quotaPolicyOverrides.set(org, nextLimits);
   const updatedByUsername = String(actor?.username || '').slice(0, 120) || null;
 
   if (db) {
-    await runInOptionalTenantRls(db, org, async (transaction) => {
-      const txOpt = transaction ? { transaction } : {};
-      const repo = db?.getRepository?.('latticeAiQuotaPolicies');
-      if (repo && typeof repo.findOne === 'function') {
-        const existing = await repo.findOne({ filter: { organizationId: org }, ...txOpt }).catch(() => null);
-        if (existing && typeof existing.update === 'function') {
-          await existing.update({ ...nextLimits, updatedByUsername }, txOpt);
-          return;
+    try {
+      await runInOptionalTenantRls(db, org, async (transaction) => {
+        const txOpt = transaction ? { transaction } : {};
+        const repo = db?.getRepository?.('latticeAiQuotaPolicies');
+        if (repo && typeof repo.findOne === 'function') {
+          const existing = await repo.findOne({ filter: { organizationId: org }, ...txOpt });
+          if (existing && typeof existing.update === 'function') {
+            await existing.update({ ...nextLimits, updatedByUsername }, txOpt);
+            return;
+          }
+          if (typeof repo.create === 'function') {
+            await repo.create({ values: { organizationId: org, ...nextLimits, updatedByUsername }, ...txOpt });
+            return;
+          }
         }
-        if (typeof repo.create === 'function') {
-          await repo.create({ values: { organizationId: org, ...nextLimits, updatedByUsername }, ...txOpt });
-          return;
+        if (typeof db?.sequelize?.query === 'function') {
+          await db.sequelize.query(
+            `INSERT INTO "latticeAiQuotaPolicies" ("createdAt", "updatedAt", "organizationId", "orgDailyCalls", "userDailyCalls", "orgDailyTokens", "orgDailyUsd", "updatedByUsername")
+             VALUES (NOW(), NOW(), :organizationId, :orgDailyCalls, :userDailyCalls, :orgDailyTokens, :orgDailyUsd, :updatedByUsername)
+             ON CONFLICT ("organizationId")
+             DO UPDATE SET
+               "updatedAt" = NOW(),
+               "orgDailyCalls" = EXCLUDED."orgDailyCalls",
+               "userDailyCalls" = EXCLUDED."userDailyCalls",
+               "orgDailyTokens" = EXCLUDED."orgDailyTokens",
+               "orgDailyUsd" = EXCLUDED."orgDailyUsd",
+               "updatedByUsername" = EXCLUDED."updatedByUsername";`,
+            { replacements: { organizationId: org, ...nextLimits, updatedByUsername }, ...txOpt },
+          );
         }
-      }
-      if (typeof db?.sequelize?.query === 'function') {
-        await db.sequelize.query(
-          `INSERT INTO "latticeAiQuotaPolicies" ("createdAt", "updatedAt", "organizationId", "orgDailyCalls", "userDailyCalls", "orgDailyTokens", "orgDailyUsd", "updatedByUsername")
-           VALUES (NOW(), NOW(), :organizationId, :orgDailyCalls, :userDailyCalls, :orgDailyTokens, :orgDailyUsd, :updatedByUsername)
-           ON CONFLICT ("organizationId")
-           DO UPDATE SET
-             "updatedAt" = NOW(),
-             "orgDailyCalls" = EXCLUDED."orgDailyCalls",
-             "userDailyCalls" = EXCLUDED."userDailyCalls",
-             "orgDailyTokens" = EXCLUDED."orgDailyTokens",
-             "orgDailyUsd" = EXCLUDED."orgDailyUsd",
-             "updatedByUsername" = EXCLUDED."updatedByUsername";`,
-          { replacements: { organizationId: org, ...nextLimits, updatedByUsername }, ...txOpt },
-        ).catch(() => {});
-      }
-    });
+      });
+    } catch (err) {
+      if (err?.code === 'DXOS_QUOTA_POLICY_PERSIST_FAILED') throw err;
+      const pgCode = err?.parent?.code || err?.original?.code || err?.code;
+      const isUnavailable = pgCode === 'ECONNREFUSED' || pgCode === '57P01' || pgCode === '57P03' || pgCode === '42P01';
+      throw Object.assign(
+        new Error(`Không thể lưu chính sách hạn mức AI vào cơ sở dữ liệu: ${err?.message || 'DB error'}`),
+        { status: err?.status || (isUnavailable ? 503 : 500), code: 'DXOS_QUOTA_POLICY_PERSIST_FAILED', cause: err },
+      );
+    }
   }
 
+  quotaPolicyOverrides.set(org, nextLimits);
   return { organizationId: org, limits: nextLimits, updatedByUsername };
 }
 
@@ -731,18 +741,20 @@ async function hydrateQuotaBucketFromDb(db, organizationId, now = new Date()) {
 }
 
 async function recordQuotaUsagePersistent(db, actor = {}, metrics = {}, now = new Date()) {
-  const mem = recordQuotaUsage(actor, metrics, now);
-  if (!db) return mem;
+  if (!db) return recordQuotaUsage(actor, metrics, now);
   const org = String(actor.organizationId || 'default').trim() || 'default';
   const day = utcDayKey(now);
   const userKey = String(actor.userId || actor.username || 'anon');
   const { promptTokens: pTok, completionTokens: cTok } = normalizeTokenUsage(metrics);
   const costUsd = Math.max(0, Number(metrics.costUsd) || 0);
   const piiRedacted = nonNegInt(metrics.piiRedactedCount ?? metrics.piiRedacted);
+  const hasSequelizeQuery = typeof db?.sequelize?.query === 'function';
+  const quotaTableKnownAbsent = typeof db?.hasCollection === 'function' && !db.hasCollection('latticeAiQuotaUsage');
 
   await runInOptionalTenantRls(db, org, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
-    if (typeof db?.sequelize?.query === 'function') {
+    let missingQuotaTable = quotaTableKnownAbsent;
+    if (hasSequelizeQuery && !quotaTableKnownAbsent) {
       try {
         await db.sequelize.query(
           `INSERT INTO "latticeAiQuotaUsage" ("createdAt", "updatedAt", "organizationId", "dayKey", "userId", calls, "promptTokens", "completionTokens", "costUsd", "piiRedacted")
@@ -769,44 +781,114 @@ async function recordQuotaUsagePersistent(db, actor = {}, metrics = {}, now = ne
           },
         );
         return;
-      } catch {
-        // Fall through to repository fallback
+      } catch (err) {
+        const pgCode = err?.parent?.code || err?.original?.code || err?.code;
+        if (pgCode === '42P01') {
+          missingQuotaTable = true;
+        } else {
+          throw Object.assign(
+            new Error(`Không thể ghi nhận mức sử dụng hạn mức AI: ${err?.message || 'DB error'}`),
+            { status: err?.status || (pgCode === 'ECONNREFUSED' ? 503 : 500), code: 'DXOS_QUOTA_USAGE_PERSIST_FAILED', cause: err },
+          );
+        }
       }
     }
 
-    const repo = db?.getRepository?.('latticeAiQuotaUsage');
-    if (repo && typeof repo.findOne === 'function') {
-      try {
-        const existing = await repo.findOne({ filter: { organizationId: org, dayKey: day, userId: userKey }, ...txOpt });
-        if (existing && typeof existing.update === 'function') {
-          await existing.update({
-            calls: (Number(readVal(existing, 'calls')) || 0) + 1,
-            promptTokens: (Number(readVal(existing, 'promptTokens')) || 0) + pTok,
-            completionTokens: (Number(readVal(existing, 'completionTokens')) || 0) + cTok,
-            costUsd: Number(((Number(readVal(existing, 'costUsd')) || 0) + costUsd).toFixed(6)),
-            piiRedacted: (Number(readVal(existing, 'piiRedacted')) || 0) + piiRedacted,
-          }, txOpt);
-        } else if (typeof repo.create === 'function') {
-          await repo.create({
-            values: {
-              organizationId: org,
-              dayKey: day,
-              userId: userKey,
-              calls: 1,
-              promptTokens: pTok,
-              completionTokens: cTok,
-              costUsd: Number(costUsd.toFixed(6)),
-              piiRedacted,
-            },
-            ...txOpt,
-          });
+    if (!hasSequelizeQuery || missingQuotaTable) {
+      const repo = db?.getRepository?.('latticeAiQuotaUsage');
+      if (repo && typeof repo.findOne === 'function') {
+        try {
+          const existing = await repo.findOne({ filter: { organizationId: org, dayKey: day, userId: userKey }, ...txOpt });
+          if (existing && typeof existing.update === 'function') {
+            await existing.update({
+              calls: (Number(readVal(existing, 'calls')) || 0) + 1,
+              promptTokens: (Number(readVal(existing, 'promptTokens')) || 0) + pTok,
+              completionTokens: (Number(readVal(existing, 'completionTokens')) || 0) + cTok,
+              costUsd: Number(((Number(readVal(existing, 'costUsd')) || 0) + costUsd).toFixed(6)),
+              piiRedacted: (Number(readVal(existing, 'piiRedacted')) || 0) + piiRedacted,
+            }, txOpt);
+          } else if (typeof repo.create === 'function') {
+            await repo.create({
+              values: {
+                organizationId: org,
+                dayKey: day,
+                userId: userKey,
+                calls: 1,
+                promptTokens: pTok,
+                completionTokens: cTok,
+                costUsd: Number(costUsd.toFixed(6)),
+                piiRedacted,
+              },
+              ...txOpt,
+            });
+          }
+        } catch (err) {
+          const pgCode = err?.parent?.code || err?.original?.code || err?.code;
+          if (pgCode !== '42P01') {
+            throw Object.assign(
+              new Error(`Không thể ghi nhận mức sử dụng hạn mức AI: ${err?.message || 'DB error'}`),
+              { status: err?.status || 500, code: 'DXOS_QUOTA_USAGE_PERSIST_FAILED', cause: err },
+            );
+          }
         }
-      } catch {
-        // Best-effort DB write; in-memory bucket already updated
       }
     }
   });
-  return mem;
+  return recordQuotaUsage(actor, metrics, now);
+}
+
+async function checkAndConsumeAiQuotaPersistent(db, actor = {}, { estimatedPromptTokens = 0, env = process.env, now = new Date(), consume = false } = {}) {
+  const org = String(actor?.organizationId || 'default').trim() || 'default';
+  const day = utcDayKey(now);
+  const userKey = String(actor?.userId || actor?.username || 'anon');
+  const hasPgSql = typeof db?.sequelize?.query === 'function' && db?.sequelize?.getDialect?.() === 'postgres';
+  const quotaTableKnownAbsent = typeof db?.hasCollection === 'function' && !db.hasCollection('latticeAiQuotaUsage');
+
+  if (db && hasPgSql && !quotaTableKnownAbsent) {
+    let fallbackNeeded = false;
+    let checkRes = null;
+    await runInOptionalTenantRls(db, org, async (transaction) => {
+      const txOpt = transaction ? { transaction } : {};
+      try {
+        const [usageRows] = await db.sequelize.query(
+          'SELECT "userId", calls, "promptTokens", "completionTokens", "costUsd", "piiRedacted" FROM "latticeAiQuotaUsage" WHERE "organizationId" = :organizationId AND "dayKey" = :dayKey FOR UPDATE;',
+          { replacements: { organizationId: org, dayKey: day }, ...txOpt },
+        );
+        const bucket = getOrCreateOrgBucket(org, now);
+        if (Array.isArray(usageRows) && usageRows.length) {
+          applyAggregatedRowsToBucket(bucket, usageRows);
+          bucket.hydrated = true;
+        }
+        await getQuotaLimitsForOrg(db, org, env);
+        checkRes = checkAndConsumeAiQuota(actor, { estimatedPromptTokens, env, now });
+        if (consume) {
+          await db.sequelize.query(
+            `INSERT INTO "latticeAiQuotaUsage" ("createdAt", "updatedAt", "organizationId", "dayKey", "userId", calls, "promptTokens", "completionTokens", "costUsd", "piiRedacted")
+             VALUES (NOW(), NOW(), :organizationId, :dayKey, :userId, 1, 0, 0, 0, 0)
+             ON CONFLICT ("organizationId", "dayKey", "userId")
+             DO UPDATE SET "updatedAt" = NOW(), calls = "latticeAiQuotaUsage".calls + 1;`,
+            { replacements: { organizationId: org, dayKey: day, userId: userKey }, ...txOpt },
+          );
+          recordQuotaUsage(actor, { promptTokens: 0, completionTokens: 0 }, now);
+        }
+      } catch (err) {
+        const pgCode = err?.parent?.code || err?.original?.code || err?.code;
+        if (pgCode === '42P01') {
+          fallbackNeeded = true;
+        } else {
+          throw err;
+        }
+      }
+    });
+    if (!fallbackNeeded) return checkRes;
+  }
+
+  await hydrateQuotaBucketFromDb(db, org, now);
+  const res = checkAndConsumeAiQuota(actor, { estimatedPromptTokens, env, now });
+  if (consume) {
+    await recordQuotaUsagePersistent(db, actor, { promptTokens: 0, completionTokens: 0 }, now);
+  }
+  return res;
 }
 
 function getQuotaSummary(organizationId, env = process.env, now = new Date(), overrideLimits = null) {
@@ -860,6 +942,7 @@ module.exports = {
   getQuotaLimitsForOrg,
   saveQuotaPolicy,
   checkAndConsumeAiQuota,
+  checkAndConsumeAiQuotaPersistent,
   recordQuotaUsage,
   getQuotaSummary,
   hydrateQuotaBucketFromDb,

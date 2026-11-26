@@ -85,7 +85,7 @@ const CREATIVE_THEMES = {
 };
 
 const DEFAULT_CREATIVE_BLUEPRINT = JSON.stringify({
-  title: 'Buồng Điều hành Thông minh [AI Studio]',
+  title: 'Buồng Điều hành Thông minh',
   subtitle: 'Lắp ghép tự do đồng hồ đo, pipeline, quy tắc cảnh báo & nút thao tác theo RBAC.',
   theme: 'industrial-cockpit',
   columns: 2,
@@ -163,7 +163,7 @@ function parseCreativeBlueprint(raw) {
   }
 
   return {
-    title: String(obj.title || 'Buồng Điều hành Sáng tạo [AI]').trim().slice(0, 120),
+    title: String(obj.title || 'Buồng Điều hành Sáng tạo').trim().slice(0, 120),
     subtitle: obj.subtitle ? String(obj.subtitle).trim().slice(0, 260) : '',
     badge: obj.badge ? String(obj.badge).trim().slice(0, 48) : 'CREATIVE STUDIO · GUARDRAILED DSL',
     theme,
