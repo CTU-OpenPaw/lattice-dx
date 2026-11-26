@@ -325,8 +325,8 @@ function createMobilePwaGatewayHandler({ readIndexHtml, precacheAssets, Gateway 
   };
 }
 
-function buildServiceWorkerScript({ version = '0.4.1', precacheAssets = [] } = {}) {
-  const safeVersion = String(version || '0.4.1').replace(SAFE_VERSION_RE, '').slice(0, 32) || '0.4.1';
+function buildServiceWorkerScript({ version = '0.4.2', precacheAssets = [] } = {}) {
+  const safeVersion = String(version || '0.4.2').replace(SAFE_VERSION_RE, '').slice(0, 32) || '0.4.2';
   const cacheName = `latticedx-field-pwa-v${safeVersion}`;
   const shellUrls = [
     '/v/mobile',
@@ -421,7 +421,7 @@ function buildServiceWorkerScript({ version = '0.4.1', precacheAssets = [] } = {
 function registerMobilePwaActions(targetOrOpts = {}, maybeOpts = {}) {
   const isAppTarget = Boolean(targetOrOpts && typeof targetOrOpts === 'object' && targetOrOpts.resourceManager);
   const opts = isAppTarget ? maybeOpts : targetOrOpts;
-  const version = typeof opts?.version === 'string' && opts.version.trim() ? opts.version.trim() : '0.4.1';
+  const version = typeof opts?.version === 'string' && opts.version.trim() ? opts.version.trim() : '0.4.2';
 
   const manifestHandler = async (ctx, next) => {
     if (ctx?.method && String(ctx.method).trim().toUpperCase() !== 'GET') {

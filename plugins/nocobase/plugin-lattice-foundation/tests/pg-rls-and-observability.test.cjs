@@ -1578,13 +1578,13 @@ test('Task 1 remediation: foundation custom-resource HTTP handlers wrap DB opera
   }
 });
 
-test('version lock is 0.4.1 across package/openapi/observability and OpenAPI registers dxosForms, dxosApprovals, dxosNotify + server index loads cleanly', async () => {
+test('version lock is 0.4.2 across package/openapi/observability and OpenAPI registers dxosForms, dxosApprovals, dxosNotify + server index loads cleanly', async () => {
   const pkg = require('../package.json');
-  assert.equal(pkg.version, '0.4.1');
+  assert.equal(pkg.version, '0.4.2');
 
   const { buildOpenApiSpec } = require('../src/server/openapi-spec');
   const spec = buildOpenApiSpec({ serverUrl: 'http://localhost:13015' });
-  assert.equal(spec.info.version, '0.4.1');
+  assert.equal(spec.info.version, '0.4.2');
 
   // Public form endpoints have security: []
   for (const pubPath of ['/api/dxosForms:meta', '/api/dxosForms:submit', '/api/dxosForms:status']) {

@@ -721,7 +721,7 @@ function createOtelExporter(options = {}) {
   const serviceVersion =
     typeof options.serviceVersion === 'string' && options.serviceVersion.trim()
       ? options.serviceVersion.trim()
-      : '0.4.1';
+      : '0.4.2';
   const rawEndpoint =
     options.endpoint !== undefined ? options.endpoint : process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
   const tracesUrl = normalizeEndpoint(rawEndpoint);
@@ -838,7 +838,7 @@ function createOtelExporter(options = {}) {
                 {
                   scope: {
                     name: '@latticedx/otel-exporter',
-                    version: '0.4.1',
+                    version: '0.4.2',
                   },
                   spans: batch,
                 },

@@ -14,7 +14,7 @@ const workflowBundle = require('./manifests/workflow-bundle.json');
 
 const packageInfo = {
   name: '@latticedx/uc1-procurement',
-  version: '0.4.1',
+  version: '0.4.2',
   useCase: 'UC1: Mua sắm & Bàn giao tài sản',
   schemaVersion: 1
 };

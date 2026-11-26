@@ -271,16 +271,16 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     // 1. Observability & Field PWA (public endpoints)
     const healthRes = await okActor('anon', 'dxos:health');
     assert.equal(healthRes.data?.status, 'ok');
-    assert.equal(healthRes.data?.version, '0.4.1');
+    assert.equal(healthRes.data?.version, '0.4.2');
 
     const openapiRes = await okActor('anon', 'dxos:openapi');
     assert.equal(openapiRes.data?.openapi, '3.1.0');
-    assert.equal(openapiRes.data?.info?.version, '0.4.1');
+    assert.equal(openapiRes.data?.info?.version, '0.4.2');
     assert.ok(openapiRes.data?.paths && typeof openapiRes.data.paths === 'object');
 
     const asyncapiRes = await okActor('anon', 'dxos:asyncapi');
     assert.equal(asyncapiRes.data?.asyncapi, '3.0.0');
-    assert.equal(asyncapiRes.data?.info?.version, '0.4.1');
+    assert.equal(asyncapiRes.data?.info?.version, '0.4.2');
     assert.ok(asyncapiRes.data?.channels && typeof asyncapiRes.data.channels === 'object');
 
     const manifestRes = await okActor('anon', 'dxos:manifest');

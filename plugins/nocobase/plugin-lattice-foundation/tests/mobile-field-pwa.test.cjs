@@ -211,7 +211,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   }
 
   // 2. Service Worker Script syntax + runtime Cache Storage invariants
-  const swScript = buildServiceWorkerScript({ version: '0.4.1' });
+  const swScript = buildServiceWorkerScript({ version: '0.4.2' });
   assert.equal(typeof swScript, 'string');
   assert.doesNotThrow(() => new vm.Script(swScript), 'sw.js must be valid JavaScript');
 
@@ -375,7 +375,7 @@ test('server mobile-pwa: manifest has zero PII/secrets, sw.js headers & NetworkO
   });
   assert.ok(noStorePromise);
   await noStorePromise;
-  const activeCache = openedCaches.get('latticedx-field-pwa-v0.4.1');
+  const activeCache = openedCaches.get('latticedx-field-pwa-v0.4.2');
   assert.equal(activeCache._entries.has('/v/assets/private-nostore.js'), false);
 
   let redirectedPromise = null;
@@ -2500,7 +2500,7 @@ test('P1-15 & P2-04: PNG 192/512 icons, /v/mobile SSR shell, SW precaching, Twin
   const { buildEpodPayload, createMobileFieldPwaPage } = require('../src/client-v2/mobile-field-pwa');
 
   // 1. PNG 192 & 512 endpoints return valid PNG magic bytes & dimensions
-  const actions = registerMobilePwaActions({ version: '0.4.1' });
+  const actions = registerMobilePwaActions({ version: '0.4.2' });
   for (const [actionName, expectedSize] of [['icon-192.png', 192], ['icon-512.png', 512]]) {
     const ctx = { method: 'GET', response: { headers: {} }, set(k, v) { this.response.headers[k] = v; } };
     await actions[actionName](ctx);
@@ -2529,7 +2529,7 @@ test('P1-15 & P2-04: PNG 192/512 icons, /v/mobile SSR shell, SW precaching, Twin
   assert.match(body, /<link rel="apple-touch-icon" href="\/api\/dxos:icon-192\.png">/);
   assert.match(body, /serviceWorker\.register\(['"]\/api\/dxos:sw\.js['"]/);
 
-  const swWithChunks = buildServiceWorkerScript({ version: '0.4.1', precacheAssets: ['/v/assets/index-abc.js', '/v/assets/index-xyz.css'] });
+  const swWithChunks = buildServiceWorkerScript({ version: '0.4.2', precacheAssets: ['/v/assets/index-abc.js', '/v/assets/index-xyz.css'] });
   assert.match(swWithChunks, /\/v\/assets\/index-abc\.js/);
   assert.match(swWithChunks, /\/v\/assets\/index-xyz\.css/);
 
@@ -2716,7 +2716,7 @@ test('Remediation M2-1: /v/mobile resolves real NocoBase 2.2.50 v2 HTML (Gateway
     assert.ok(extracted.includes('/v/assets/index-real2250.js'));
     assert.ok(extracted.includes('/v/assets/index-real2250.css'));
 
-    const swSrc = buildServiceWorkerScript({ version: '0.4.1', precacheAssets: extracted });
+    const swSrc = buildServiceWorkerScript({ version: '0.4.2', precacheAssets: extracted });
     const addedUrls = [];
     const listeners = {};
     vm.runInNewContext(swSrc, {

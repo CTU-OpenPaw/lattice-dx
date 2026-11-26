@@ -921,9 +921,9 @@ test('P2-09b: globalSearch executes bounded SQL ILIKE per collection column whit
   assert.ok(reqSql.sql.includes('"requesterId" =') && reqSql.sql.includes('"assigneeId" ='), 'Must enforce ownScope in SQL');
 });
 
-test('P2-09a & P3-04: build.mjs enables minify/treeShaking, package.json describes 12 BlockModels @ 0.4.1, and all client files are XSS/bundler compliant', async () => {
+test('P2-09a & P3-04: build.mjs enables minify/treeShaking, package.json describes 12 BlockModels @ 0.4.2, and all client files are XSS/bundler compliant', async () => {
   const pkg = JSON.parse(readFileSync(path.join(PLUGIN_ROOT, 'package.json'), 'utf8'));
-  assert.equal(pkg.version, '0.4.1');
+  assert.equal(pkg.version, '0.4.2');
   assert.equal(pkg.license, 'Apache-2.0');
   assert.equal(pkg.nocobase?.sdkProvidedByHost, true);
   assert.equal(/six/i.test(pkg.description), false);

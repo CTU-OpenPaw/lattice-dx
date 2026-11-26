@@ -470,7 +470,7 @@ function pushFileScannerSpan(tracesUrl: string, span: {
         },
         scopeSpans: [
           {
-            scope: { name: '@dx/file-scanner', version: '0.4.1' },
+            scope: { name: '@dx/file-scanner', version: '0.4.2' },
             spans: [
               {
                 traceId: span.traceId,
