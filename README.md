@@ -36,13 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 
 </div>
 
-LatticeDX (`v0.4.2`) là nền tảng điều hành doanh nghiệp số 6 mặt phẳng, hợp nhất cổng nghiệp vụ đa vai trò, quy trình tự động hóa DAG/DMN, tác tử AI và dữ liệu IIoT trên 7 plugin `Apache-2.0` gắn vào runtime `NocoBase 2.2.50`. Mọi dữ liệu nghiệp vụ được cô lập đa tenant ở tầng lõi cơ sở dữ liệu với 56 bảng tĩnh PostgreSQL 16 `FORCE ROW LEVEL SECURITY` qua tham số phiên `app.current_org` và vai trò không đặc quyền `nocobase_app`.
-
-<p align="center">
-  <img src="./docs/assets/showcase-ai-studio-6plane.webp" alt="DX-OS AI Studio và Trung tâm Điều phối 6 Mặt phẳng" width="96%" />
-  <br />
-  <sub><em>DX-OS AI Studio điều phối 6 mặt phẳng vận hành, kết nối cổng nghiệp vụ, quy trình DAG và hạ tầng IIoT. Xem chi tiết tại <a href="https://ctu-openpaw.github.io/lattice-docs/">ctu-openpaw.github.io/lattice-docs</a>.</em></sub>
-</p>
+LatticeDX (`v0.4.2`) là nền tảng hệ điều hành doanh nghiệp mở, hợp nhất cổng nghiệp vụ đa vai trò, quy trình tự động hóa DAG/DMN, tác tử AI và dữ liệu IIoT trên 7 plugin `Apache-2.0` gắn vào runtime `NocoBase 2.2.50`. Mọi dữ liệu nghiệp vụ được cô lập đa tenant ở tầng lõi cơ sở dữ liệu với 56 bảng tĩnh PostgreSQL 16 `FORCE ROW LEVEL SECURITY` qua tham số phiên `app.current_org` và vai trò không đặc quyền `nocobase_app`.
 
 ---
 
@@ -62,13 +56,9 @@ LatticeDX (`v0.4.2`) là nền tảng điều hành doanh nghiệp số 6 mặt 
 ## Kiến trúc Nền tảng
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-6plane-dark.webp" />
-    <source media="(prefers-color-scheme: light)" srcset="./docs/assets/architecture-6plane-light.webp" />
-    <img src="./docs/assets/architecture-6plane-light.webp" alt="Kiến trúc 6 Mặt phẳng DX-OS của LatticeDX" width="100%" />
-  </picture>
+  <img src="./docs/assets/architecture-v042-vi.webp" alt="Kiến trúc Nền tảng LatticeDX v0.4.2" width="100%" />
   <br />
-  <sub><em>Sơ đồ luồng dữ liệu 6 mặt phẳng từ biên Zero-Trust, cổng nghiệp vụ, LatticeFlow v2, IIoT Digital Twin đến PostgreSQL 16 FORCE RLS. Khám phá sơ đồ tương tác tại <a href="https://ctu-openpaw.github.io/lattice-docs/architecture/overview">Trình khám phá Kiến trúc 6 Mặt phẳng</a>.</em></sub>
+  <sub><em>Kiến trúc 4 tầng (Tầng 3 Ứng dụng Nghiệp vụ, Tầng 2 Trải nghiệm Người dùng &amp; Cấu hình, Tầng 1 Runtime Headless &amp; Dịch vụ Dùng chung, Dữ liệu Thuộc Dịch vụ &amp; Vận hành Xuyên suốt) cùng 5 Mẫu Tương tác Nền tảng chuẩn (1–5) từ biên Zero-Trust đến PostgreSQL 16 FORCE RLS. Khám phá sơ đồ tương tác tại <a href="https://ctu-openpaw.github.io/lattice-docs/architecture/overview">Trình khám phá Kiến trúc Nền tảng</a>.</em></sub>
 </p>
 
 ---

@@ -47,7 +47,7 @@
 
   <!-- Architectural Spec Footer -->
   <rect x="36" y="218" width="6" height="6" rx="1" fill="#F06434"/>
-  <text x="52" y="225" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="500" letter-spacing="0.5" fill="#A1A1AA">6-PLANE DX-OS ARCHITECTURE</text>
+  <text x="52" y="225" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="500" letter-spacing="0.5" fill="#A1A1AA">4-TIER DX-OS ARCHITECTURE</text>
 
   <rect x="336" y="218" width="6" height="6" rx="1" fill="#60A5FA"/>
   <text x="352" y="225" font-family="'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="11.5" font-weight="500" letter-spacing="0.5" fill="#A1A1AA">7 APACHE-2.0 PLUGINS</text>
