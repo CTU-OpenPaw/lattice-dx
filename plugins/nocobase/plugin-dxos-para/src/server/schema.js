@@ -8,7 +8,7 @@
  */
 'use strict';
 
-const { normalizeSearchText, computeDeterministicEmbedding } = require('./para-hybrid-search');
+const { normalizeSearchText, computeDeterministicEmbedding, redactParaPii } = require('./para-hybrid-search');
 const PARA_SPACES = ['projects', 'areas', 'resources', 'archives'];
 const PARA_STATUSES = ['draft', 'active', 'archived'];
 
@@ -150,7 +150,10 @@ function validateParaDocument(model, options = {}) {
 
   for (const field of ['code', 'title', 'summary', 'tags']) {
     const val = getAttr(model, field);
-    if (typeof val === 'string') setAttr(model, field, val.trim(), options);
+    if (typeof val === 'string') {
+      const cleaned = field === 'summary' ? redactParaPii(val.trim()) : val.trim();
+      setAttr(model, field, cleaned, options);
+    }
   }
 
   const paraSpace = getAttr(model, 'paraSpace') || (model?.isNewRecord ? 'projects' : undefined);

@@ -121,35 +121,6 @@ async function findScopedParaDocument(db, documentId, organizationId = null, opt
   return doc;
 }
 
-function redactBankAccounts(text) {
-  return text.replace(
-    /(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)([A-Za-z]{2}\d{2}(?:[A-Za-z0-9]{6,30}|(?:[ -][A-Za-z0-9]{1,8}){1,8})|\d(?:[ -]?\d){7,19})(?![0-9A-Za-z-])/gi,
-    (full, prefix, rawAcct) => {
-      if (/^[A-Za-z]{2}\d{2}[ -]/.test(rawAcct)) {
-        const parts = rawAcct.split(/([ -])/);
-        const kept = [parts[0]];
-        let i = 1;
-        while (i + 1 < parts.length) {
-          const sep = parts[i];
-          const tok = parts[i + 1];
-          if (/\d/.test(tok) || /^[A-Z]{2,4}$/.test(tok)) {
-            kept.push(sep, tok);
-            i += 2;
-          } else {
-            break;
-          }
-        }
-        const acctOnly = kept.join('');
-        const compactLen = acctOnly.replace(/[ -]/g, '').length;
-        if (compactLen < 10) return full;
-        const trailing = rawAcct.slice(acctOnly.length);
-        return `${prefix}[REDACTED_BANK]${trailing}`;
-      }
-      return `${prefix}[REDACTED_BANK]`;
-    },
-  );
-}
-
 /**
  * Build a bounded, control-char-stripped, secret-redacted text preview in linear time.
  *

@@ -1007,3 +1007,114 @@ test('Bug #7 regression: redactParaPii masks VN phones, CCCD/CMND, emails, and t
     assert.match(item.summary, /\[REDACTED_CCCD\]/);
   }
 });
+
+test('Bug #7 regression: validateParaDocument and paraScopeMiddleware redact PII in summary for root and tenant roles on get/list while preserving benign codes/dates', async () => {
+  const { validateParaDocument } = require(path.join(PLUGIN_ROOT, 'src/server/schema.js'));
+  const { createParaScopeMiddleware } = require(path.join(PLUGIN_ROOT, 'src/server/para-scope.js'));
+
+  const rawSummary = '  Liên hệ 0912345678 hoặc +84 912 345 678, CCCD 092099001234, Email: qa@ctu.edu.vn — đơn ORD-V100-001 ngày 2026-11-27T10:02:31Z  ';
+  const docBody = '# SOP Kho lạnh\nKiểm tra nhiệt độ 2-8C định kỳ.';
+
+  // 1. validateParaDocument redacts summary on write while keeping benign order code, ISO date, and contentMarkdown intact
+  const fields = [];
+  const dataMap = new Map([
+    ['code', 'SOP-KDL-E2E-01'],
+    ['title', 'SOP Kiểm định Kho Lạnh'],
+    ['organizationId', 'org-pii'],
+    ['paraSpace', 'resources'],
+    ['summary', rawSummary],
+    ['contentMarkdown', docBody],
+  ]);
+  const model = {
+    isNewRecord: true,
+    get: (k) => dataMap.get(k),
+    set: (k, v) => dataMap.set(k, v),
+  };
+  validateParaDocument(model, { fields, context: { state: { latticeNativeActor: { organizationId: 'org-pii', employeeId: 7 } } } });
+  const savedSummary = dataMap.get('summary');
+  for (const pii of ['0912345678', '+84 912 345 678', '092099001234', 'qa@ctu.edu.vn']) {
+    assert.equal(savedSummary.includes(pii), false, `validateParaDocument summary leaked ${pii}`);
+  }
+  assert.match(savedSummary, /\[REDACTED_PHONE\]/);
+  assert.match(savedSummary, /\[REDACTED_CCCD\]/);
+  assert.match(savedSummary, /\[REDACTED_EMAIL\]/);
+  assert.match(savedSummary, /ORD-V100-001/);
+  assert.match(savedSummary, /2026-11-27T10:02:31Z/);
+  assert.equal(dataMap.get('contentMarkdown'), docBody);
+
+  // 2. paraScopeMiddleware redacts summary on get and list for both root AND tenant roles (even when DB holds legacy unredacted rows)
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async () => [{ id: 10, userId: 100, organizationId: 'org-pii', departmentId: 1, active: true }] };
+      }
+      return null;
+    },
+  };
+  const mw = createParaScopeMiddleware(db);
+
+  const assertCleanSummary = (text, label) => {
+    for (const pii of ['0912345678', '+84 912 345 678', '092099001234', 'qa@ctu.edu.vn']) {
+      assert.equal(String(text || '').includes(pii), false, `${label} leaked ${pii}: ${text}`);
+    }
+    assert.match(String(text || ''), /\[REDACTED_PHONE\]/);
+    assert.match(String(text || ''), /\[REDACTED_CCCD\]/);
+    assert.match(String(text || ''), /ORD-V100-001/);
+    assert.match(String(text || ''), /2026-11-27T10:02:31Z/);
+  };
+
+  // 2a. root -> latticeParaDocuments:get (Sequelize-style model with dataValues/setDataValue/toJSON)
+  const seqDataValues = { id: 1, code: 'SOP-KDL-E2E-01', organizationId: 'org-pii', summary: rawSummary, contentMarkdown: docBody };
+  const seqModel = {
+    get: (k) => seqDataValues[k],
+    setDataValue: (k, v) => { seqDataValues[k] = v; },
+    toJSON: () => ({ ...seqDataValues }),
+  };
+  const rootGetCtx = {
+    state: { currentRole: 'root', currentUser: { id: 1 } },
+    action: { resourceName: 'latticeParaDocuments', actionName: 'get', params: { filterByTk: 1 } },
+  };
+  await mw(rootGetCtx, async () => { rootGetCtx.body = seqModel; });
+  assertCleanSummary(rootGetCtx.body.get('summary'), 'root get model.get');
+  assertCleanSummary(rootGetCtx.body.toJSON().summary, 'root get model.toJSON');
+  assert.equal(rootGetCtx.body.toJSON().contentMarkdown, docBody);
+
+  // 2b. root -> latticeParaDocuments:list ({ count, rows })
+  const rootListCtx = {
+    state: { currentRole: 'root', currentUser: { id: 1 } },
+    action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: {} },
+  };
+  await mw(rootListCtx, async () => {
+    rootListCtx.body = {
+      count: 2,
+      rows: [
+        { id: 1, code: 'SOP-1', summary: rawSummary },
+        { get: (k) => ({ id: 2, code: 'SOP-2', summary: 'SĐT: 0987654321 CCCD: 079099123456 ORD-V100-001 2026-11-27T10:02:31Z' }[k]), toJSON: () => ({ id: 2, code: 'SOP-2', summary: 'SĐT: 0987654321 CCCD: 079099123456 ORD-V100-001 2026-11-27T10:02:31Z' }) },
+      ],
+    };
+  });
+  assertCleanSummary(rootListCtx.body.rows[0].summary, 'root list rows[0]');
+  assert.equal(rootListCtx.body.rows[1].summary.includes('0987654321'), false);
+  assert.equal(rootListCtx.body.rows[1].summary.includes('079099123456'), false);
+  assert.match(rootListCtx.body.rows[1].summary, /ORD-V100-001/);
+
+  // 2c. tenant role (ldx_employee) -> latticeParaDocuments:get ({ data: ... })
+  const empGetCtx = {
+    state: { currentRole: 'ldx_employee', currentUser: { id: 100 } },
+    action: { resourceName: 'latticeParaDocuments', actionName: 'get', params: { filterByTk: 1 } },
+  };
+  await mw(empGetCtx, async () => {
+    empGetCtx.body = { data: { id: 1, code: 'SOP-KDL-E2E-01', organizationId: 'org-pii', summary: rawSummary } };
+  });
+  assertCleanSummary(empGetCtx.body.data.summary, 'tenant get');
+
+  // 2d. tenant role (ldx_manager) -> latticeParaDocuments:list (array body)
+  const mgrListCtx = {
+    state: { currentRole: 'ldx_manager', currentUser: { id: 100 } },
+    action: { resourceName: 'latticeParaDocuments', actionName: 'list', params: {} },
+  };
+  await mw(mgrListCtx, async () => {
+    mgrListCtx.body = [{ id: 1, code: 'SOP-1', organizationId: 'org-pii', summary: rawSummary }];
+  });
+  assertCleanSummary(mgrListCtx.body[0].summary, 'tenant list');
+});

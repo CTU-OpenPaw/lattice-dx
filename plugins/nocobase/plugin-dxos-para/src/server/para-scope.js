@@ -118,6 +118,81 @@ function extractExpectedVersion(ctx, params) {
 
 const val = (row, key) => (typeof row?.get === 'function' ? row.get(key) : row?.[key]);
 
+const PARA_RESPONSE_REDACT_ACTIONS = new Set(['get', 'list', 'create', 'update']);
+
+function getRedactParaPiiFn() {
+  // Lazy-require to avoid circular dependency with para-hybrid-search.js (which imports runParaRlsOp from para-scope.js)
+  return require('./para-hybrid-search').redactParaPii;
+}
+
+function redactParaRecordSummary(record, redactFn) {
+  if (!record || typeof record !== 'object') return record;
+  const rawSummary = typeof record.get === 'function' ? record.get('summary') : record.summary;
+  if (typeof rawSummary !== 'string') return record;
+  const redacted = redactFn(rawSummary);
+  if (redacted === rawSummary) return record;
+  if (typeof record.setDataValue === 'function') {
+    record.setDataValue('summary', redacted);
+    if (typeof record.get !== 'function' || record.get('summary') === redacted) return record;
+  }
+  if (typeof record.set === 'function') {
+    record.set('summary', redacted);
+    if (typeof record.get !== 'function' || record.get('summary') === redacted) return record;
+  }
+  if (typeof record.toJSON === 'function') {
+    const plain = record.toJSON();
+    if (plain && typeof plain === 'object') {
+      plain.summary = redacted;
+      return plain;
+    }
+  }
+  record.summary = redacted;
+  return record;
+}
+
+function redactParaDocumentBody(ctx) {
+  const body = ctx?.body;
+  if (!body || typeof body !== 'object') return;
+  const redactFn = getRedactParaPiiFn();
+  if (typeof redactFn !== 'function') return;
+
+  if (Array.isArray(body)) {
+    for (let i = 0; i < body.length; i += 1) {
+      body[i] = redactParaRecordSummary(body[i], redactFn);
+    }
+    return;
+  }
+  if (Array.isArray(body.rows)) {
+    for (let i = 0; i < body.rows.length; i += 1) {
+      body.rows[i] = redactParaRecordSummary(body.rows[i], redactFn);
+    }
+    return;
+  }
+  if (Array.isArray(body.items)) {
+    for (let i = 0; i < body.items.length; i += 1) {
+      body.items[i] = redactParaRecordSummary(body.items[i], redactFn);
+    }
+    return;
+  }
+  if (body.data !== undefined && body.data !== null && typeof body.data === 'object') {
+    if (Array.isArray(body.data)) {
+      for (let i = 0; i < body.data.length; i += 1) {
+        body.data[i] = redactParaRecordSummary(body.data[i], redactFn);
+      }
+      return;
+    }
+    if (Array.isArray(body.data.rows)) {
+      for (let i = 0; i < body.data.rows.length; i += 1) {
+        body.data.rows[i] = redactParaRecordSummary(body.data.rows[i], redactFn);
+      }
+      return;
+    }
+    body.data = redactParaRecordSummary(body.data, redactFn);
+    return;
+  }
+  ctx.body = redactParaRecordSummary(body, redactFn);
+}
+
 const SENSITIVE_FILTER_KEY_RE = /password|secret|token|apikey|api_key|identitySubject|privateKey|hash|salt/i;
 const MANAGER_OR_ADMIN_ROLES = new Set(['root', 'ldx_admin', 'ldx_manager']);
 
@@ -311,7 +386,13 @@ function createParaScopeMiddleware(db) {
       throw failure('PARA_CHUNKS_READ_ONLY', 403);
     }
     if (collectionName !== 'latticeParaDocuments') return next();
-    if (ctx.state?.currentRole === 'root') return next();
+    if (ctx.state?.currentRole === 'root') {
+      const res = await next();
+      if (PARA_RESPONSE_REDACT_ACTIONS.has(actionName)) {
+        redactParaDocumentBody(ctx);
+      }
+      return res;
+    }
 
     const actor = await resolveParaActor(db, ctx.state?.currentUser);
     if (resourceName !== 'latticeParaDocuments') throw failure('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED');
@@ -397,7 +478,11 @@ function createParaScopeMiddleware(db) {
       ctx.state.latticeNativeActor = actor;
       ctx.state.latticeRlsOrg = actor.organizationId;
       if (transaction) setContextRlsTransaction(ctx, transaction);
-      return next();
+      const res = await next();
+      if (PARA_RESPONSE_REDACT_ACTIONS.has(actionName)) {
+        redactParaDocumentBody(ctx);
+      }
+      return res;
     };
 
     if (process.env.DX_PG_RLS_SESSION === 'true' && typeof db?.sequelize?.transaction === 'function' && typeof withTenantRlsContext === 'function') {
