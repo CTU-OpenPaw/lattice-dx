@@ -467,6 +467,15 @@ test('Bug #5: PublicTrackPage falls back to #verify= in loc.hash while preservin
     parseTrackParams({ pathname: '/v/track/ORD-V100-001', search: '', hash: '#verify=<script>alert(1)</script>' }),
     { trackingCode: 'ORD-V100-001', token: '' },
   );
+  assert.deepEqual(
+    parseTrackParams({
+      pathname: '/v/track/ORD-V100-001',
+      search: '?__proto__=polluted&constructor=bad&prototype=bad',
+      hash: '#__proto__=polluted&verify=safeproof999',
+    }),
+    { trackingCode: 'ORD-V100-001', token: '', verify: 'safeproof999' },
+  );
+  assert.equal(({}).polluted, undefined);
 
   const fakeReact = createFakeReact();
   const requests = [];
