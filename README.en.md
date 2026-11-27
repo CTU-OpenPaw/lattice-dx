@@ -36,13 +36,7 @@ SPDX-License-Identifier: Apache-2.0
 
 </div>
 
-LatticeDX (`v0.4.2`) is a 6-plane open enterprise operating platform built as seven Pure-OSI `Apache-2.0` plugins for the `NocoBase 2.2.50` runtime, unifying multi-portal applications, DAG/DMN workflows, agentic AI, and IIoT digital twins. Multi-tenant isolation is enforced directly in PostgreSQL 16 across 56 static `FORCE ROW LEVEL SECURITY` tables (plus dynamic `latticeCustom*` tables) under the transaction-local `app.current_org` context and non-superuser `nocobase_app` role.
-
-<p align="center">
-  <img src="./docs/assets/showcase-ai-studio-6plane.webp" alt="DX-OS AI Studio and 6-Plane Control Center" width="96%" />
-  <br />
-  <sub><em>DX-OS AI Studio coordinating all six operational planes across business portals, DAG orchestration, and IIoT telemetry. Full documentation at <a href="https://ctu-openpaw.github.io/lattice-docs/en/">ctu-openpaw.github.io/lattice-docs/en</a>.</em></sub>
-</p>
+LatticeDX (`v0.4.2`) is an open enterprise operating platform built as seven Pure-OSI `Apache-2.0` plugins for the `NocoBase 2.2.50` runtime, unifying multi-portal applications, DAG/DMN workflows, agentic AI, and IIoT digital twins. Multi-tenant isolation is enforced directly in PostgreSQL 16 across 56 static `FORCE ROW LEVEL SECURITY` tables (plus dynamic `latticeCustom*` tables) under the transaction-local `app.current_org` context and non-superuser `nocobase_app` role.
 
 ---
 
@@ -62,13 +56,9 @@ LatticeDX (`v0.4.2`) is a 6-plane open enterprise operating platform built as se
 ## Platform Architecture
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-6plane-dark.webp" />
-    <source media="(prefers-color-scheme: light)" srcset="./docs/assets/architecture-6plane-light.webp" />
-    <img src="./docs/assets/architecture-6plane-light.webp" alt="LatticeDX 6-Plane DX-OS Architecture" width="100%" />
-  </picture>
+  <img src="./docs/assets/architecture-v042-en.webp" alt="LatticeDX v0.4.2 Platform Architecture" width="100%" />
   <br />
-  <sub><em>Six-plane data flow from Zero-Trust ingress, multi-portal experience, LatticeFlow v2, and IIoT Digital Twin down to PostgreSQL 16 FORCE RLS. Explore interactively in the <a href="https://ctu-openpaw.github.io/lattice-docs/en/architecture/overview">6-Plane Architecture Explorer</a>.</em></sub>
+  <sub><em>4-tier architecture (Tier 3 Pluggable Business Applications, Tier 2 User &amp; Configuration Experience, Tier 1 Headless Runtime &amp; Shared Services, Service-owned Data &amp; Cross-cutting Operations) and 5 canonical Platform Interaction Patterns (1–5) from Zero-Trust ingress down to PostgreSQL 16 FORCE RLS. Explore interactively in the <a href="https://ctu-openpaw.github.io/lattice-docs/en/architecture/overview">Platform Architecture Explorer</a>.</em></sub>
 </p>
 
 ---
