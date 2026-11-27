@@ -1008,6 +1008,9 @@ test('UI background 400/403 fixes: webgis-block passes/skips organizationId on t
       if (req.url === 'dxosLedger:verify') {
         return { data: { data: { valid: true, checkedCount: 9 } } };
       }
+      if (req.url === 'dxosDataGov:lineageTrace') {
+        return { data: { data: { nodes: [], edges: [], truncated: false } } };
+      }
       return { data: { data: {} } };
     },
   };
@@ -1029,6 +1032,11 @@ test('UI background 400/403 fixes: webgis-block passes/skips organizationId on t
   const verifyCall = pkiCalls.find((c) => c.url === 'dxosLedger:verify');
   assert.ok(verifyCall);
   assert.equal(verifyCall.params.organizationId, 'org-ctx');
+
+  await findByTestId(barTree, 'dxos-workbench-lineage-btn').props.onClick();
+  const lineageCall = pkiCalls.find((c) => c.url === 'dxosDataGov:lineageTrace');
+  assert.ok(lineageCall);
+  assert.equal(lineageCall.params.organizationId, 'org-ctx');
   pkiHooks.unmount();
 });
 
@@ -3611,4 +3619,93 @@ test('Status/Digital Twin Vietnamese label mappings, WMS action labels, empty-fi
     doorLock: 'unlocked',
   });
   gisHooks.unmount();
+});
+
+test('v0.4.2 Bug #6 & Logistics Kanban UX: lineageTrace forwards organizationId, preparing stage avoids draft fallback, and detail drawer pins badge next to Đóng', async () => {
+  const { createVoucherLifecycleBar } = require(path.join(PLUGIN_ROOT, 'src/client/chatter-panel.js'));
+  const {
+    KANBAN_STAGE_ORDER,
+    groupRecordsByKanbanStage,
+    createKanbanScheduleBlockView,
+  } = require(path.join(PLUGIN_ROOT, 'src/client/kanban-schedule-block.js'));
+
+  // 1. Bug #6 fallback: when props/lineage lack organizationId, handleToggleLineage fetches targetCollection:get and forwards organizationId
+  const linHooks = createMiniHooks();
+  const linCalls = [];
+  const linApi = {
+    async request(req) {
+      linCalls.push(req);
+      if (req.url === 'latticeVoucher:lineage') {
+        return { data: { data: { items: [{ id: 77, code: 'ORD-77', status: 'preparing' }] } } };
+      }
+      if (req.url === 'latticeOrders:get') {
+        return { data: { data: { id: 77, organizationId: 'org-root-scope' } } };
+      }
+      if (req.url === 'dxosDataGov:lineageTrace') {
+        return { data: { data: { nodes: [{ key: 'latticeOrders:77', collection: 'latticeOrders', recordId: '77', depth: 0 }], edges: [], truncated: false } } };
+      }
+      return { data: { data: {} } };
+    },
+  };
+  const Bar = createVoucherLifecycleBar({ useAPIClient: () => linApi }, linHooks.React, {});
+  let barTree = linHooks.render(Bar, { targetCollection: 'latticeOrders', targetRecordId: 77 });
+  await new Promise((r) => setTimeout(r, 20));
+  barTree = linHooks.render(Bar, { targetCollection: 'latticeOrders', targetRecordId: 77 });
+  await findByTestId(barTree, 'dxos-workbench-lineage-btn').props.onClick();
+  const traceCall = linCalls.find((c) => c.url === 'dxosDataGov:lineageTrace');
+  assert.ok(traceCall);
+  assert.equal(traceCall.params.organizationId, 'org-root-scope');
+  linHooks.unmount();
+
+  // 2. Logistics Kanban: preparing / ready_for_dispatch / in_transit do NOT fall back to draft
+  const withPreparing = groupRecordsByKanbanStage([
+    { id: 1, code: 'ORD-PREP', name: 'Đơn đang chuẩn bị', status: 'preparing' },
+    { id: 2, code: 'ORD-DISP', name: 'Đơn chờ điều phối', status: 'ready_for_dispatch' },
+  ], 'latticeOrders');
+  assert.equal(withPreparing.byStage.draft.length, 0, 'preparing/ready_for_dispatch must never land in draft');
+  assert.equal(withPreparing.byStage.preparing.length, 1);
+  assert.equal(withPreparing.byStage.ready_for_dispatch.length, 1);
+  assert.equal(withPreparing.columns.find((c) => c.stage === 'preparing')?.label, 'Đang chuẩn bị');
+
+  const explicit6 = groupRecordsByKanbanStage([
+    { id: 1, code: 'ORD-PREP', name: 'Đơn đang chuẩn bị', status: 'preparing' },
+  ], 'latticeOrders', { stages: KANBAN_STAGE_ORDER });
+  assert.equal(explicit6.byStage.draft.length, 0, 'preparing must map to in_progress rather than draft under 6-stage config');
+  assert.equal(explicit6.byStage.in_progress.length, 1);
+
+  // 3. Detail drawer pins status badge in right-aligned action group next to Đóng
+  const kbHooks = createMiniHooks();
+  const kbApi = {
+    async request(req) {
+      if (req.url === 'latticeOrders:list') {
+        return {
+          data: {
+            data: [
+              { id: 5, code: 'ORD-E2E-UI-3B01', name: 'Đơn E2E rất dài để kiểm tra vị trí badge trạng thái', status: 'preparing', quantity: 25, customer: 'Trung tâm Y tế Cần Thơ' },
+            ],
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const KbView = createKanbanScheduleBlockView({ useAPIClient: () => kbApi }, kbHooks.React, {}, {});
+  let kbTree = kbHooks.render(KbView, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+  await new Promise((r) => setTimeout(r, 20));
+  kbTree = kbHooks.render(KbView, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+
+  assert.equal(findByTestId(resolveTree(kbTree), 'dxos-kanban-submit-5'), null, 'preparing order must not show draft submit button');
+  findByTestId(resolveTree(kbTree), 'dxos-kanban-card-5').props.onClick();
+  kbTree = kbHooks.render(KbView, { model: { props: { collection: 'latticeOrders', viewMode: 'kanban' } } });
+
+  const resolvedKb = resolveTree(kbTree);
+  const actionsGroup = findByTestId(resolvedKb, 'dxos-kanban-detail-actions');
+  assert.ok(actionsGroup, 'Expected right-aligned action group in detail drawer header');
+  const badgeInActions = findByTestId(actionsGroup, 'dxos-kanban-detail-status-badge');
+  const closeInActions = findByTestId(actionsGroup, 'dxos-kanban-detail-close');
+  assert.ok(badgeInActions, 'Status badge must be pinned inside dxos-kanban-detail-actions');
+  assert.ok(closeInActions, 'Đóng button must be inside dxos-kanban-detail-actions');
+  assert.equal(textOf(badgeInActions).trim(), 'Đang chuẩn bị');
+  assert.equal(actionsGroup.props.style.marginLeft, 'auto');
+  kbHooks.unmount();
 });

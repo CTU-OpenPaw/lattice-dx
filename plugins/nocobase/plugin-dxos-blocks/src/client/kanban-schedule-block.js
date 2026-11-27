@@ -20,6 +20,7 @@ const {
 } = require('./blocks-helpers');
 
 const KANBAN_STAGE_ORDER = ['draft', 'submitted', 'approved', 'in_progress', 'completed', 'cancelled'];
+const LOGISTICS_ACTIVE_STAGES = ['preparing', 'ready_for_dispatch', 'in_transit'];
 const STOCK_LOT_STAGE_ORDER = ['available', 'reserved', 'hold_mkt', 'expired'];
 const ALLOWED_KANBAN_COLLECTIONS = new Set([
   'latticeOrders',
@@ -35,6 +36,9 @@ const STAGE_META = {
   draft: getStatusMeta('draft'),
   submitted: getStatusMeta('submitted'),
   approved: getStatusMeta('approved'),
+  preparing: getStatusMeta('preparing'),
+  ready_for_dispatch: getStatusMeta('ready_for_dispatch'),
+  in_transit: getStatusMeta('in_transit'),
   in_progress: getStatusMeta('in_progress'),
   completed: getStatusMeta('completed'),
   cancelled: getStatusMeta('cancelled'),
@@ -75,12 +79,45 @@ function dedupeStageValues(items) {
   return out;
 }
 
+function mergeObservedLogisticsStages(baseStages, records, statusField, collection) {
+  const stages = Array.isArray(baseStages) ? baseStages.slice() : [];
+  if (!collection || collection === 'latticeStockLots' || !VOUCHER_COLLECTIONS.has(collection)) {
+    return stages;
+  }
+  if (!Array.isArray(records) || !records.length) {
+    return stages;
+  }
+  const observedLogistics = new Set();
+  for (const rec of records) {
+    if (!rec || typeof rec !== 'object') continue;
+    const rawVal = String(rec[statusField] ?? '').trim().toLowerCase();
+    if (LOGISTICS_ACTIVE_STAGES.includes(rawVal)) {
+      observedLogistics.add(rawVal);
+    }
+  }
+  if (!observedLogistics.size) {
+    return stages;
+  }
+  const existingLower = new Set(stages.map((s) => String(s).toLowerCase()));
+  const activeToInsert = LOGISTICS_ACTIVE_STAGES.filter(
+    (s) => observedLogistics.has(s) && !existingLower.has(s),
+  );
+  if (!activeToInsert.length) {
+    return stages;
+  }
+  const approvedIdx = stages.findIndex((s) => String(s).toLowerCase() === 'approved');
+  const insertAt = approvedIdx >= 0 ? approvedIdx + 1 : stages.length;
+  stages.splice(insertAt, 0, ...activeToInsert);
+  return stages;
+}
+
 function inferKanbanStages(meta, records = [], cfg = {}) {
   const explicitStages = dedupeStageValues(cfg?.stages);
   if (explicitStages.length) return explicitStages;
 
   const inferred = inferCollectionFieldsMeta(meta);
   const statusField = String(cfg?.statusField || inferred.statusField || 'status').trim() || 'status';
+  const col = cfg?.collection ? normalizeKanbanCollection(cfg.collection) : '';
 
   let metaEnumSource = null;
   if (Array.isArray(meta?.fields)) {
@@ -96,11 +133,12 @@ function inferKanbanStages(meta, records = [], cfg = {}) {
     metaEnumSource = inferred.stages;
   }
   const metaStages = dedupeStageValues(metaEnumSource);
-  if (metaStages.length) return metaStages;
+  if (metaStages.length) {
+    return mergeObservedLogisticsStages(metaStages, records, statusField, col);
+  }
 
-  const col = cfg?.collection ? normalizeKanbanCollection(cfg.collection) : '';
   if (col && ALLOWED_KANBAN_COLLECTIONS.has(col)) {
-    return getStagesForCollection(col);
+    return mergeObservedLogisticsStages(getStagesForCollection(col), records, statusField, col);
   }
 
   const liveStages = [];
@@ -156,9 +194,17 @@ function resolveRecordStage(record, collection, { statusField = 'status', stages
   if (Array.isArray(stages) && stages.length) {
     if (stages.includes(rawRaw)) return rawRaw;
     const ci = stages.find((s) => s.toLowerCase() === rawStatus);
-    return ci || stages[0];
+    if (ci) return ci;
+    if (LOGISTICS_ACTIVE_STAGES.includes(rawStatus)) {
+      const inProg = stages.find((s) => s.toLowerCase() === 'in_progress');
+      if (inProg) return inProg;
+    }
+    return stages[0];
   }
-  return KANBAN_STAGE_ORDER.includes(rawStatus) ? rawStatus : 'draft';
+  if (KANBAN_STAGE_ORDER.includes(rawStatus) || LOGISTICS_ACTIVE_STAGES.includes(rawStatus)) {
+    return rawStatus;
+  }
+  return 'draft';
 }
 
 function groupRecordsByKanbanStage(records, collection = 'latticeOrders', options = {}) {
@@ -902,7 +948,7 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
                           background: '#2563eb', color: '#ffffff', fontSize: 11, fontWeight: 700, cursor: 'pointer',
                         },
                       }, 'Trình duyệt') : null,
-                      isVoucherCol && CANCELLABLE_STAGES.has(st) ? (
+                      isVoucherCol && CANCELLABLE_STAGES.has(st) && (!rec?.[effectiveStatusField] || CANCELLABLE_STAGES.has(String(rec[effectiveStatusField]).trim().toLowerCase())) ? (
                         cancelTargetId === rec.id
                           ? h('div', { onClick: (e) => e?.stopPropagation?.(), style: { display: 'grid', gap: 4, marginTop: 2 } },
                               h('input', {
@@ -1065,7 +1111,13 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
           statusField: effectiveStatusField,
           stages: kanbanData.stages,
         });
-        const selMeta = columnStyleMap.get(selStage) || STAGE_META[selStage] || { bg: '#f1f5f9', color: '#334155' };
+        const selRawStatus = String(selectedRecord?.[effectiveStatusField] ?? '').trim();
+        const selRawKey = selRawStatus.toLowerCase();
+        const selMeta = (selRawKey && STAGE_META[selRawKey])
+          || columnStyleMap.get(selStage)
+          || STAGE_META[selStage]
+          || getStatusMeta(selRawStatus || selStage);
+        const selStatusLabel = selMeta.label || formatStatusLabel(selRawStatus || selStage);
         const selDate = formatDateChip(selectedRecord, effectiveDateFields, effectiveDateField);
         return h('div', {
           'data-testid': 'dxos-kanban-detail-drawer',
@@ -1081,17 +1133,39 @@ function createKanbanScheduleBlockView(client, React, _antd, app, { subscribeMod
             gap: 8,
           },
         },
-          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
-              h('strong', { style: { fontSize: 13, color: '#0f172a' } }, `${selCode} — ${selName}`),
-              h('span', { style: { fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 999, background: selMeta.bg, color: selMeta.color } }, selMeta.label || formatStatusLabel(selStage)),
+          h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+            h('strong', {
+              style: {
+                flex: '1 1 200px',
+                minWidth: 0,
+                fontSize: 13,
+                color: '#0f172a',
+                wordBreak: 'break-word',
+              },
+            }, `${selCode} — ${selName}`),
+            h('div', {
+              'data-testid': 'dxos-kanban-detail-actions',
+              style: { display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, marginLeft: 'auto' },
+            },
+              h('span', {
+                'data-testid': 'dxos-kanban-detail-status-badge',
+                style: {
+                  fontSize: 11,
+                  fontWeight: 700,
+                  padding: '2px 8px',
+                  borderRadius: 999,
+                  background: selMeta.bg,
+                  color: selMeta.color,
+                  whiteSpace: 'nowrap',
+                },
+              }, selStatusLabel),
+              h('button', {
+                type: 'button',
+                'data-testid': 'dxos-kanban-detail-close',
+                onClick: () => setSelectedRecord(null),
+                style: { border: '1px solid #cbd5e1', background: '#ffffff', color: '#334155', borderRadius: 6, padding: '2px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' },
+              }, 'Đóng'),
             ),
-            h('button', {
-              type: 'button',
-              'data-testid': 'dxos-kanban-detail-close',
-              onClick: () => setSelectedRecord(null),
-              style: { border: '1px solid #cbd5e1', background: '#ffffff', color: '#334155', borderRadius: 6, padding: '2px 10px', fontSize: 11, fontWeight: 600, cursor: 'pointer' },
-            }, 'Đóng'),
           ),
           h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 12, fontSize: 12, color: '#475569' } },
             h('span', null, `Phân hệ: ${activeCollection}`),

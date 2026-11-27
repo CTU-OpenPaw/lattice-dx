@@ -60,8 +60,11 @@ function parseTrackParams(locationLike) {
   const match = pathname.match(/^\/(?:v\/)?track\/([^/?#]+)\/?$/i);
   const trackingCode = match ? sanitizeTrackCode(match[1]) : '';
   const query = parseQueryString(loc.search || '');
+  const rawHash = String(loc.hash || '').replace(/^#/, '');
+  const hashQueryIdx = rawHash.indexOf('?');
+  const hashParams = parseQueryString(hashQueryIdx >= 0 ? rawHash.slice(hashQueryIdx + 1) : rawHash);
   const token = sanitizeTrackToken(query.token || query.trackingToken || '');
-  const verify = sanitizeTrackToken(query.verify || '');
+  const verify = sanitizeTrackToken(query.verify || hashParams.verify || '');
   return { trackingCode, token, ...(verify ? { verify } : {}) };
 }
 

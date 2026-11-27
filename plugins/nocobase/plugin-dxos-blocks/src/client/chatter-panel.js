@@ -558,10 +558,30 @@ function createVoucherLifecycleBar(client, React, app) {
       const isStale = () => reqTracker.unmounted || reqTracker.lineageSeq !== myLineageSeq;
       setLineageState((prev) => ({ ...prev, targetKey: reqKey, open: true, loading: true, error: null }));
       try {
+        let effectiveOrg = recordOrg;
+        if (!effectiveOrg) {
+          try {
+            const recRes = await api.request({
+              url: `${targetCollection}:get`,
+              method: 'get',
+              params: { filterByTk: Number(targetRecordId) },
+              skipNotify: true,
+            });
+            if (isStale()) return;
+            const rec = recRes?.data?.data || recRes?.data || null;
+            effectiveOrg = String(rec?.organizationId || '').trim();
+          } catch {}
+        }
         const res = await api.request({
           url: 'dxosDataGov:lineageTrace',
           method: 'get',
-          params: { collection: targetCollection, recordId: String(Number(targetRecordId)), maxDepth: 3, direction: 'both' },
+          params: {
+            collection: targetCollection,
+            recordId: String(Number(targetRecordId)),
+            maxDepth: 3,
+            direction: 'both',
+            ...(effectiveOrg ? { organizationId: effectiveOrg } : {}),
+          },
           skipNotify: true,
         });
         if (isStale()) return;

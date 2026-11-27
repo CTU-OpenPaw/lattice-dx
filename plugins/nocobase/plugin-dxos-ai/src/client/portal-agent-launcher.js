@@ -370,7 +370,7 @@ function createPortalAgentLauncher(client, React, _antd, app) {
             const target = m?.target;
             const el = typeof target?.closest === 'function' ? target : target?.parentElement;
             if (!el || typeof el.closest !== 'function') return false;
-            return Boolean(el.closest('[data-testid="dxos-portal-ai-float-btn"], [data-testid="dxos-surface-update-banner"], [data-testid="dxos-ai-health-warning"]'));
+            return Boolean(el.closest('[data-testid="dxos-portal-ai-float-btn"], [data-testid="dxos-portal-ai-fallback-drawer"], [data-testid="dxos-surface-update-banner"], [data-testid="dxos-ai-health-warning"]'));
           });
           if (allOwnControls) return;
         }
@@ -994,23 +994,23 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       ),
     ) : null;
 
-    const agentSwitcherNode = (portalSlug && !onFlowStudio && employeeList.length > 1) ? h('select', {
+    const agentSwitcherNode = (fallbackDrawerOpen && portalSlug && !onFlowStudio && employeeList.length > 1) ? h('select', {
       'data-testid': 'dxos-portal-ai-agent-switcher',
       'aria-label': 'Chọn Trợ lý AI',
       value: activeEmployee?.username || '',
       onChange: (e) => setSelectedEmployeeUsername(e?.target?.value || ''),
       style: {
-        position: fallbackDrawerOpen ? 'relative' : 'fixed',
-        ...(fallbackDrawerOpen ? {} : { bottom: 98, insetInlineEnd: 12, zIndex: 1051 }),
-        maxWidth: 180,
-        height: 30,
-        padding: '2px 8px',
+        width: '100%',
+        minWidth: 0,
+        height: 32,
+        padding: '4px 10px',
         borderRadius: 8,
         border: '1px solid #cbd5e1',
         background: '#ffffff',
         color: '#0f172a',
         fontSize: 12,
-        boxShadow: '0 2px 8px rgba(15, 23, 42, 0.12)',
+        fontWeight: 600,
+        boxSizing: 'border-box',
       },
     }, employeeList.map((emp) => h('option', { key: emp.username, value: emp.username }, emp.nickname || emp.username))) : null;
 
@@ -1032,17 +1032,17 @@ function createPortalAgentLauncher(client, React, _antd, app) {
         flexDirection: 'column',
       },
     },
-      h('div', { style: { padding: '12px 16px', borderBottom: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
-        h('strong', { style: { fontSize: 14, color: '#0f172a' } }, activeEmployee?.nickname || activeEmployee?.username || 'Trợ lý AI'),
-        h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
-          agentSwitcherNode,
+      h('div', { style: { padding: '12px 16px', borderBottom: '1px solid #e2e8f0', display: 'grid', gap: 8 } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
+          h('strong', { style: { fontSize: 14, color: '#0f172a', minWidth: 0, wordBreak: 'break-word' } }, activeEmployee?.nickname || activeEmployee?.username || 'Trợ lý AI'),
           h('button', {
             type: 'button',
             'data-testid': 'dxos-portal-ai-fallback-close-btn',
             onClick: () => setFallbackDrawerOpen(false),
-            style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', cursor: 'pointer', fontWeight: 700 },
+            style: { padding: '4px 10px', borderRadius: 6, border: '1px solid #cbd5e1', background: '#ffffff', cursor: 'pointer', fontWeight: 700, flexShrink: 0 },
           }, '×'),
         ),
+        agentSwitcherNode,
       ),
       h('div', { style: { flex: 1, overflowY: 'auto', padding: 14, display: 'flex', flexDirection: 'column', gap: 10 } },
         safeFallbackMessages.length === 0
@@ -1092,7 +1092,6 @@ function createPortalAgentLauncher(client, React, _antd, app) {
       healthWarningNode,
       chatErrorCardNode,
       bannerNode,
-      agentSwitcherNode,
       h('style', null, '.dxos-portal-ai-float-btn:hover{transform:translateX(-8px)!important;opacity:1!important;}'),
       h('div', {
         role: 'button',

@@ -21,6 +21,7 @@ const {
   computeNeuralEmbeddingsBatch,
   resolveEmbeddingDim,
   resolveEmbeddingEndpoint,
+  redactParaPii,
 } = require('./para-hybrid-search');
 const {
   MAX_UPLOAD_BYTES,
@@ -159,20 +160,8 @@ function redactBankAccounts(text) {
 function buildSafeTextPreview(text, maxLen = 500) {
   const safeMaxLen = Math.max(1, Number(maxLen) || 500);
   const bounded = String(text || '').slice(0, Math.max(safeMaxLen * 4, 2000));
-  const redacted = bounded
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '')
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
-    .replace(/(Bearer[ \t]+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
-    .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]')
-    .replace(/(\b[a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret)[ \t]*[:=][ \t]*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi, '$1[REDACTED]')
-    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]')
-    .replace(/(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?)\s*[:#=-]?\s*)\d{9,12}\b/gi, '$1[REDACTED_CCCD]');
-  return redactBankAccounts(redacted)
-    .replace(/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]')
-    .replace(/(?<![0-9A-Za-z-])0\d{11}(?![0-9A-Za-z-])/g, '[REDACTED_CCCD]')
-    .replace(/(?<![0-9A-Za-z-])(?:\+?84[\s.-]?|0)(?:3|5|7|8|9)(?:[\s.-]?\d){8}(?![0-9A-Za-z-])/g, '[REDACTED_PHONE]')
-    .trim()
-    .slice(0, safeMaxLen);
+  const stripped = bounded.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  return redactParaPii(stripped).trim().slice(0, safeMaxLen);
 }
 
 /**

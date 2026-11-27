@@ -17,6 +17,57 @@ const NEURAL_TIMEOUT_MS = 4500;
 const DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small';
 const STOP_WORDS = new Set(['va', 'cua', 'cho', 'trong', 'voi', 'cac', 'nhung', 'mot', 'tai', 've', 'la', 'co', 'khong', 'duoc', 'bi']);
 const BLOCKED_EMBEDDING_HOST_RE = /^(0\.0\.0\.0|\[?::\]?|\[?::ffff:(?:a9fe:|169\.254\.|64[4-7][0-9a-f]:|0:0).*|169\.254\.\d+\.\d+|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+|fe[89ab][0-9a-f]:.*|fd00:ec2::254|metadata|metadata\.google\.internal|metadata\.azure\.com)$/i;
+const PARA_SECRET_KV_RE = /(\b[a-zA-Z0-9_]*(?:token|secret|password|apikey|api_key|jwt|privateKey|client_secret|access_key|passphrase|credential|authorization|cookie)[ \t]*[:=][ \t]*)(?:"[^"]+"|'[^']+'|[^\s,;}"']+)/gi;
+
+function redactParaBankAccounts(text) {
+  return String(text ?? '').replace(
+    /(\b(?:stk|số tài khoản|tài khoản ngân hàng|iban)\s*[:#=-]?\s*)([A-Za-z]{2}\d{2}(?:[A-Za-z0-9]{6,30}|(?:[ -][A-Z0-9]{1,8}){1,8})|\d(?:[ -]?\d){7,19})(?![0-9A-Za-z-])/gi,
+    (full, prefix, rawAcct) => {
+      if (/^[A-Za-z]{2}\d{2}[ -]/.test(rawAcct)) {
+        const parts = rawAcct.split(/([ -])/);
+        const kept = [parts[0]];
+        let i = 1;
+        while (i + 1 < parts.length) {
+          const sep = parts[i];
+          const tok = parts[i + 1];
+          if (/\d/.test(tok) || /^[A-Z]{2,4}$/.test(tok)) {
+            kept.push(sep, tok);
+            i += 2;
+          } else {
+            break;
+          }
+        }
+        const acctOnly = kept.join('');
+        const compactLen = acctOnly.replace(/[ -]/g, '').length;
+        if (compactLen < 10) return full;
+        const trailing = rawAcct.slice(acctOnly.length);
+        return `${prefix}[REDACTED_BANK]${trailing}`;
+      }
+      return `${prefix}[REDACTED_BANK]`;
+    },
+  );
+}
+
+function redactParaPii(rawText) {
+  const input = String(rawText ?? '');
+  if (!input) return '';
+  let text = input
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
+    .replace(/(Bearer[ \t]+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
+    .replace(/\bldx_(?:pat|trk)_[A-Za-z0-9_-]{6,}\b/gi, '[REDACTED_TOKEN]')
+    .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]')
+    .replace(PARA_SECRET_KV_RE, '$1[REDACTED]')
+    .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]')
+    .replace(
+      /(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?|chứng minh(?:\s+nhân dân)?|số định danh(?:\s+cá nhân)?|id(?:\s*(?:no|number|card))?)\s*[:#=-]?\s*)(?:\d(?:[ .-]?\d){11}|\d(?:[ .-]?\d){8})(?![0-9A-Za-z-])/gi,
+      '$1[REDACTED_CCCD]',
+    );
+  text = redactParaBankAccounts(text)
+    .replace(/(\b(?:mst|mã số thuế)\s*[:#=-]?\s*)\d{10}(?:-\d{3})?\b/gi, '$1[REDACTED_MST]')
+    .replace(/(?<![0-9A-Za-z.+-])\d{12}(?![0-9A-Za-z-]|\.\d)/g, '[REDACTED_CCCD]')
+    .replace(/(?<![0-9A-Za-z.-])(?:(?:\+?84[\s.-]?\d(?:[\s.-]?\d){8,9})|(?:0\d(?:[\s.-]?\d){8,9}))(?![0-9A-Za-z-])/g, '[REDACTED_PHONE]');
+  return text;
+}
 
 const readField = (row, key, fallback) => {
   if (!row) return fallback;
@@ -394,7 +445,7 @@ function scoreRrfEntries(entries, queryNorm, cap, k = 60) {
         id: e.id,
         code: e.code,
         title: e.title,
-        summary: e.summary,
+        summary: redactParaPii(e.summary),
         paraSpace: e.paraSpace,
         organizationId: e.organizationId,
         ...(e.isChunk ? {
@@ -408,7 +459,7 @@ function scoreRrfEntries(entries, queryNorm, cap, k = 60) {
         score: Number((1 / (out.length + 1)).toFixed(4)),
         lexicalScore: 0,
         semanticScore: 0,
-        snippet: e.snippet,
+        snippet: redactParaPii(e.snippet),
         citation: e.citation,
       });
       if (out.length >= cap) break;
@@ -431,7 +482,7 @@ function scoreRrfEntries(entries, queryNorm, cap, k = 60) {
       id: e.id,
       code: e.code,
       title: e.title,
-      summary: e.summary,
+      summary: redactParaPii(e.summary),
       paraSpace: e.paraSpace,
       organizationId: e.organizationId,
       ...(e.isChunk ? {
@@ -445,7 +496,7 @@ function scoreRrfEntries(entries, queryNorm, cap, k = 60) {
       score,
       lexicalScore: Number(e.lex.toFixed(4)),
       semanticScore: Number(e.sem.toFixed(4)),
-      snippet: e.snippet,
+      snippet: redactParaPii(e.snippet),
       citation: e.citation,
       _isChunk: e.isChunk,
     };
@@ -483,13 +534,13 @@ function buildDocCandidate(doc, query, queryNorm, queryTokens, queryVec) {
     : computeDeterministicEmbedding(hayNorm);
   const pgBoost = Number(readField(doc, '_pgTsRank', 0)) || 0;
   const sem = queryNorm ? cosineSimilarity(queryVec, docVec) : 0;
-  const combinedRawText = [summary, contentMarkdown, title].filter(Boolean).join(' · ');
+  const combinedRawText = redactParaPii([summary, contentMarkdown, title].filter(Boolean).join(' · '));
   return {
     isChunk: false,
     id,
     code,
-    title,
-    summary,
+    title: redactParaPii(title),
+    summary: redactParaPii(summary),
     paraSpace,
     organizationId,
     embeddingEngine: 'deterministic-fallback',
@@ -539,22 +590,25 @@ function buildChunkCandidate(chunk, docById, query, queryNorm, queryTokens, quer
     }
   }
 
+  const redactedSummary = redactParaPii(summary);
+  const redactedTitle = redactParaPii(title);
+  const redactedSnippetSource = redactParaPii(content) || [redactedSummary, redactedTitle].filter(Boolean).join(' · ');
   return {
     isChunk: true,
     chunkId,
     id: documentId,
     code,
-    title,
-    summary,
+    title: redactedTitle,
+    summary: redactedSummary,
     paraSpace,
     organizationId,
-    sectionTitle,
+    sectionTitle: redactParaPii(sectionTitle),
     pageNumber,
     chunkIndex,
     embeddingEngine,
     lex: lex + pgTsRank * 5,
     sem,
-    snippet: buildSnippet(content || [summary, title].filter(Boolean).join(' · '), query),
+    snippet: buildSnippet(redactedSnippetSource, query),
     citation: `[latticeParaDocuments:${code}#${documentId} · đoạn #${chunkIndex + 1}]`,
   };
 }
@@ -803,6 +857,7 @@ module.exports = {
   computeNeuralEmbedding,
   computeNeuralEmbeddingsBatch,
   cosineSimilarity,
+  redactParaPii,
   buildSnippet,
   extractDocumentSearchText,
   rankHybridDocuments,

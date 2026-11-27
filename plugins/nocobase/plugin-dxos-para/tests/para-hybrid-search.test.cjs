@@ -851,4 +851,159 @@ test('T2-PARA-01: lexicalOverlapScore uses whole-token matching so 999 does not 
   });
   assert.equal(exactHits.length, 1);
   assert.equal(exactHits[0].code, 'ACT-RW04-5F7B5A65-AD0E');
+  assert.equal(exactHits[0].summary.includes('0987654321'), false);
+  assert.equal(exactHits[0].summary.includes('privacy.rw04@example.com'), false);
+  assert.equal(exactHits[0].summary.includes('079091009999'), false);
+  assert.equal(exactHits[0].snippet.includes('0987654321'), false);
+  assert.equal(exactHits[0].snippet.includes('privacy.rw04@example.com'), false);
+  assert.equal(exactHits[0].snippet.includes('079091009999'), false);
+});
+
+test('Bug #7 regression: redactParaPii masks VN phones, CCCD/CMND, emails, and tokens without corrupting dates or benign IDs, and hybridSearch redacts summary + snippet', async () => {
+  const {
+    redactParaPii,
+    rankHybridDocuments,
+    executeHybridSearch,
+    computeDeterministicEmbedding,
+  } = require(path.join(PLUGIN_ROOT, 'src/server/para-hybrid-search.js'));
+  const { createParaActions } = require(path.join(PLUGIN_ROOT, 'src/server/para-resource.js'));
+
+  // 1. Direct unit tests on redactParaPii
+  const sample = [
+    'Liên hệ SĐT 0912345678 hoặc +84 912 345 678 hoặc 84912345678.',
+    'Số phụ: 0909 123 456, 0909.123.456, 0909-123-456, máy bàn 028 3812 3456.',
+    'CCCD: 092099001234, CMND: 241234567, ID: 331234567, độc lập 092099001234.',
+    'Email: nhanvien@ctu.edu.vn, Bearer tok_only_123456, Authorization: Bearer secret_token_abc12345, PAT: ldx_pat_deadbeef123456.',
+    'Ngày ban hành: 2026-11-27T10:02:31Z, mã đơn ORD-V100-001, ID: 42, nhiệt độ 2-8C, hệ số 0.123456789.',
+  ].join(' ');
+  const redacted = redactParaPii(sample);
+
+  for (const sensitive of [
+    '0912345678',
+    '+84 912 345 678',
+    '84912345678',
+    '0909 123 456',
+    '0909.123.456',
+    '0909-123-456',
+    '028 3812 3456',
+    '092099001234',
+    '241234567',
+    '331234567',
+    'nhanvien@ctu.edu.vn',
+    'tok_only_123456',
+    'secret_token_abc12345',
+    'ldx_pat_deadbeef123456',
+  ]) {
+    assert.equal(redacted.includes(sensitive), false, `redactParaPii leaked sensitive value: ${sensitive}`);
+  }
+  assert.match(redacted, /\[REDACTED_PHONE\]/);
+  assert.match(redacted, /\[REDACTED_CCCD\]/);
+  assert.match(redacted, /\[REDACTED_EMAIL\]/);
+  assert.match(redacted, /\[REDACTED_TOKEN\]/);
+  assert.match(redacted, /Bearer \[REDACTED\]/);
+
+  // Benign dates, codes, and short numbers must remain intact
+  assert.match(redacted, /2026-11-27T10:02:31Z/);
+  assert.match(redacted, /ORD-V100-001/);
+  assert.match(redacted, /ID: 42/);
+  assert.match(redacted, /2-8C/);
+  assert.match(redacted, /0\.123456789/);
+
+  // 2. hybridSearch + rankHybridDocuments redact both summary and snippet (doc-level & chunk-level, even near 180-char boundary)
+  const docSummary = 'Quy trình kho lạnh liên hệ 0912345678, CCCD 092099001234, +84 912 345 678 ngày 2026-11-27.';
+  const boundaryPad = 'Hướng dẫn vận hành kho lạnh tiêu chuẩn quốc tế bảo quản sinh phẩm y tế ở dải nhiệt độ hai đến tám độ C kèm kiểm soát độ ẩm liên tục trong suốt quá trình lưu trữ tại kho trung tâm ';
+  const chunkContent = `${boundaryPad}0912345678 CCCD: 092099001234 Email: coldchain@example.com`;
+  assert.ok(boundaryPad.length >= 170 && boundaryPad.length <= 185, 'Test must exercise 180-char snippet boundary');
+
+  const docs = [
+    {
+      id: 301,
+      code: 'SOP-PII-DOC',
+      title: 'Tài liệu Kho lạnh không chunk',
+      organizationId: 'org-pii',
+      paraSpace: 'resources',
+      status: 'active',
+      active: true,
+      summary: docSummary,
+      contentMarkdown: 'Thông tin thêm: 0909 123 456 và CMND: 241234567.',
+    },
+    {
+      id: 302,
+      code: 'SOP-PII-CHUNK',
+      title: 'Tài liệu Kho lạnh có chunk',
+      organizationId: 'org-pii',
+      paraSpace: 'resources',
+      status: 'active',
+      active: true,
+      summary: docSummary,
+    },
+  ];
+  const chunks = [
+    {
+      id: 401,
+      documentId: 302,
+      organizationId: 'org-pii',
+      code: 'SOP-PII-CHUNK',
+      title: 'Tài liệu Kho lạnh có chunk',
+      paraSpace: 'resources',
+      chunkIndex: 0,
+      sectionTitle: 'Liên hệ khẩn',
+      pageNumber: 1,
+      content: chunkContent,
+      embeddingModel: 'fnv1a-256',
+      embeddingEngine: 'deterministic-fallback',
+      embeddingDim: 256,
+      embeddingJson: computeDeterministicEmbedding(chunkContent),
+      active: true,
+    },
+  ];
+
+  const ranked = rankHybridDocuments('kho lạnh', docs, { limit: 5 });
+  assert.ok(ranked.length >= 1);
+  for (const item of ranked) {
+    for (const pii of ['0912345678', '092099001234', '+84 912 345 678', '0909 123 456', '241234567']) {
+      assert.equal(item.summary.includes(pii), false, `rankHybridDocuments summary leaked ${pii}`);
+      assert.equal(item.snippet.includes(pii), false, `rankHybridDocuments snippet leaked ${pii}`);
+    }
+    assert.match(item.summary, /2026-11-27/);
+  }
+
+  const db = {
+    sequelize: { query: async () => [[]] },
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async () => [{ id: 10, userId: 100, organizationId: 'org-pii', active: true }] };
+      }
+      if (name === 'latticeParaDocuments') return { find: async () => docs };
+      if (name === 'latticeParaChunks') return { find: async () => chunks };
+      return null;
+    },
+  };
+
+  const directItems = await executeHybridSearch(db, {
+    organizationId: 'org-pii',
+    query: 'kho lạnh',
+    limit: 10,
+    env: {},
+  });
+  assert.equal(directItems.length, 2);
+
+  const actions = createParaActions(db);
+  const searchCtx = {
+    method: 'POST',
+    state: { currentUser: { id: 100 }, currentRole: 'ldx_employee' },
+    action: { params: { values: { query: 'kho lạnh', limit: 10 } } },
+    throw(s, m) { throw Object.assign(new Error(m), { status: s }); },
+  };
+  await actions.hybridSearch(searchCtx, async () => {});
+  assert.equal(searchCtx.body.items.length, 2);
+
+  for (const item of searchCtx.body.items) {
+    for (const pii of ['0912345678', '091234', '092099001234', '+84 912 345 678', '0909 123 456', '241234567', 'coldchain@example.com']) {
+      assert.equal(item.summary.includes(pii), false, `hybridSearch summary leaked ${pii}: ${item.summary}`);
+      assert.equal(item.snippet.includes(pii), false, `hybridSearch snippet leaked ${pii}: ${item.snippet}`);
+    }
+    assert.match(item.summary, /\[REDACTED_PHONE\]/);
+    assert.match(item.summary, /\[REDACTED_CCCD\]/);
+  }
 });

@@ -508,6 +508,31 @@ function computeTrackVerificationProof({ organizationId, epod = null, documentTy
   return createHmac('sha256', resolveTrackVerifySecret()).update(material, 'utf8').digest('hex');
 }
 
+const TRACK_VERIFY_DOCUMENT_TYPES = ['epod', 'delivery_note', 'order'];
+
+async function findOneCompat(repo, filter, txOpt = {}) {
+  if (!repo) return null;
+  if (typeof repo.findOne === 'function') {
+    return repo.findOne({ filter, ...txOpt });
+  }
+  if (typeof repo.find === 'function') {
+    return ((await repo.find({ filter, limit: 1, ...txOpt })) || [])[0] || null;
+  }
+  return null;
+}
+
+function matchesAnyTrackVerifyProof(cleanVerify, candidates) {
+  let matched = null;
+  for (const cand of candidates) {
+    const expectedProof = computeTrackVerificationProof(cand);
+    const ok = timingSafeEqualHex(expectedProof.slice(0, cleanVerify.length), cleanVerify);
+    if (ok && !matched) {
+      matched = cand;
+    }
+  }
+  return matched;
+}
+
 async function hydrateLedgerAndKey(db, row, txOpt) {
   const orgId = val(row, 'organizationId');
   const seqVal = val(row, 'ledgerSeq');
@@ -516,30 +541,56 @@ async function hydrateLedgerAndKey(db, row, txOpt) {
   let ledgerEntry = null;
   if (ledgerRepo && orgId) {
     if (seqVal != null) {
-      if (typeof ledgerRepo.findOne === 'function') {
-        ledgerEntry = await ledgerRepo.findOne({ filter: { organizationId: orgId, seq: Number(seqVal) }, ...txOpt });
-      } else if (typeof ledgerRepo.find === 'function') {
-        ledgerEntry = ((await ledgerRepo.find({ filter: { organizationId: orgId, seq: Number(seqVal) }, limit: 1, ...txOpt })) || [])[0] || null;
-      }
+      ledgerEntry = await findOneCompat(ledgerRepo, { organizationId: orgId, seq: Number(seqVal) }, txOpt);
     }
     if (!ledgerEntry && epodUid) {
-      const fallbackFilter = { organizationId: orgId, targetCollection: 'latticeEpodRecords', targetRecordId: String(epodUid) };
-      if (typeof ledgerRepo.findOne === 'function') {
-        ledgerEntry = await ledgerRepo.findOne({ filter: fallbackFilter, ...txOpt });
-      } else if (typeof ledgerRepo.find === 'function') {
-        ledgerEntry = ((await ledgerRepo.find({ filter: fallbackFilter, limit: 1, ...txOpt })) || [])[0] || null;
-      }
+      ledgerEntry = await findOneCompat(
+        ledgerRepo,
+        { organizationId: orgId, targetCollection: 'latticeEpodRecords', targetRecordId: String(epodUid) },
+        txOpt,
+      );
     }
   }
   const effectiveKeyId = val(ledgerEntry, 'keyId') || val(row, 'keyId');
   const pkiRepo = db.getRepository?.('latticePkiKeys');
   let pkiKeyRow = null;
   if (pkiRepo && orgId && effectiveKeyId) {
-    if (typeof pkiRepo.findOne === 'function') {
-      pkiKeyRow = await pkiRepo.findOne({ filter: { organizationId: orgId, keyId: effectiveKeyId }, ...txOpt });
-    } else if (typeof pkiRepo.find === 'function') {
-      pkiKeyRow = ((await pkiRepo.find({ filter: { organizationId: orgId, keyId: effectiveKeyId }, limit: 1, ...txOpt })) || [])[0] || null;
+    pkiKeyRow = await findOneCompat(pkiRepo, { organizationId: orgId, keyId: effectiveKeyId }, txOpt);
+  }
+  return { ledgerEntry, pkiKeyRow };
+}
+
+async function hydrateOrderLedgerAndKey(db, orderRow, txOpt = {}) {
+  const orgId = val(orderRow, 'organizationId');
+  const orderId = val(orderRow, 'id');
+  const orderCode = val(orderRow, 'code');
+  const ledgerRepo = db.getRepository?.('latticeCryptoLedger');
+  let ledgerEntry = null;
+  if (ledgerRepo && orgId) {
+    const targetIds = [orderId != null ? String(orderId) : '', orderCode ? String(orderCode) : ''].filter(Boolean);
+    for (const targetRecordId of targetIds) {
+      if (typeof ledgerRepo.find === 'function') {
+        const rows = (await ledgerRepo.find({
+          filter: { organizationId: orgId, targetCollection: 'latticeOrders', targetRecordId },
+          sort: ['-seq'],
+          limit: 1,
+          ...txOpt,
+        })) || [];
+        ledgerEntry = rows[0] || null;
+      } else if (typeof ledgerRepo.findOne === 'function') {
+        ledgerEntry = await ledgerRepo.findOne({
+          filter: { organizationId: orgId, targetCollection: 'latticeOrders', targetRecordId },
+          ...txOpt,
+        });
+      }
+      if (ledgerEntry) break;
     }
+  }
+  const effectiveKeyId = val(ledgerEntry, 'keyId') || null;
+  const pkiRepo = db.getRepository?.('latticePkiKeys');
+  let pkiKeyRow = null;
+  if (pkiRepo && orgId && effectiveKeyId) {
+    pkiKeyRow = await findOneCompat(pkiRepo, { organizationId: orgId, keyId: effectiveKeyId }, txOpt);
   }
   return { ledgerEntry, pkiKeyRow };
 }
@@ -561,33 +612,138 @@ async function loadPublicTrackRecord(db, trackingCode, providedHash) {
 
 async function loadPublicTrackByVerifyProof(db, trackingCode, verifyProof) {
   const cleanVerify = typeof verifyProof === 'string' ? verifyProof.trim().toLowerCase() : '';
+  const hasValidHex = /^[0-9a-f]{16,64}$/i.test(cleanVerify) && cleanVerify.length % 2 === 0;
   const epodRepo = db.getRepository?.('latticeEpodRecords');
+  const ordersRepo = db.getRepository?.('latticeOrders');
   return runWithSystemRlsBypass(db, async (transaction) => {
     const txOpt = transaction ? { transaction } : {};
-    const row = epodRepo?.findOne ? await epodRepo.findOne({ filter: { trackingCode }, ...txOpt }) : null;
-    if (!row || !/^[0-9a-f]{16,64}$/i.test(cleanVerify) || cleanVerify.length % 2 !== 0) {
+    if (!trackingCode || !hasValidHex) {
       timingSafeEqualHex(DUMMY_HASH_HEX, sha256Hex(cleanVerify || 'missing'));
-      return { row: null, validVerify: false, ledgerEntry: null, pkiKeyRow: null };
+      return {
+        row: null,
+        orderRow: null,
+        matchedDocumentType: null,
+        matchedBy: null,
+        validVerify: false,
+        ledgerEntry: null,
+        pkiKeyRow: null,
+      };
     }
-    const expectedProof = computeTrackVerificationProof({
-      organizationId: val(row, 'organizationId'),
-      epod: row,
-      trackCodeForQr: val(row, 'trackingCode'),
-    });
-    const validVerify = timingSafeEqualHex(expectedProof.slice(0, cleanVerify.length), cleanVerify);
-    if (!validVerify) {
-      return { row: null, validVerify: false, ledgerEntry: null, pkiKeyRow: null };
+
+    let epodRow = await findOneCompat(epodRepo, { trackingCode }, txOpt);
+    let epodMatchedBy = epodRow ? 'epod_tracking_code' : null;
+    if (!epodRow) {
+      epodRow = await findOneCompat(epodRepo, { orderCode: trackingCode }, txOpt);
+      if (epodRow) epodMatchedBy = 'epod_order_code';
     }
-    const { ledgerEntry, pkiKeyRow } = await hydrateLedgerAndKey(db, row, txOpt);
-    return { row, validVerify: true, ledgerEntry, pkiKeyRow };
+
+    if (epodRow) {
+      const epodOrgId = String(val(epodRow, 'organizationId') || '').trim();
+      const epodTrackCode = String(val(epodRow, 'trackingCode') || '').trim();
+      const epodOrderCode = String(val(epodRow, 'orderCode') || '').trim();
+      const candidates = [
+        {
+          organizationId: epodOrgId,
+          epod: epodRow,
+          documentType: 'epod',
+          trackCodeForQr: epodTrackCode || epodOrderCode || trackingCode,
+        },
+      ];
+      if (epodMatchedBy === 'epod_order_code') {
+        const qrCodes = [...new Set([epodOrderCode, trackingCode].filter(Boolean))];
+        for (const qrCode of qrCodes) {
+          for (const docType of TRACK_VERIFY_DOCUMENT_TYPES) {
+            candidates.push({
+              organizationId: epodOrgId,
+              epod: null,
+              documentType: docType,
+              trackCodeForQr: qrCode,
+            });
+          }
+        }
+      }
+      const matched = matchesAnyTrackVerifyProof(cleanVerify, candidates);
+      if (!matched) {
+        return {
+          row: null,
+          orderRow: null,
+          matchedDocumentType: null,
+          matchedBy: null,
+          validVerify: false,
+          ledgerEntry: null,
+          pkiKeyRow: null,
+        };
+      }
+      const { ledgerEntry, pkiKeyRow } = await hydrateLedgerAndKey(db, epodRow, txOpt);
+      return {
+        row: epodRow,
+        orderRow: null,
+        matchedDocumentType: matched.documentType || 'epod',
+        matchedBy: epodMatchedBy,
+        validVerify: true,
+        ledgerEntry,
+        pkiKeyRow,
+      };
+    }
+
+    let orderRow = await findOneCompat(ordersRepo, { code: trackingCode }, txOpt);
+    if (!orderRow && /^[1-9]\d*$/.test(trackingCode)) {
+      orderRow = await findOneCompat(ordersRepo, { id: Number(trackingCode) }, txOpt);
+    }
+    const orderOrgId = orderRow ? String(val(orderRow, 'organizationId') || '').trim() : '';
+    const orderStatus = orderRow ? String(val(orderRow, 'status') || '').trim().toLowerCase() : '';
+    if (!orderRow || !orderOrgId || orderStatus === 'draft') {
+      timingSafeEqualHex(DUMMY_HASH_HEX, sha256Hex(cleanVerify));
+      return {
+        row: null,
+        orderRow: null,
+        matchedDocumentType: null,
+        matchedBy: null,
+        validVerify: false,
+        ledgerEntry: null,
+        pkiKeyRow: null,
+      };
+    }
+
+    const qrCodes = [...new Set([String(val(orderRow, 'code') || '').trim(), trackingCode].filter(Boolean))];
+    const orderCandidates = [];
+    for (const qrCode of qrCodes) {
+      for (const docType of TRACK_VERIFY_DOCUMENT_TYPES) {
+        orderCandidates.push({
+          organizationId: orderOrgId,
+          epod: null,
+          documentType: docType,
+          trackCodeForQr: qrCode,
+        });
+      }
+    }
+    const matchedOrderProof = matchesAnyTrackVerifyProof(cleanVerify, orderCandidates);
+    if (!matchedOrderProof) {
+      return {
+        row: null,
+        orderRow: null,
+        matchedDocumentType: null,
+        matchedBy: null,
+        validVerify: false,
+        ledgerEntry: null,
+        pkiKeyRow: null,
+      };
+    }
+
+    const { ledgerEntry, pkiKeyRow } = await hydrateOrderLedgerAndKey(db, orderRow, txOpt);
+    return {
+      row: null,
+      orderRow,
+      matchedDocumentType: matchedOrderProof.documentType || 'order',
+      matchedBy: 'order',
+      validVerify: true,
+      ledgerEntry,
+      pkiKeyRow,
+    };
   }, foundation);
 }
 
-function verifyEpodLedgerSignature({ epodRow, ledgerEntry, pkiKeyRow }) {
-  const orgId = String(val(epodRow, 'organizationId') || '').trim();
-  const rawSeq = val(epodRow, 'ledgerSeq') ?? val(ledgerEntry, 'seq');
-  const seq = rawSeq != null && Number.isFinite(Number(rawSeq)) ? Number(rawSeq) : null;
-  const epodKeyId = val(epodRow, 'keyId') || null;
+function verifyLedgerEntryWithKey({ orgId, seq, ledgerEntry, pkiKeyRow, epodKeyId = null, epodSig = '' }) {
   const ledgerKeyId = val(ledgerEntry, 'keyId') || null;
   const keyId = ledgerKeyId || epodKeyId || null;
   const entryHash = ledgerEntry && val(ledgerEntry, 'entryHash') ? String(val(ledgerEntry, 'entryHash')) : null;
@@ -597,7 +753,6 @@ function verifyEpodLedgerSignature({ epodRow, ledgerEntry, pkiKeyRow }) {
     : null;
   const publicKeyPem = pkiKeyRow && val(pkiKeyRow, 'publicKeyPem') ? String(val(pkiKeyRow, 'publicKeyPem')) : null;
   const ledgerSig = ledgerEntry && val(ledgerEntry, 'signatureBase64') ? String(val(ledgerEntry, 'signatureBase64')).trim() : '';
-  const epodSig = epodRow && val(epodRow, 'ledgerSignatureBase64') ? String(val(epodRow, 'ledgerSignatureBase64')).trim() : '';
 
   let verified = false;
   let reason = '';
@@ -676,6 +831,33 @@ function verifyEpodLedgerSignature({ epodRow, ledgerEntry, pkiKeyRow }) {
     merkleRoot,
     reason,
   };
+}
+
+function verifyEpodLedgerSignature({ epodRow, ledgerEntry, pkiKeyRow }) {
+  const orgId = String(val(epodRow, 'organizationId') || '').trim();
+  const rawSeq = val(epodRow, 'ledgerSeq') ?? val(ledgerEntry, 'seq');
+  const seq = rawSeq != null && Number.isFinite(Number(rawSeq)) ? Number(rawSeq) : null;
+  const epodKeyId = val(epodRow, 'keyId') || null;
+  const epodSig = epodRow && val(epodRow, 'ledgerSignatureBase64') ? String(val(epodRow, 'ledgerSignatureBase64')).trim() : '';
+  return verifyLedgerEntryWithKey({ orgId, seq, ledgerEntry, pkiKeyRow, epodKeyId, epodSig });
+}
+
+function verifyOrderLedgerSignature({ orderRow, ledgerEntry, pkiKeyRow }) {
+  if (!ledgerEntry) {
+    return {
+      verified: true,
+      seq: null,
+      entryHash: null,
+      keyId: null,
+      publicKeyFingerprint: null,
+      merkleRoot: null,
+      reason: '',
+    };
+  }
+  const orgId = String(val(orderRow, 'organizationId') || '').trim();
+  const rawSeq = val(ledgerEntry, 'seq');
+  const seq = rawSeq != null && Number.isFinite(Number(rawSeq)) ? Number(rawSeq) : null;
+  return verifyLedgerEntryWithKey({ orgId, seq, ledgerEntry, pkiKeyRow });
 }
 
 function createDxosWmsActions(db) {
@@ -1686,27 +1868,72 @@ function createDxosWmsActions(db) {
         return next();
       }
 
-      const { row, validVerify, ledgerEntry, pkiKeyRow } = await loadPublicTrackByVerifyProof(db, trackingCode, verifyProof);
-      if (!validVerify || !row) {
+      const {
+        row,
+        orderRow,
+        matchedDocumentType,
+        matchedBy,
+        validVerify,
+        ledgerEntry,
+        pkiKeyRow,
+      } = await loadPublicTrackByVerifyProof(db, trackingCode, verifyProof);
+      if (!validVerify || (!row && !orderRow)) {
         throw fail('TRACKING_UNAUTHORIZED', 401, 'Mã xác thực chữ ký QR không hợp lệ hoặc đã bị giả mạo.');
       }
 
-      const sigSummary = verifyEpodLedgerSignature({ epodRow: row, ledgerEntry, pkiKeyRow });
+      if (row) {
+        const sigSummary = verifyEpodLedgerSignature({ epodRow: row, ledgerEntry, pkiKeyRow });
+        const recordedRaw = ledgerEntry ? val(ledgerEntry, 'recordedAt') : null;
+        const signedAt = recordedRaw ? (recordedRaw instanceof Date ? recordedRaw.toISOString() : String(recordedRaw)) : null;
+        const extraOrderFields = matchedBy === 'epod_order_code'
+          ? {
+              orderCode: val(row, 'orderCode') || trackingCode,
+              documentType: matchedDocumentType || 'order',
+              status: val(row, 'status') || 'delivered',
+            }
+          : {};
+        ctx.body = {
+          verified: sigSummary.verified,
+          publicProofOnly: true,
+          trackingCode: val(row, 'trackingCode') || trackingCode,
+          ...extraOrderFields,
+          epodUid: val(row, 'epodUid'),
+          seq: sigSummary.seq,
+          ledgerSeq: sigSummary.seq,
+          entryHash: sigSummary.entryHash,
+          ledgerEntryHash: sigSummary.entryHash,
+          keyId: sigSummary.keyId,
+          publicKeyFingerprint: sigSummary.publicKeyFingerprint,
+          signedAt,
+          reason: sigSummary.reason,
+          verifiedAt: new Date().toISOString(),
+          requiresTokenForDetails: true,
+        };
+        return next();
+      }
+
+      const orderSigSummary = verifyOrderLedgerSignature({ orderRow, ledgerEntry, pkiKeyRow });
       const recordedRaw = ledgerEntry ? val(ledgerEntry, 'recordedAt') : null;
       const signedAt = recordedRaw ? (recordedRaw instanceof Date ? recordedRaw.toISOString() : String(recordedRaw)) : null;
+      const publicOrderCode = String(val(orderRow, 'code') || trackingCode);
+      const publicOrderStatus = String(val(orderRow, 'status') || 'active');
       ctx.body = {
-        verified: sigSummary.verified,
+        verified: orderSigSummary.verified,
         publicProofOnly: true,
-        trackingCode: val(row, 'trackingCode'),
-        epodUid: val(row, 'epodUid'),
-        seq: sigSummary.seq,
-        ledgerSeq: sigSummary.seq,
-        entryHash: sigSummary.entryHash,
-        ledgerEntryHash: sigSummary.entryHash,
-        keyId: sigSummary.keyId,
-        publicKeyFingerprint: sigSummary.publicKeyFingerprint,
+        proofType: ledgerEntry ? 'ed25519_ledger' : 'hmac_qr_voucher',
+        trackingCode: publicOrderCode,
+        orderCode: publicOrderCode,
+        documentType: matchedDocumentType || 'order',
+        status: publicOrderStatus,
+        epodUid: null,
+        seq: orderSigSummary.seq,
+        ledgerSeq: orderSigSummary.seq,
+        entryHash: orderSigSummary.entryHash,
+        ledgerEntryHash: orderSigSummary.entryHash,
+        keyId: orderSigSummary.keyId,
+        publicKeyFingerprint: orderSigSummary.publicKeyFingerprint,
         signedAt,
-        reason: sigSummary.reason,
+        reason: orderSigSummary.reason,
         verifiedAt: new Date().toISOString(),
         requiresTokenForDetails: true,
       };
