@@ -82,6 +82,7 @@ function createMockShowcaseServer({
     connectors: [],
     iotDevices: [],
     webhookSubscriptions: [],
+    publicForms: [],
     provisionedPasswords: [],
     calls: [],
   };
@@ -566,6 +567,21 @@ function createMockShowcaseServer({
         hasSigningSecret: Boolean(signingSecret),
       });
     }
+    if (parsedUrl.pathname === '/api/dxosForms:list') {
+      const org = parsedUrl.searchParams.get('organizationId');
+      return jsonResp({
+        organizationId: org,
+        items: state.publicForms.filter((f) => !org || f.organizationId === org),
+      });
+    }
+    if (parsedUrl.pathname === '/api/dxosForms:save') {
+      if (state.publicForms.some((f) => f.slug === body.slug)) {
+        return errorResp(409, 'FORM_SLUG_CONFLICT', `Slug "${body.slug}" is already in use.`);
+      }
+      const saved = { id: ++state.nextId, ...body };
+      state.publicForms.push(saved);
+      return jsonResp(saved);
+    }
     if (parsedUrl.pathname === '/api/latticePara:reindex') {
       return jsonResp({ indexedCount: 5 });
     }
@@ -710,6 +726,12 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(first.enterpriseWebhookSubscription.seeded, true);
   assert.equal(first.enterpriseWebhookSubscription.subscriptionKey, 'n8n-enterprise-compliance');
   assert.equal(first.enterpriseWebhookSubscription.hasSigningSecret, true);
+  assert.equal(first.publicForm.seeded, true);
+  assert.equal(first.publicForm.slug, 'yeu-cau-dich-vu-nhanh');
+  assert.equal(first.publicForm.targetCollection, 'latticeServiceTickets');
+  assert.equal(state.publicForms.length, 1);
+  assert.ok(state.publicForms[0].allowedFieldsJson.some((f) => f.type === 'select' && Array.isArray(f.options) && f.options.length > 0));
+  assert.ok(state.publicForms[0].allowedFieldsJson.some((f) => f.type === 'file'));
 
   const vaultSaveCallIdx = state.calls.indexOf('/api/dxosVault:save');
   const devProvisionCallIdx = state.calls.indexOf('/api/dxosBroker:provisionDevice');
@@ -756,6 +778,9 @@ test('runV100ChampionshipShowcaseSeed executes full showcase cleanly and is idem
   assert.equal(second.webhookSubscription.hasSigningSecret, true);
   assert.equal(second.enterpriseWebhookSubscription.seeded, false);
   assert.equal(second.enterpriseWebhookSubscription.hasSigningSecret, true);
+  assert.equal(second.publicForm.seeded, false);
+  assert.equal(second.publicForm.alreadyExists, true);
+  assert.equal(state.publicForms.length, 1);
   assert.equal(state.locations.length, 3);
   assert.equal(state.assets.length, 3);
   assert.equal(state.orders.length, 1);

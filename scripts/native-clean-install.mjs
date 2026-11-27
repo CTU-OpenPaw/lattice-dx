@@ -128,7 +128,7 @@ export async function nativeCleanInstall({run=defaultRun,port=13004,blankSlate=f
     await command('git',['archive','--format=tar','--output='+archive,report.sourceCommit]);
     await mkdir(plan.sourceRoot);
     await command('tar',['-xf',archive,'-C',plan.sourceRoot]);
-    if (blankSlate && !existsSync(join(plan.sourceRoot, 'node_modules'))) {
+    if (!existsSync(join(plan.sourceRoot, 'node_modules'))) {
       const pnpmCjs = [
         join(dirname(process.execPath), 'node_modules/pnpm/bin/pnpm.cjs'),
         join(process.env.APPDATA || '', 'npm/node_modules/pnpm/bin/pnpm.cjs'),

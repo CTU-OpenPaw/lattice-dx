@@ -8,14 +8,14 @@ SPDX-License-Identifier: Apache-2.0
 -->
 # Hướng dẫn Kiểm thử End-to-End (E2E) Toàn Hệ thống LatticeDX `v0.4.2` (Dành cho Hưng)
 
-Tài liệu này được thiết kế để **Hưng tự dựng môi trường từ đầu và kiểm thử trọn bộ toàn hệ thống LatticeDX `v0.4.2`** theo đúng góc nhìn người dùng thực tế — bao phủ cả **8 miền nghiệp vụ**, **5 vai trò người dùng**, **12 Native v2 BlockModels**, **Mobile Field PWA (`/v/mobile`)**, **Public Portals (`/v/form/*`, `/v/track/*`)**, **P.A.R.A. OCR/RAG**, **DX-OS AI Studio (9 tab)**, **Control Studio (11 tab + 6 console)**, **LatticeFlow v2 (24 node)**, và **kiểm thử tự động / bảo mật**.
+Tài liệu này được thiết kế để **Hưng tự dựng môi trường từ đầu và kiểm thử trọn bộ toàn hệ thống LatticeDX `v0.4.2`** theo đúng góc nhìn người dùng thực tế — bao phủ cả **8 miền nghiệp vụ**, **6 vai trò người dùng** (cùng khách ẩn danh), **12 Native v2 BlockModels**, **Mobile Field PWA (`/v/mobile`)**, **Public Portals (`/v/form/*`, `/v/track/*`)**, **P.A.R.A. OCR/RAG**, **DX-OS AI Studio (9 tab)**, **Control Studio (11 tab + 6 console)**, **LatticeFlow v2 (24 node)**, và **kiểm thử tự động / bảo mật**.
 
 ---
 
 ## 0. Chuẩn bị Môi trường & Dựng Stack Từ Đầu (5–10 phút)
 
 ### 0.1. Yêu cầu trên máy
-- **Node.js `24.x`**, **pnpm `10.23.0`**, **Git**, và **Docker Desktop** đang mở.
+- **Node.js `24.x`**, **pnpm `10.23.0`**, **Git**, và **Docker Desktop** đang mở *(lưu ý trên Windows: nếu Docker Desktop cài theo user không nằm trong `C:\Program Files\Docker\...`, hãy mở trực tiếp Docker Desktop từ Start Menu thay vì chạy `pnpm docker:start`)*.
 - Trình duyệt **Chrome / Edge** (khuyên mở thêm 1 cửa sổ **Ẩn danh / Incognito** để test luồng khách công khai và chuyển đổi nhiều tài khoản không dính session).
 
 ### 0.2. Lấy mã mới nhất từ `main` & cài đặt
@@ -45,7 +45,11 @@ node scripts/seed-v030-demo-showcase.mjs --origin=http://localhost:13014
 pnpm seed:v100-showcase -- --origin=http://localhost:13014
 ```
 
-*(Nếu muốn test chế độ **cài trắng Blank-Slate** không nạp dữ liệu mẫu để kiểm tra Onboarding Checklist: chạy `LATTICE_SKIP_DEMO_SEED=1 pnpm native:clean --port=13014 --blank-slate`.)*
+*(Nếu muốn test chế độ **cài trắng Blank-Slate** không nạp dữ liệu mẫu để kiểm tra Onboarding Checklist và giữ container chạy để mở trình duyệt: dùng cờ **`--keep`** trên PowerShell: `pnpm native:clean --port=13014 --blank-slate --keep` — cờ `--blank-slate` tự gắn `LATTICE_SKIP_DEMO_SEED: "1"` vào container; nếu không truyền `--keep`, script sẽ tự `compose down -v` ngay khi hoàn tất kiểm tra tự động. Khi đặt biến môi trường thủ công trên PowerShell, luôn dùng cú pháp `$env:TEN_BIEN = "gia_tri"` thay cho cú pháp Bash.)*
+
+> **Phạm vi Lab `native:clean` (2 container):** Lệnh `pnpm native:clean` sử dụng `infra/compose/native-rehearsal.yml` gồm 2 container (`nocobase-db` + `nocobase`), **không** bật Keycloak, Valkey/Redis, `n8n`, `9router`, Mosquitto/Node-RED/Orion-LD, cấu hình nginx `10-lattice-public-routes.sh` hay biến `TZ=Asia/Ho_Chi_Minh`. Do đó:
+> - Tất cả luồng lõi NocoBase + 7 plugin + PG16 `FORCE RLS` + Public Forms/Track + P.A.R.A. + AI Studio + Control Studio + LatticeFlow v2 chạy đầy đủ trên lab này.
+> - Các bài kiểm tra phụ thuộc dịch vụ ngoài (`acceptance:dxos-ai-mcp`, `acceptance:broker-automation-builder` cần `n8n`; SSO Keycloak thật; route `/.well-known/agent-card.json` không qua `/api`; legacy bridge `/lattice/*`) chỉ chạy trên full stack (`infra/compose/prod.yml` / `core.yml`).
 
 ### 0.4. Danh sách tài khoản kiểm thử (`http://localhost:13014`)
 
@@ -54,6 +58,7 @@ pnpm seed:v100-showcase -- --origin=http://localhost:13014
 | **Quản trị tối cao (`root`)** | `admin@nocobase.com` | `admin123` | Toàn bộ Admin Studio, AI Studio, Flow Studio, P.A.R.A., UI Editor, đa tổ chức |
 | **Quản lý (`ldx_manager`)** | `native.lab.manager@example.invalid` | `NativeLab-2026!` | Phê duyệt, WMS FEFO, Sự cố, Portal quản lý, kiểm tra phân quyền với Admin |
 | **Nhân viên (`ldx_employee`)** | `native.lab.employee@example.invalid` | `NativeLab-2026!` | Cổng nhân viên, `/p/logistics` tự chuyển hướng, chặn 403 vào Flow/AI/Control Studio |
+| **Kho / Thực hiện (`ldx_warehouse`)** | `native.lab.worker@example.invalid` | `NativeLab-2026!` | Bước 3 luồng Logistics (Kho nhận & chuẩn bị hàng), cập nhật tồn kho WMS |
 | **Điều phối (`ldx_dispatcher`)** | `native.lab.dispatcher@example.invalid` | `NativeLab-2026!` | Điều phối vận tải, phân bổ lô hàng & ePOD |
 | **Tài xế (`ldx_driver`)** | `native.lab.driver@example.invalid` | `NativeLab-2026!` | Mobile Field PWA `/v/mobile`, chụp/ký ePOD offline & kiểm tra ẩn Digital Twin theo ACL |
 | **Khách ngoài (Ẩn danh)** | *(Không đăng nhập — cửa sổ Incognito)* | — | `/v/form/:slug`, `/v/track/:code?verify=...`, `/signin` |
@@ -84,8 +89,8 @@ pnpm seed:v100-showcase -- --origin=http://localhost:13014
 4. **Kỳ vọng:** Tạo hồ sơ thành công, hiển thị **Mã tra cứu** + nút **Sao chép Mã** + nút **"Gửi hồ sơ khác"**; tuyệt đối không có popup XSS; nhập mã hồ sơ vào ô **Tra cứu thủ công** xem lại được trạng thái Zero-PII.
 
 ### Test 1.5: Tra cứu vận đơn & quét QR Ed25519 `/v/track/:code?verify=...`
-1. Ở tài khoản Admin/Manager, mở `/p/logistics` → trong block **WMS Ops**, bấm **In phiếu QR** cho đơn `ORD-V100-001` (đã xác nhận, không phải đơn nháp).
-2. Copy URL QR dạng `/v/track/LDX-TRK-...?verify=...` mở ở cửa sổ **Ẩn danh**.
+1. Ở tài khoản Admin/Manager, mở `/p/logistics` → chọn đơn `ORD-V100-001` (hoặc đơn đã trình duyệt/xác nhận, không phải đơn nháp), trong block **RecordWorkbench** bấm **In chứng từ**.
+2. Copy URL QR dạng `/v/track/ORD-V100-001?verify=...` (hoặc `/v/track/LDX-TRK-...?verify=...` nếu đơn đã có ePOD) mở ở cửa sổ **Ẩn danh**.
 3. **Kỳ vọng:**
    - Ô `Mã vận đơn` được điền sẵn và hiển thị **kết quả xác thực chữ ký sổ cái Ed25519 công khai** hợp lệ.
    - Thông tin riêng tư ePOD/PII vẫn được bảo vệ fail-closed cho đến khi nhập đúng `trackingToken` (có nút biểu tượng mắt `eye toggle` để ẩn/hiện mã).
@@ -167,20 +172,21 @@ Mở từng cổng từ thanh chuyển cổng Topbar:
 ## 5. Phần 5 — DX-OS AI Studio (9 Tab), App Builder 2.0, MCP, Eval Lab & Chat (Miền 5)
 
 Mở **`/admin/settings/dxos-ai`**, duyệt lần lượt 9 tab trên thanh bên trái:
-1. **Tab 1 — Tổng quan 6 Phân hệ & Quick-Connect LLM:**
+1. **Tab 1 — `1. Hệ điều hành 6 Phân hệ` & Quick-Connect LLM:**
    - Kiểm tra danh sách LLM Providers (`dxosAi:listLlmServices`), thử cấu hình/kiểm tra kết nối; nếu nhập URL nội bộ/SSRF (ví dụ `http://127.0.0.1` hoặc `http://169.254.169.254`) → bị chặn an toàn (`redirect: 'error'` + DNS SSRF guard).
-2. **Tab 2 — Nhân sự AI (7 Starter Profiles):** Kiểm tra đủ 7 profile & 6 trường cấu hình, tạo/sửa 1 profile thử nghiệm.
-3. **Tab 3 — Cổng Enterprise MCP 2 Chiều & A2A:** Kiểm tra danh mục tool động hiển thị thật, bấm **Ping MCP**, kiểm tra A2A Agent Card (`/.well-known/agent-card.json` hiển thị version **`0.4.2`**).
-4. **Tab 6 — Duyệt AI (HITL):** Kiểm tra bộ lọc bao gồm `pending`, `approved`, `rejected`, **`executing`, `failed`**, cột **`executionResult`** và thời hạn **`expiresAt`**.
-5. **Tab 7 — Built Apps Manager (App Builder 2.0):**
+2. **Tab 2 — `2. Quản trị Nhân sự AI Động` (7 Starter Profiles):** Kiểm tra đủ 7 profile & 6 trường cấu hình, tạo/sửa 1 profile thử nghiệm.
+3. **Tab 3 — `3. Cổng Enterprise MCP 2 Chiều` & A2A:** Kiểm tra danh mục tool động hiển thị thật, bấm **Ping MCP**, kiểm tra A2A Agent Card (`/api/.well-known/agent-card.json` hiển thị version **`0.4.2`**; lưu ý `/.well-known/agent-card.json` không qua `/api` chỉ bật trên full stack có nginx `10-lattice-public-routes.sh`).
+4. **Tab 4 — `4. Ứng dụng Đã dựng (Built Apps)` (App Builder 2.0):**
    - Thử **Lập kế hoạch (`Plan`)** một ứng dụng mới (ví dụ `"Quản lý bảo hành thiết bị lạnh"`) → xem **Visual ER Graph** & **Plan-Diff**.
    - Bấm **Dựng ứng dụng (`Build`)**, sau đó thử **Vá bằng tiếng Việt (`Patch`)** → **Khôi phục phiên bản (`Rollback`)** (xác nhận chỉ rollback đúng các `blockUids` của app này, không phá block của cổng khác).
    - Thử **Gỡ ứng dụng (`Teardown`)** có hộp thoại xác nhận `keepData` → đảm bảo an toàn đa tenant (không `DROP TABLE` bảng đang được tổ chức khác dùng).
-6. **Tab 8 — Trace Waterfall & Eval Lab:**
-   - Chọn suite **`vietnamese-nl-agent`** → bấm chạy Eval (chế độ `router`) → **Kỳ vọng:** Chạy đủ **163/163 ca (`100%`)** ngay trong container (không còn tụt về `17/17`).
-7. **Tab 9 — Hạn mức AI (`Quota Policy`) & Nhật ký Audit:**
-   - Chỉnh hạn mức token/chi phí → bấm **Lưu** → tải lại trang để kiểm chứng đã lưu bền vững vào Postgres (`latticeAiQuotaPolicies` có `FORCE RLS`).
+5. **Tab 5 — `5. Nhật ký Kiểm toán` (`Audit Log`):**
    - Đổi dropdown lọc **Trạng thái / Agent / Tổ chức** trên Nhật ký Audit → xác nhận gọi lại API tải đúng dữ liệu theo bộ lọc (không chỉ lọc trên trang 1), mốc giờ `+07:00`.
+6. **Tab 6 — `6. Agent Trace Waterfall` & Tab 7 — `7. Eval Lab`:**
+   - Ở Tab 6 kiểm tra trace waterfall; ở Tab 7 chọn suite **`vietnamese-nl-agent`** → bấm chạy Eval (chế độ `router`) → **Kỳ vọng:** Chạy đủ **163/163 ca (`100%`)** ngay trong container (không còn tụt về `17/17`).
+7. **Tab 8 — `8. Duyệt AI (HITL)` & Tab 9 — `9. Hạn mức & Chi phí AI`:**
+   - Ở **Tab 8 (`Duyệt AI (HITL)`)**: Kiểm tra bộ lọc bao gồm `pending`, `approved`, `rejected`, **`executing`, `failed`**, cột **`executionResult`** và thời hạn **`expiresAt`**.
+   - Ở **Tab 9 (`Hạn mức & Chi phí AI`)**: Chỉnh hạn mức token/chi phí → bấm **Lưu** → tải lại trang để kiểm chứng đã lưu bền vững vào Postgres (`latticeAiQuotaPolicies` có `FORCE RLS`).
 8. **Nút Chat Agent nổi trên `/p/logistics`:** Mở khung chat, gửi 1 câu hỏi tiếng Việt (nếu không bật `9router`, xác nhận hiện thẻ lỗi rõ ràng + nút **"Thử lại"** thay vì treo `"is thinking..."`).
 
 ---
@@ -259,12 +265,18 @@ pnpm release:sbom -- --check
 pnpm audit --prod --audit-level=low
 
 # 5. Bộ nghiệm thu Live API/E2E (chạy khi NocoBase đang bật ở http://localhost:13014)
+# Lưu ý: acceptance:dxos-ai-mcp và acceptance:broker-automation-builder yêu cầu dịch vụ n8n (chỉ có trên full stack)
 pnpm acceptance:headless-paas -- --origin=http://localhost:13014
 pnpm acceptance:dxos-ai-mcp -- --origin=http://localhost:13014
 pnpm acceptance:broker-automation-builder -- --origin=http://localhost:13014
 pnpm acceptance:logistics-rbac -- "<path-to-report.json>"
 
-# 6. Kiểm tra sao lưu & phục hồi toàn stack (không chạm dữ liệu thật)
+# 6a. Kiểm tra sao lưu & phục hồi DB cho lab native:clean 2 container (không chạm dữ liệu thật)
+$env:NATIVE_DATABASE_CONTAINER = "lattice-native-clean-<id>-nocobase-db-1"
+pnpm backup:native
+pnpm backup:rehearse-native -- "output/backups/native/<core-dump>.dump"
+
+# 6b. Kiểm tra sao lưu & phục hồi toàn stack 7 container (chỉ dùng khi dựng full stack core.yml/prod.yml)
 pnpm backup:stack
 pnpm backup:rehearse-stack -- "output/backups/stack/<bundle-id>"
 ```
@@ -282,12 +294,15 @@ pnpm backup:rehearse-stack -- "output/backups/stack/<bundle-id>"
 | 5 | DX-OS AI Studio (9 tab) & Chat | Eval Lab chạy đủ `163/163`; Audit dropdown lọc đúng; HITL có `executionResult`/`expiresAt`; Rollback đúng block app; Teardown an toàn đa tenant; Chat offline có nút Thử lại | `[ ]` | |
 | 6 | Control Studio (11 tab + 6 consoles) | UI `dxosNotify` đầy đủ; Form `select` + Submissions Viewer; DMN mô phỏng bản nháp; Approval giữ nguyên badge 4 tab; PKI `rotateKey`; GitOps Dry-Run `200 PASS`; `?tab=dmn` & không cắt nút ở `1280x800` | `[ ]` | |
 | 7 | LatticeFlow v2 Studio | Chặn `ldx_employee` `403`; validator tiếng Việt; `ai.agent` đủ trường; visual builder `if`/`switch`/`transform`; `control.loop` resume HITL; `first_completed` không chặn | `[ ]` | |
-| 8 | Bộ lệnh tự động & Pure-OSI | `pnpm check`, `node --test`, `163/163` Eval, `pof:check` `6/6`, `sbom` `257/257`, `audit` `0` CVE, `acceptance:*` | `[ ]` | |
+| 8 | Bộ lệnh tự động & Pure-OSI | `pnpm check`, `node --test`, `163/163` Eval, `pof:check` `6/6`, `sbom` `257/257`, `audit` `0` CVE, `acceptance:*`, `backup:native` | `[ ]` | |
 
 ---
 
 ### Dọn dẹp môi trường sau khi test xong
 ```powershell
-# Tắt stack Docker cài sạch (nếu chạy bằng docker compose)
+# Tắt lab native:clean theo đúng project (<id> lấy từ output/native-clean/<id>/report.json)
+docker compose -p lattice-native-clean-<id> -f infra/compose/native-rehearsal.yml -f output/native-clean/<id>/overlay.yml down -v --remove-orphans
+
+# Hoặc nếu dựng bằng compose nocobase.yml mặc định:
 docker compose -f infra/compose/nocobase.yml down
 ```

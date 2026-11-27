@@ -14,6 +14,7 @@ import {
   assertLoopbackOrigin,
   createSeederClient,
   parseSeedArgs,
+  seedQuickServicePublicForm,
   seedStudioShowcaseSamples,
 } from './seed-v030-demo-showcase.mjs';
 
@@ -1187,6 +1188,7 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
   const automationShowcase = await seedFlagshipAutomationRules(api, organizationId, assets);
   const webhookSubscription = await seedWebhookSubscription(api, organizationId);
   const enterpriseWebhookSubscription = await seedEnterpriseWebhookSubscription(api, organizationId);
+  const publicForm = await seedQuickServicePublicForm(api, organizationId);
   const studioShowcase = options?.seedSamples === true
     ? await seedStudioShowcaseSamples(api, organizationId)
     : undefined;
@@ -1224,6 +1226,7 @@ export async function runV100ChampionshipShowcaseSeed(options, fetchImpl = fetch
     mqttDevice,
     webhookSubscription,
     enterpriseWebhookSubscription,
+    publicForm,
     ...(studioShowcase !== undefined ? { studioShowcase } : {}),
     paraReindex,
     triage,
