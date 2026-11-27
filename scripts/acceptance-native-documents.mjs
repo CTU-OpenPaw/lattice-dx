@@ -67,6 +67,8 @@ try {
   for(const collection of ['latticeRequests','latticeOrders']) {
     const workflow=await configureNativeProcess((path,options)=>ok(path,{...options,token:root}),{collection,organizationId:org,reviewerEmployeeId:manager.employee.id,assigneeEmployeeId:warehouse.employee.id});
     workflows.push(workflow);
+    const draftDoc=await create(collection,{code:randomUUID(),name:'Native draft ACL acceptance',...(collection==='latticeOrders'?{quantity:1}:{})},employee.token);
+    const peerDraftEdit=await call(collection+':update?filterByTk='+draftDoc.id,{token:peer.token,method:'POST',values:{description:'Peer attempt on draft'}});assert.equal(peerDraftEdit.status,403);checks.push(collection+':native_draft_scope_prevents_peer_edit');
     await ok('workflows:update?filterByTk='+workflow.workflowId,{token:root,method:'POST',values:{enabled:true}});
     const document=await create(collection,{code:randomUUID(),name:'Native process acceptance',...(collection==='latticeOrders'?{quantity:5}:{} )},employee.token);
     assert.equal(document.organizationId,org);assert.equal(String(document.requesterId),String(employee.employee.id));
@@ -76,7 +78,7 @@ try {
     assert.equal((await submit(employee,review,'review','approve')).status,403);checks.push(collection+':host_rejects_wrong_task_assignee');
     const hidden=await ok(collection+':get?filterByTk='+document.id,{token:peer.token});assert.ok(!hidden||!hidden.id);
     const crossOrg=await ok(collection+':get?filterByTk='+document.id,{token:foreign.token});assert.ok(!crossOrg||!crossOrg.id);checks.push(collection+':native_acl_and_org_scope');
-    const edit=await call(collection+':update?filterByTk='+document.id,{token:employee.token,method:'POST',values:{description:'Attempt after submit'}});assert.equal(edit.status,403);checks.push(collection+':native_draft_scope_prevents_late_edit');
+    const edit=await call(collection+':update?filterByTk='+document.id,{token:employee.token,method:'POST',values:{description:'Attempt after submit'}});assert.equal(edit.status,409);assert.ok(edit.body?.errors?.[0]?.code==='VOUCHER_IMMUTABLE'||/bất biến|VOUCHER_IMMUTABLE/i.test(String(edit.body?.errors?.[0]?.message||'')),`Expected VOUCHER_IMMUTABLE 409, got ${JSON.stringify(edit.body)}`);checks.push(collection+':native_voucher_immutable_prevents_late_edit');
     assert.equal((await submit(manager,review,'review','approve',{status:'completed',decision:'rejected'})).status,202);
     assert.ok((await submit(manager,review,'review','approve')).status>=400);checks.push(collection+':native_task_cannot_be_processed_twice');
     const work=(await waitFor('native execution task',()=>mine(warehouse,workflow),rows=>rows.length===1))[0];

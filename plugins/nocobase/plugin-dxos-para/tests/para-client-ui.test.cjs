@@ -781,3 +781,110 @@ test('P1-10: OCR-to-Record renders collection-matched fields, avoids code->lotCo
     Module._load = origLoad;
   }
 });
+
+test('Bug #7 client guard: handleOpenDocPreview never exposes raw VN phone/CCCD in preview modal summary', async () => {
+  const origLoad = Module._load;
+  const { React, render } = createMiniHooks();
+  const AntdStub = createAntdStub();
+  class MockClientPlugin {
+    constructor(app) { this.app = app; }
+  }
+  const api = {
+    async request(cfg) {
+      if (cfg.url === 'latticePara:summary') {
+        return { data: { data: { organizationId: 'org-a', organizations: ['org-a'], spaces: {}, total: 1 } } };
+      }
+      if (cfg.url === 'latticePara:indexHealth') {
+        return { data: { data: { organizationId: 'org-a', documentsCount: 1, chunksCount: 1, recentFailures: [] } } };
+      }
+      if (cfg.url === 'latticeParaDocuments:list') {
+        return {
+          data: {
+            data: [
+              { id: 10, code: 'SOP-KDL-E2E-01', title: 'SOP Kho lạnh', paraSpace: 'resources', status: 'active', summary: 'Liên hệ [REDACTED_PHONE] CCCD [REDACTED_CCCD]', version: 1 },
+            ],
+          },
+        };
+      }
+      if (cfg.url === 'latticePara:hybridSearch') {
+        return {
+          data: {
+            data: {
+              items: [
+                {
+                  id: 10,
+                  documentId: 10,
+                  code: 'SOP-KDL-E2E-01',
+                  title: 'SOP Kho lạnh',
+                  paraSpace: 'resources',
+                  summary: 'Liên hệ [REDACTED_PHONE] CCCD [REDACTED_CCCD] ORD-V100-001 2026-11-27',
+                  snippet: 'Đoạn trích [REDACTED_PHONE]',
+                  citation: 'SOP-KDL-E2E-01#1',
+                  embeddingEngine: 'deterministic-fallback',
+                  score: 0.9,
+                },
+              ],
+            },
+          },
+        };
+      }
+      if (cfg.url === 'latticeParaDocuments:get') {
+        // Even if a legacy/unredacted response returns raw PII, preview modal defensively redacts summary
+        return {
+          data: {
+            data: {
+              id: 10,
+              code: 'SOP-KDL-E2E-01',
+              title: 'SOP Kho lạnh',
+              paraSpace: 'resources',
+              status: 'active',
+              summary: 'Liên hệ 0912345678 CCCD 092099001234 +84 912 345 678 ORD-V100-001 2026-11-27',
+              contentMarkdown: '# Nội dung SOP',
+              version: 1,
+            },
+          },
+        };
+      }
+      return { data: { data: {} } };
+    },
+  };
+  Module._load = function (req, parent, isMain) {
+    if (req === '@nocobase/client') return { Plugin: MockClientPlugin, useAPIClient: () => api };
+    if (req === 'react') return React;
+    if (req === 'antd') return AntdStub;
+    return origLoad.call(this, req, parent, isMain);
+  };
+
+  try {
+    const clientIndexPath = path.join(PLUGIN_ROOT, 'src/client/index.js');
+    delete require.cache[require.resolve(clientIndexPath)];
+    const { createDxosParaSettingsPage } = require(clientIndexPath);
+    const Page = createDxosParaSettingsPage({ useAPIClient: () => api }, React, AntdStub, { apiClient: api });
+
+    let tree = render(Page, {});
+    await new Promise((r) => setTimeout(r, 15));
+    tree = render(Page, {});
+
+    findByTestId(tree, 'dxos-para-search-input').props.onChange({ target: { value: 'kho lạnh' } });
+    tree = render(Page, {});
+    await findByTestId(tree, 'dxos-para-search-btn').props.onClick();
+    tree = render(Page, {});
+
+    const searchTable = findByTestId(tree, 'dxos-para-search-table');
+    await searchTable.props.onRow(searchTable.props.dataSource[0]).onClick();
+    tree = render(Page, {});
+
+    const previewModal = findByTestId(tree, 'dxos-para-doc-preview-modal');
+    assert.ok(previewModal && previewModal.props.open === true);
+    const modalText = JSON.stringify(previewModal);
+    assert.equal(modalText.includes('0912345678'), false);
+    assert.equal(modalText.includes('092099001234'), false);
+    assert.equal(modalText.includes('+84 912 345 678'), false);
+    assert.match(modalText, /\[REDACTED_PHONE\]/);
+    assert.match(modalText, /\[REDACTED_CCCD\]/);
+    assert.match(modalText, /ORD-V100-001/);
+    assert.match(modalText, /2026-11-27/);
+  } finally {
+    Module._load = origLoad;
+  }
+});

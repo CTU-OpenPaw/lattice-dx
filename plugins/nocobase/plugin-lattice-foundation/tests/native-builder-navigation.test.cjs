@@ -539,3 +539,46 @@ test('PortalRenderRecoveryGuard triggers soft recovery and shows Vietnamese relo
   assert.ok(dump.includes('ldx-portal-load-fallback'), `Expected fallback banner, got ${dump}`);
   assert.ok(dump.includes('Tải lại trang'));
 });
+
+test('UX-drawer: injects mobile drawer & narrow sider menu wrapping CSS without hiding Clause 5.2 footer', async (t) => {
+  const { ensureMobileMenuWrapStyles, MOBILE_MENU_WRAP_STYLE_ID } = require('../src/client/native-builder-navigation');
+  const prevDoc = global.document;
+  const appended = [];
+  const byId = new Map();
+  global.document = {
+    head: {
+      appendChild(el) {
+        appended.push(el);
+        if (el.id) byId.set(el.id, el);
+      },
+    },
+    getElementById: (id) => byId.get(id) || null,
+    querySelector: () => null,
+    createElement: (tag) => ({ tagName: tag.toUpperCase(), attrs: {}, setAttribute(k, v) { this.attrs[k] = v; }, textContent: '' }),
+  };
+  t.after(() => { global.document = prevDoc; });
+
+  const setup = harness({ allow: false, pathname: '/p/logistics/ops', layoutUid: 'ldx-portal-logistics', runEffects: true });
+  const ui = setup.render();
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(appended.length, 1, 'Expected single style injection on mount');
+  assert.equal(appended[0].id, MOBILE_MENU_WRAP_STYLE_ID);
+  const css = appended[0].textContent;
+  assert.ok(css.includes('.ant-drawer .ant-menu-item'));
+  assert.ok(css.includes('.ant-drawer .ant-menu-submenu-title'));
+  assert.ok(css.includes('.ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-title-content'));
+  assert.ok(css.includes('white-space: normal'));
+  assert.ok(css.includes('padding-inline-end: 34px'));
+  assert.equal(css.includes('ldx-clause52-attribution'), false);
+
+  // Idempotent on subsequent calls
+  assert.equal(ensureMobileMenuWrapStyles(), null);
+  assert.equal(appended.length, 1);
+
+  // Clause 5.2 footer remains intact
+  const footer = find(ui, n => n.props?.className === 'ldx-clause52-attribution');
+  assert.ok(footer, 'Powered by NocoBase Clause 5.2 footer must remain intact');
+  const link = find(footer, n => n.type === 'a' && n.props.href === 'https://www.nocobase.com');
+  assert.equal(link.children[0], 'NocoBase');
+});

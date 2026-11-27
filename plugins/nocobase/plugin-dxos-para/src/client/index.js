@@ -78,6 +78,23 @@
     return err?.response?.data?.errors?.[0]?.message || err?.response?.data?.message || err?.message || fallback;
   }
 
+  function redactParaSummaryClient(rawText) {
+    const input = String(rawText ?? '');
+    if (!input) return '';
+    return input
+      .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_JWT]')
+      .replace(/(Bearer[ \t]+)[A-Za-z0-9._~+/-]{8,}=*/gi, '$1[REDACTED]')
+      .replace(/\bldx_(?:pat|trk)_[A-Za-z0-9_-]{6,}\b/gi, '[REDACTED_TOKEN]')
+      .replace(/\bsk-[A-Za-z0-9_-]{6,}\b/g, '[REDACTED_KEY]')
+      .replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, '[REDACTED_EMAIL]')
+      .replace(
+        /(\b(?:cccd|cmnd|căn cước(?:\s+công dân)?|chứng minh(?:\s+nhân dân)?|số định danh(?:\s+cá nhân)?|id(?:\s*(?:no|number|card))?)\s*[:#=-]?\s*)(?:\d(?:[ .-]?\d){11}|\d(?:[ .-]?\d){8})(?![0-9A-Za-z-])/gi,
+        '$1[REDACTED_CCCD]',
+      )
+      .replace(/(?<![0-9A-Za-z.+-])\d{12}(?![0-9A-Za-z-]|\.\d)/g, '[REDACTED_CCCD]')
+      .replace(/(?<![0-9A-Za-z.-])(?:(?:\+?84[\s.-]?\d(?:[\s.-]?\d){8,9})|(?:0\d(?:[\s.-]?\d){8,9}))(?![0-9A-Za-z-])/g, '[REDACTED_PHONE]');
+  }
+
   function emptyDocDraft() {
     return {
       id: null,
@@ -590,7 +607,14 @@
       const handleOpenDocPreview = async (record) => {
         const docId = record?.documentId || record?.id;
         setPreviewOpen(true);
-        setPreviewDoc(record || null);
+        setPreviewDoc(
+          record
+            ? {
+                ...record,
+                ...(record.summary != null ? { summary: redactParaSummaryClient(record.summary) } : {}),
+              }
+            : null,
+        );
         if (!api || typeof api.request !== 'function' || !docId) return;
         setPreviewLoading(true);
         try {
@@ -602,9 +626,11 @@
           });
           const full = unwrapPayload(res);
           if (full && (full.id || full.title || full.code)) {
+            const rawSummary = full.summary ?? record?.summary;
             setPreviewDoc({
               ...record,
               ...full,
+              ...(rawSummary != null ? { summary: redactParaSummaryClient(rawSummary) } : {}),
               matchedSnippet: record?.snippet || '',
               matchedCitation: record?.citation || '',
             });

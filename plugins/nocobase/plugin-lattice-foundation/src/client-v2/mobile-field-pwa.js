@@ -98,6 +98,22 @@ function isTransientOrNetworkFailure(err) {
   return status === 408 || status === 429 || status >= 500;
 }
 
+function isStaleOfflineNetworkNotice(notice) {
+  if (!notice || typeof notice !== 'object') return false;
+  if (notice.kind === 'offline-network') return true;
+  if (notice.type !== 'warn') return false;
+  const text = String(notice.text || '');
+  return /^(?:Đang ngoại tuyến|Mất kết nối|Mất mạng|Vẫn ngoại tuyến|Đã xếp hàng đợi lệnh Digital Twin)/i.test(text);
+}
+
+function isTransientNetworkSyncEntry(entry) {
+  return Boolean(
+    entry
+    && entry.status === 'deferred'
+    && (entry.httpStatus === null || entry.httpStatus === undefined || entry.httpStatus === 0),
+  );
+}
+
 function isAiTimeoutOrUnavailable(err) {
   const status = extractHttpStatus(err);
   return status === 503
@@ -926,6 +942,35 @@ function createMobileFieldPwaPage(client, React, app) {
     const detectedOrgIdRef = React.useRef('');
     const twinBusyRef = React.useRef(false);
     const aiSessionRef = React.useRef({ token: null, sessionId: null, employee: null });
+    const onlineSettleCancelRef = React.useRef(null);
+    const transientRetryCancelRef = React.useRef(null);
+
+    const onlineSettleMs = Number.isFinite(Number(props.onlineSettleMs)) && Number(props.onlineSettleMs) >= 0
+      ? Number(props.onlineSettleMs)
+      : 1200;
+    const transientRetryDelayMs = Number.isFinite(Number(props.transientRetryDelayMs)) && Number(props.transientRetryDelayMs) >= 0
+      ? Number(props.transientRetryDelayMs)
+      : 1500;
+
+    const waitCancellableDelay = React.useCallback((delayMs, cancelRef) => {
+      if (!(delayMs > 0) || typeof setTimeout !== 'function') return Promise.resolve(true);
+      cancelRef.current?.();
+      return new Promise((resolve) => {
+        let done = false;
+        let timer = null;
+        const finish = (ok) => {
+          if (done) return;
+          done = true;
+          if (timer && typeof clearTimeout === 'function') clearTimeout(timer);
+          timer = null;
+          cancelRef.current = null;
+          resolve(ok);
+        };
+        cancelRef.current = () => finish(false);
+        timer = setTimeout(() => finish(true), delayMs);
+        if (timer && typeof timer.unref === 'function') timer.unref();
+      });
+    }, []);
 
     const handleSync = React.useCallback(async (overrideOnline) => {
       if (syncingRef.current) {
@@ -936,16 +981,41 @@ function createMobileFieldPwaPage(client, React, app) {
         return null;
       }
       const effectiveOnline = typeof overrideOnline === 'boolean' ? overrideOnline : isOnline;
+      const isNavigatorOnline = () => (typeof navigator === 'undefined' || navigator.onLine !== false);
       syncingRef.current = true;
       setSyncing(true);
       const run = (async () => {
         try {
-          const res = await flushOfflineQueue({
+          let res = await flushOfflineQueue({
             apiClient,
             storage: outboxOptsRef.current.storage,
             indexedDB: outboxOptsRef.current.indexedDB,
             isOnline: effectiveOnline,
           });
+          if (
+            effectiveOnline
+            && !res.unauthorized
+            && Array.isArray(res.results)
+            && res.results.some(isTransientNetworkSyncEntry)
+            && isNavigatorOnline()
+          ) {
+            const settled = await waitCancellableDelay(transientRetryDelayMs, transientRetryCancelRef);
+            if (settled && mountedRef.current && isNavigatorOnline()) {
+              const retryRes = await flushOfflineQueue({
+                apiClient,
+                storage: outboxOptsRef.current.storage,
+                indexedDB: outboxOptsRef.current.indexedDB,
+                isOnline: true,
+              });
+              res = {
+                ...retryRes,
+                synced: (Number(res.synced) || 0) + (Number(retryRes.synced) || 0),
+                quarantined: Math.max(Number(res.quarantined) || 0, Number(retryRes.quarantined) || 0),
+                conflicts: Math.max(Number(res.conflicts) || 0, Number(retryRes.conflicts) || 0),
+              };
+            }
+          }
+          if (!mountedRef.current) return res;
           setQueueItems(res.remaining);
           const hasUnauthorized = res.unauthorized
             || (Array.isArray(res.results) && res.results.some((r) => r.status === 'deferred' && r.httpStatus === 401));
@@ -961,26 +1031,28 @@ function createMobileFieldPwaPage(client, React, app) {
               text: `Đồng bộ xong: ${res.synced} thành công, ${res.quarantined || 0} cách ly, ${res.deferred} chờ thử lại.`,
             });
           } else if (res.deferred > 0) {
-            setStatusNotice({ type: 'warn', text: `Vẫn ngoại tuyến hoặc mất kết nối — giữ ${res.deferred} tác vụ trong hàng đợi.` });
+            setStatusNotice({ type: 'warn', kind: 'offline-network', text: `Vẫn ngoại tuyến hoặc mất kết nối — giữ ${res.deferred} tác vụ trong hàng đợi.` });
           } else {
             setStatusNotice({ type: 'info', text: 'Hàng đợi ngoại tuyến đang trống.' });
           }
           return res;
         } catch (err) {
-          setStatusNotice({
-            type: 'error',
-            text: (err && err.message) || 'Không thể đồng bộ hàng đợi ngoại tuyến.',
-          });
+          if (mountedRef.current) {
+            setStatusNotice({
+              type: 'error',
+              text: (err && err.message) || 'Không thể đồng bộ hàng đợi ngoại tuyến.',
+            });
+          }
           return null;
         } finally {
           syncingRef.current = false;
           syncPromiseRef.current = null;
-          setSyncing(false);
+          if (mountedRef.current) setSyncing(false);
         }
       })();
       syncPromiseRef.current = run;
       return run;
-    }, [apiClient, isOnline]);
+    }, [apiClient, isOnline, transientRetryDelayMs, waitCancellableDelay]);
 
     handleSyncRef.current = handleSync;
 
@@ -1009,15 +1081,29 @@ function createMobileFieldPwaPage(client, React, app) {
       const hasWindowEvents = typeof window !== 'undefined' && typeof window.addEventListener === 'function';
       const onOnline = async () => {
         setIsOnline(true);
+        setStatusNotice((prev) => (isStaleOfflineNetworkNotice(prev) ? null : prev));
+        if (syncingRef.current && syncPromiseRef.current) {
+          return syncPromiseRef.current;
+        }
         const current = isIndexedDbAvailable(outboxOptsRef.current)
           ? await listOutboxItems(outboxOptsRef.current).catch(() => [])
           : readSyncFallbackOutbox({ storage: storageRef.current });
         if (current.length === 0) {
           return undefined;
         }
+        const settled = await waitCancellableDelay(onlineSettleMs, onlineSettleCancelRef);
+        if (!settled || !mountedRef.current) {
+          return undefined;
+        }
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+          return undefined;
+        }
         return handleSyncRef.current?.(true)?.catch(() => undefined);
       };
-      const onOffline = () => setIsOnline(false);
+      const onOffline = () => {
+        onlineSettleCancelRef.current?.();
+        setIsOnline(false);
+      };
 
       if (hasWindowEvents) {
         window.addEventListener('online', onOnline);
@@ -1037,6 +1123,8 @@ function createMobileFieldPwaPage(client, React, app) {
       }
       return () => {
         mountedRef.current = false;
+        onlineSettleCancelRef.current?.();
+        transientRetryCancelRef.current?.();
         scannerStartSeqRef.current += 1;
         if (hasWindowEvents) {
           window.removeEventListener?.('online', onOnline);
@@ -1726,7 +1814,7 @@ function createMobileFieldPwaPage(client, React, app) {
         const queuedItem = await enqueueOutboxItem({ actionType, payload }, outboxOptsRef.current);
         const nextQueue = await listOutboxItems(outboxOptsRef.current);
         setQueueItems(nextQueue);
-        setStatusNotice({ type: 'warn', text: buildNoticeText(nextQueue.length) });
+        setStatusNotice({ type: 'warn', kind: 'offline-network', text: buildNoticeText(nextQueue.length) });
         return { queued: true, item: queuedItem };
       } catch (queueErr) {
         const errorText = queueErr && queueErr.code === 'OFFLINE_QUEUE_FULL'
@@ -2641,7 +2729,7 @@ function createMobileFieldPwaPage(client, React, app) {
       h('header', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, gap: 8 } },
         h('div', null,
           h('div', { style: { fontSize: 18, fontWeight: 800, letterSpacing: '-0.02em' } }, 'LatticeDX Field PWA'),
-          h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Giao nhận hiện trường · /v/mobile'),
+          h('div', { style: { fontSize: 12, color: '#94a3b8' } }, 'Giao nhận hiện trường'),
         ),
         h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
           h('button', {
@@ -3063,7 +3151,7 @@ function createMobileFieldPwaPage(client, React, app) {
                 return h('div', {
                   key: apKey,
                   'data-testid': `mobile-pwa-approval-card-${apKey}`,
-                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #475569', marginBottom: 8 },
                 },
                   h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 8 } },
                     h('strong', { style: { fontSize: 13, lineHeight: 1.35 } }, ap.title || ap.targetCode || `Yêu cầu #${apKey}`),
@@ -3105,7 +3193,7 @@ function createMobileFieldPwaPage(client, React, app) {
                 return h('div', {
                   key: ordKey,
                   'data-testid': `mobile-pwa-delivery-card-${ordKey}`,
-                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #475569', marginBottom: 8 },
                 },
                   h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
                     h('strong', { style: { fontSize: 13 } }, `${ord.code || `#${ordKey}`} — ${ord.name || ord.customer || 'Đơn vận chuyển'}`),
@@ -3188,7 +3276,7 @@ function createMobileFieldPwaPage(client, React, app) {
                   return h('div', {
                     key: incKey,
                     'data-testid': `mobile-pwa-incident-card-${incKey}`,
-                    style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                    style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #475569', marginBottom: 8 },
                   },
                     h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
                       h('strong', { style: { fontSize: 13 } }, `${inc.code || `#${incKey}`} — ${inc.name || 'Sự cố thiết bị'}`),
@@ -3348,7 +3436,7 @@ function createMobileFieldPwaPage(client, React, app) {
                 return h('div', {
                   key: tktKey,
                   'data-testid': `mobile-pwa-ticket-card-${tktKey}`,
-                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #334155', marginBottom: 8 },
+                  style: { padding: 10, borderRadius: 10, background: '#0f172a', border: '1px solid #475569', marginBottom: 8 },
                 },
                   h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
                     h('strong', { style: { fontSize: 13 } }, `${tkt.code || `#${tktKey}`} — ${tkt.name || 'Phiếu hỗ trợ'}`),
@@ -3544,15 +3632,15 @@ function createMobileFieldPwaPage(client, React, app) {
               style: btnSecondaryStyle,
             }, gpsPending ? 'Đang định vị...' : 'Lấy tọa độ GPS'),
           ),
-          h('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 } },
+          h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: 8 } },
             h('input', {
               type: 'number',
               step: 'any',
               'data-testid': 'mobile-pwa-lat-input',
               value: gpsLat,
               onChange: (e) => setGpsLat(e.target.value),
-              placeholder: 'Latitude (vd: 10.0452)',
-              style: { ...inputStyle, marginBottom: 4 },
+              placeholder: 'Vĩ độ (10.0452)',
+              style: { ...inputStyle, minWidth: 0, marginBottom: 4 },
             }),
             h('input', {
               type: 'number',
@@ -3560,8 +3648,8 @@ function createMobileFieldPwaPage(client, React, app) {
               'data-testid': 'mobile-pwa-lng-input',
               value: gpsLng,
               onChange: (e) => setGpsLng(e.target.value),
-              placeholder: 'Longitude (vd: 105.7469)',
-              style: { ...inputStyle, marginBottom: 4 },
+              placeholder: 'Kinh độ (105.7469)',
+              style: { ...inputStyle, minWidth: 0, marginBottom: 4 },
             }),
           ),
           h('label', {

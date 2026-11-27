@@ -614,20 +614,30 @@ test('P1-12: PortalAgentLauncher suppresses passive /p/* 503 warning, opens fall
     assert.equal(healthCalls, 0, 'Must NOT call checkLlmHealth passively on /p/* mount');
     assert.equal(findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-ai-health-warning'), null);
 
-    // Multi-agent switcher is rendered when employees.length > 1
-    const switcher = findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-agent-switcher');
-    assert.ok(switcher, 'Expected multi-agent switcher');
-    switcher.props.onChange({ target: { value: 'dxos-analyst' } });
-    tree = h.render(Launcher);
+    // Bug #9: Agent switcher must NOT float over page content/BiChartBlock when drawer is closed
+    assert.equal(
+      findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-agent-switcher'),
+      null,
+      'Must NOT render floating agent switcher over page charts when AI drawer is closed',
+    );
 
-    // Click float button -> opens fallback drawer & renders inline error + Thử lại button
+    // Click float button -> opens fallback drawer with non-truncated agent switcher in header & inline error + Thử lại button
     const floatBtn = findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-float-btn');
     assert.ok(floatBtn);
     await floatBtn.props.onClick({ stopPropagation() {} });
     tree = h.render(Launcher);
 
     assert.equal(healthCalls, 1, 'checkLlmHealth runs when user clicks chat');
-    assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-fallback-drawer'), 'Fallback drawer must open when triggerTask is unavailable');
+    const drawer = findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-fallback-drawer');
+    assert.ok(drawer, 'Fallback drawer must open when triggerTask is unavailable');
+    const switcher = findNode(drawer, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-agent-switcher');
+    assert.ok(switcher, 'Expected multi-agent switcher inside open AI drawer header');
+    assert.notEqual(switcher.props?.style?.position, 'fixed');
+    assert.equal(switcher.props?.style?.width, '100%');
+    assert.equal(switcher.props?.style?.maxWidth, undefined);
+    switcher.props.onChange({ target: { value: 'dxos-analyst' } });
+    tree = h.render(Launcher);
+    assert.ok(JSON.stringify(findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-fallback-drawer')).includes('Chuyên viên Phân tích'));
     const errCard = findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-error-card');
     assert.ok(errCard, 'Inline error card must appear on 503');
     const retryBtn = findNode(tree, (n) => n.props?.['data-testid'] === 'dxos-portal-ai-retry-btn');

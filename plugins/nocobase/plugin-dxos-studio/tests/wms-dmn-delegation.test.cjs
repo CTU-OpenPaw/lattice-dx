@@ -2395,3 +2395,203 @@ test('T2-MOBILE-02 regression: epodCapture rejects unknown or cross-org orderCod
   assert.equal(matchedCtx.body.epod.orderCode, 'ORD-A-801');
   assert.equal(harness.epodRecords.length, 2);
 });
+
+test('Bug #5 regression: verifyTrackSignature verifies order/delivery_note ?verify= proofs without ePOD, post-ePOD orderCode proofs, and fails closed on tampered proofs', async () => {
+  const { createDxosWmsActions } = require(path.join(PLUGIN_ROOT, 'src/server/wms-engine.js'));
+  const { appendLedgerEntry } = require(path.resolve(PLUGIN_ROOT, '../plugin-lattice-foundation/src/server/pki-ledger.js'));
+
+  const prevRls = process.env.DX_PG_RLS_SESSION;
+  const rlsSqlLog = [];
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const harness = makeTestHarness({
+      employees: [
+        { id: 10, userId: 100, organizationId: 'org-v100', active: true },
+        { id: 15, userId: 150, organizationId: 'org-v100', active: true },
+      ],
+      orders: [
+        {
+          id: 901,
+          code: 'ORD-V100-001',
+          name: 'Lô Vắc-xin Nhạy Cảm',
+          customer: 'Khách hàng Nguyễn Thị Bí Mật',
+          origin: '123 Đường Kho Lạnh, Cần Thơ',
+          destination: '456 Đường Giao Nhận, TP.HCM',
+          organizationId: 'org-v100',
+          status: 'approved',
+        },
+        {
+          id: 902,
+          code: 'ORD-V100-DRAFT',
+          name: 'Draft Sensitive Order',
+          customer: 'Draft Customer',
+          organizationId: 'org-v100',
+          status: 'draft',
+        },
+      ],
+    });
+
+    const origTx = harness.db.sequelize.transaction;
+    harness.db.sequelize.getDialect = () => 'postgres';
+    harness.db.sequelize.query = async (sql, opts) => {
+      rlsSqlLog.push({ sql: String(sql), replacements: opts?.replacements || null });
+      return [[]];
+    };
+    harness.db.sequelize.transaction = async (fn) => origTx((tx) => fn(tx));
+
+    const wms = createDxosWmsActions(harness.db);
+
+    // 1. Print order & delivery_note vouchers BEFORE any ePOD exists
+    const printOrderCtx = {
+      method: 'GET',
+      state: { currentUser: { id: 100, username: 'adm-v100' }, currentRole: 'ldx_admin' },
+      can: () => true,
+      action: { params: { documentType: 'order', orderCode: 'ORD-V100-001' } },
+    };
+    await wms.printVoucher(printOrderCtx, async () => {});
+    const orderMatch = printOrderCtx.body.qrTrackPath.match(/^\/v\/track\/([^?]+)\?verify=([0-9a-f]+)$/i);
+    assert.ok(orderMatch, `Expected /v/track/ORD-V100-001?verify=... got ${printOrderCtx.body.qrTrackPath}`);
+    assert.equal(decodeURIComponent(orderMatch[1]), 'ORD-V100-001');
+    const orderVerify = orderMatch[2];
+
+    const printDeliveryCtx = {
+      method: 'GET',
+      state: { currentUser: { id: 100, username: 'adm-v100' }, currentRole: 'ldx_admin' },
+      can: () => true,
+      action: { params: { documentType: 'delivery_note', orderCode: 'ORD-V100-001' } },
+    };
+    await wms.printVoucher(printDeliveryCtx, async () => {});
+    const dnMatch = printDeliveryCtx.body.qrTrackPath.match(/\?verify=([0-9a-f]+)$/i);
+    assert.ok(dnMatch);
+    const dnVerify = dnMatch[1];
+
+    // 2. Verify /v/track/ORD-V100-001?verify=... without ePOD -> 200 verified: true, zero PII, withSystemRlsBypass
+    for (const [docType, verifyToken] of [['order', orderVerify], ['delivery_note', dnVerify]]) {
+      rlsSqlLog.length = 0;
+      const vCtx = {
+        method: 'POST',
+        state: {},
+        action: { params: { values: { code: 'ORD-V100-001', trackingCode: 'ORD-V100-001', verify: verifyToken } } },
+      };
+      await wms.verifyTrackSignature(vCtx, async () => {});
+      assert.ok(rlsSqlLog.some((c) => c.sql.includes("set_config('app.rls_bypass', 'on'")), 'verifyTrackSignature must run under withSystemRlsBypass');
+      assert.equal(vCtx.body.verified, true);
+      assert.equal(vCtx.body.publicProofOnly, true);
+      assert.equal(vCtx.body.requiresTokenForDetails, true);
+      assert.equal(vCtx.body.orderCode, 'ORD-V100-001');
+      assert.equal(vCtx.body.documentType, docType);
+      assert.equal(vCtx.body.status, 'approved');
+      const json = JSON.stringify(vCtx.body);
+      for (const pii of ['Nguyễn Thị Bí Mật', '123 Đường Kho Lạnh', '456 Đường Giao Nhận', 'Nhạy Cảm', 'org-v100', '901']) {
+        assert.equal(json.includes(pii), false, `Order track verify leaked PII/internal: ${pii}`);
+      }
+    }
+
+    // 3. Tampered / wrong / missing / draft-order verify proofs fail closed with 401
+    const tamperedOrderVerify = `${orderVerify.slice(0, -2)}${orderVerify.endsWith('00') ? 'ff' : '00'}`;
+    for (const badParams of [
+      { code: 'ORD-V100-001', verify: tamperedOrderVerify },
+      { code: 'ORD-V100-001', verify: 'not-hex' },
+      { code: 'ORD-V100-001' },
+      { code: 'ORD-UNKNOWN-999', verify: orderVerify },
+      { code: 'ORD-V100-DRAFT', verify: orderVerify },
+    ]) {
+      await assert.rejects(
+        () => wms.verifyTrackSignature({ method: 'POST', state: {}, action: { params: { values: badParams } } }, async () => {}),
+        (err) => err.status === 401 && err.code === 'TRACKING_UNAUTHORIZED',
+      );
+    }
+
+    // 4. Order with latticeCryptoLedger entry performs genuine Ed25519 verification & catches tampering
+    const orderLedgerEntry = await appendLedgerEntry(harness.db, {
+      organizationId: 'org-v100',
+      eventType: 'oms.order_approved',
+      targetCollection: 'latticeOrders',
+      targetRecordId: '901',
+      actor: { userId: '100', username: 'adm-v100' },
+      payload: { orderCode: 'ORD-V100-001', status: 'approved' },
+    });
+    const ledgerVerifyCtx = {
+      method: 'GET',
+      state: {},
+      action: { params: { code: 'ORD-V100-001', verify: orderVerify } },
+    };
+    await wms.verifyTrackSignature(ledgerVerifyCtx, async () => {});
+    assert.equal(ledgerVerifyCtx.body.verified, true);
+    assert.equal(ledgerVerifyCtx.body.ledgerSeq, orderLedgerEntry.seq);
+    assert.equal(ledgerVerifyCtx.body.entryHash, orderLedgerEntry.entryHash);
+    assert.ok(ledgerVerifyCtx.body.keyId && ledgerVerifyCtx.body.publicKeyFingerprint);
+
+    const savedOrderSig = harness.ledgerEntries[0].signatureBase64;
+    harness.ledgerEntries[0].signatureBase64 = Buffer.from('tampered-order-sig').toString('base64');
+    const tamperedLedgerCtx = {
+      method: 'GET',
+      state: {},
+      action: { params: { code: 'ORD-V100-001', verify: orderVerify } },
+    };
+    await wms.verifyTrackSignature(tamperedLedgerCtx, async () => {});
+    assert.equal(tamperedLedgerCtx.body.verified, false);
+    assert.equal(tamperedLedgerCtx.body.reason, 'LEDGER_SIGNATURE_MISMATCH');
+    harness.ledgerEntries[0].signatureBase64 = savedOrderSig;
+
+    // 5. After ePOD is captured for ORD-V100-001:
+    //    - Both new LDX-TRK-... ?verify= AND previously printed ORD-V100-001 ?verify= succeed with zero PII
+    const capCtx = {
+      method: 'POST',
+      state: { currentUser: { id: 150, username: 'drv-v100' }, currentRole: 'ldx_driver' },
+      can: () => true,
+      action: {
+        params: {
+          values: {
+            orderId: 901,
+            orderCode: 'ORD-V100-001',
+            recipientName: 'Tran Van Nhan Bi Mat',
+            recipientPhone: '0912345678',
+            deliveredQty: 50,
+            gpsLat: 10.0452,
+            gpsLng: 105.7469,
+            signatureDataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB',
+          },
+        },
+      },
+    };
+    await wms.epodCapture(capCtx, async () => {});
+
+    const epodPrintCtx = {
+      method: 'GET',
+      state: { currentUser: { id: 100, username: 'adm-v100' }, currentRole: 'ldx_admin' },
+      can: () => true,
+      action: { params: { documentType: 'epod', epodUid: capCtx.body.epod.epodUid } },
+    };
+    await wms.printVoucher(epodPrintCtx, async () => {});
+    const epodVerifyMatch = epodPrintCtx.body.qrTrackPath.match(/\?verify=([0-9a-f]+)$/i);
+    assert.ok(epodVerifyMatch);
+
+    const epodTrackCtx = {
+      method: 'POST',
+      state: {},
+      action: { params: { values: { code: capCtx.body.trackingCode, verify: epodVerifyMatch[1] } } },
+    };
+    await wms.verifyTrackSignature(epodTrackCtx, async () => {});
+    assert.equal(epodTrackCtx.body.verified, true);
+    assert.equal(epodTrackCtx.body.trackingCode, capCtx.body.trackingCode);
+    for (const pii of ['Tran Van Nhan Bi Mat', '0912345678', '345678', 'org-v100', 'ORD-V100-001']) {
+      assert.equal(JSON.stringify(epodTrackCtx.body).includes(pii), false, `ePOD track verify leaked PII: ${pii}`);
+    }
+
+    const legacyOrderQrCtx = {
+      method: 'POST',
+      state: {},
+      action: { params: { values: { code: 'ORD-V100-001', verify: orderVerify } } },
+    };
+    await wms.verifyTrackSignature(legacyOrderQrCtx, async () => {});
+    assert.equal(legacyOrderQrCtx.body.verified, true);
+    assert.equal(legacyOrderQrCtx.body.orderCode, 'ORD-V100-001');
+    for (const pii of ['Tran Van Nhan Bi Mat', '0912345678', '345678', 'Nguyễn Thị Bí Mật', 'org-v100']) {
+      assert.equal(JSON.stringify(legacyOrderQrCtx.body).includes(pii), false, `Post-ePOD order QR verify leaked PII: ${pii}`);
+    }
+  } finally {
+    if (prevRls === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevRls;
+  }
+});

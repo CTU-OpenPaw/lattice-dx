@@ -151,10 +151,81 @@ export async function createSeederClient(
   return request;
 }
 
+const QUICK_SERVICE_FORM_SLUG = 'yeu-cau-dich-vu-nhanh';
+const RETRYABLE_409_SUBMIT_RE = /HTTP 409:.*(?:VOUCHER_SUBMIT_INVALID_STATE|VERSION_CONFLICT|nháp|draft|thay đổi)/i;
+const RETRYABLE_409_CANCEL_RE = /HTTP 409:.*(?:VOUCHER_CANCEL_INVALID_STATE|VERSION_CONFLICT|đang trình duyệt|thay đổi)/i;
+
 async function findByCode(api, collection, organizationId, code) {
   const filter = encodeURIComponent(JSON.stringify({ organizationId, code }));
   const rows = unwrapList(await api(`${collection}:list?filter=${filter}&pageSize=5`));
   return rows[0] || null;
+}
+
+async function submitVoucherIdempotent(api, organizationId, code, row) {
+  let current = (await findByCode(api, 'latticeRequests', organizationId, code)) || row;
+  if (!current || String(current.status || 'draft').toLowerCase() !== 'draft') {
+    return current;
+  }
+  try {
+    return await api('latticeVoucher:submit', {
+      method: 'POST',
+      values: { collection: 'latticeRequests', id: current.id, expectedVersion: current.version },
+    });
+  } catch (err) {
+    if (!RETRYABLE_409_SUBMIT_RE.test(err?.message || '')) throw err;
+    const latest = await findByCode(api, 'latticeRequests', organizationId, code);
+    if (!latest) throw err;
+    if (String(latest.status || 'draft').toLowerCase() === 'draft') {
+      try {
+        return await api('latticeVoucher:submit', {
+          method: 'POST',
+          values: { collection: 'latticeRequests', id: latest.id, expectedVersion: latest.version },
+        });
+      } catch (retryErr) {
+        if (!RETRYABLE_409_SUBMIT_RE.test(retryErr?.message || '')) throw retryErr;
+        const settled = await findByCode(api, 'latticeRequests', organizationId, code);
+        if (settled && String(settled.status || '').toLowerCase() !== 'draft') return settled;
+        throw retryErr;
+      }
+    }
+    return latest;
+  }
+}
+
+async function cancelVoucherIdempotent(api, organizationId, code, row, cancelReason) {
+  let current = (await findByCode(api, 'latticeRequests', organizationId, code)) || row;
+  const isCancellable = (r) => ['submitted', 'approved', 'in_progress'].includes(String(r?.status || '').toLowerCase());
+  if (!current || !isCancellable(current)) {
+    return current;
+  }
+  try {
+    return await api('latticeVoucher:cancel', {
+      method: 'POST',
+      values: {
+        collection: 'latticeRequests',
+        id: current.id,
+        expectedVersion: current.version,
+        cancelReason,
+      },
+    });
+  } catch (err) {
+    if (!RETRYABLE_409_CANCEL_RE.test(err?.message || '')) throw err;
+    const latest = await findByCode(api, 'latticeRequests', organizationId, code);
+    if (!latest) throw err;
+    if (String(latest.status || '').toLowerCase() === 'cancelled') return latest;
+    if (isCancellable(latest)) {
+      return await api('latticeVoucher:cancel', {
+        method: 'POST',
+        values: {
+          collection: 'latticeRequests',
+          id: latest.id,
+          expectedVersion: latest.version,
+          cancelReason,
+        },
+      });
+    }
+    return latest;
+  }
 }
 
 async function ensureDemoContext(api, organizationId) {
@@ -218,10 +289,7 @@ async function seedVouchers(api, organizationId, ctx) {
     created.push('REQ-2026-002');
   }
   if (String(req2.status || 'draft').toLowerCase() === 'draft') {
-    req2 = await api('latticeVoucher:submit', {
-      method: 'POST',
-      values: { collection: 'latticeRequests', id: req2.id, expectedVersion: req2.version },
-    });
+    req2 = await submitVoucherIdempotent(api, organizationId, 'REQ-2026-002', req2);
   }
 
   let req3 = await findByCode(api, 'latticeRequests', organizationId, 'REQ-2026-003');
@@ -240,21 +308,17 @@ async function seedVouchers(api, organizationId, ctx) {
     created.push('REQ-2026-003');
   }
   if (String(req3.status || 'draft').toLowerCase() === 'draft') {
-    req3 = await api('latticeVoucher:submit', {
-      method: 'POST',
-      values: { collection: 'latticeRequests', id: req3.id, expectedVersion: req3.version },
-    });
+    req3 = await submitVoucherIdempotent(api, organizationId, 'REQ-2026-003', req3);
   }
+  req3 = (await findByCode(api, 'latticeRequests', organizationId, 'REQ-2026-003')) || req3;
   if (['submitted', 'approved', 'in_progress'].includes(String(req3.status || '').toLowerCase())) {
-    req3 = await api('latticeVoucher:cancel', {
-      method: 'POST',
-      values: {
-        collection: 'latticeRequests',
-        id: req3.id,
-        expectedVersion: req3.version,
-        cancelReason: 'Điều chỉnh công suất máy nén và thông số kỹ thuật theo thẩm định v0.3.0',
-      },
-    });
+    req3 = await cancelVoucherIdempotent(
+      api,
+      organizationId,
+      'REQ-2026-003',
+      req3,
+      'Điều chỉnh công suất máy nén và thông số kỹ thuật theo thẩm định v0.3.0',
+    );
   }
 
   let req3Amd1 = await findByCode(api, 'latticeRequests', organizationId, 'REQ-2026-003-AMD1');
@@ -497,6 +561,106 @@ async function seedHitlApproval(api, organizationId, requests, ctx) {
   return { seeded: true, via: 'latticeAiApprovalQueue:create', approvalId: created?.id ?? null };
 }
 
+export async function seedQuickServicePublicForm(api, organizationId) {
+  const listed = unwrapList(
+    await api(`dxosForms:list?organizationId=${encodeURIComponent(organizationId)}&limit=200`),
+  );
+  const existing = listed.find((f) => f?.slug === QUICK_SERVICE_FORM_SLUG);
+  if (existing) {
+    return {
+      seeded: false,
+      alreadyExists: true,
+      id: existing.id ?? null,
+      slug: existing.slug,
+      targetCollection: existing.targetCollection || 'latticeServiceTickets',
+      active: existing.active !== false,
+    };
+  }
+
+  const payload = {
+    organizationId,
+    slug: QUICK_SERVICE_FORM_SLUG,
+    title: 'Tiếp nhận Yêu cầu Dịch vụ Nhanh',
+    description: 'Biểu mẫu công khai tiếp nhận yêu cầu hỗ trợ kỹ thuật, cơ sở vật chất và dịch vụ nội bộ (hỗ trợ đính kèm tệp & tra cứu Zero-PII).',
+    targetCollection: 'latticeServiceTickets',
+    allowedFieldsJson: [
+      {
+        name: 'name',
+        label: 'Tiêu đề yêu cầu',
+        type: 'string',
+        required: true,
+        maxLength: 180,
+        placeholder: 'Ví dụ: Kiểm tra cảm biến nhiệt độ Kho lạnh CT-01',
+      },
+      {
+        name: 'serviceType',
+        label: 'Loại dịch vụ',
+        type: 'select',
+        required: true,
+        maxLength: 64,
+        options: ['it_support', 'facilities', 'hr_request', 'leave'],
+      },
+      {
+        name: 'priority',
+        label: 'Mức độ ưu tiên',
+        type: 'select',
+        required: true,
+        maxLength: 32,
+        options: ['normal', 'medium', 'high', 'urgent'],
+      },
+      {
+        name: 'description',
+        label: 'Mô tả chi tiết',
+        type: 'text',
+        required: true,
+        maxLength: 2000,
+        placeholder: 'Nhập mô tả sự cố hoặc yêu cầu hỗ trợ...',
+      },
+      {
+        name: 'attachment',
+        label: 'Tệp đính kèm (PDF/Ảnh/TXT <= 2MB)',
+        type: 'file',
+        required: false,
+        maxLength: 200,
+      },
+    ],
+    defaultValuesJson: {
+      serviceType: 'it_support',
+      priority: 'medium',
+    },
+    requireAccessToken: false,
+    honeypotField: '_hp_website',
+    rateLimitPerMinute: 20,
+    active: true,
+  };
+
+  try {
+    const saved = await api('dxosForms:save', {
+      method: 'POST',
+      values: payload,
+    });
+    return {
+      seeded: true,
+      alreadyExists: false,
+      id: saved?.id ?? null,
+      slug: saved?.slug || QUICK_SERVICE_FORM_SLUG,
+      targetCollection: saved?.targetCollection || 'latticeServiceTickets',
+      active: saved?.active !== false,
+    };
+  } catch (err) {
+    if (/HTTP 409:.*(?:FORM_SLUG_CONFLICT|already in use)/i.test(err?.message || '')) {
+      return {
+        seeded: false,
+        alreadyExists: true,
+        slugConflict: true,
+        slug: QUICK_SERVICE_FORM_SLUG,
+        targetCollection: 'latticeServiceTickets',
+      };
+    }
+    throw err;
+  }
+}
+
 export async function seedStudioShowcaseSamples(api, organizationId) {
   try {
     return await api('dxosStudio:seedShowcaseData', {
@@ -520,6 +684,7 @@ export async function runV030DemoShowcaseSeed(options, fetchImpl = fetch) {
   const chatter = await seedChatterComments(api, vouchers.requests, ctx.mentionHandle);
   const sla = await seedSlaPolicies(api, organizationId);
   const telemetry = await seedColdChainTelemetry(api, organizationId, ctx);
+  const publicForm = await seedQuickServicePublicForm(api, organizationId);
   const studioShowcase = options?.seedSamples === true
     ? await seedStudioShowcaseSamples(api, organizationId)
     : undefined;
@@ -541,6 +706,7 @@ export async function runV030DemoShowcaseSeed(options, fetchImpl = fetch) {
     chatter,
     sla,
     telemetry,
+    publicForm,
     ...(studioShowcase !== undefined ? { studioShowcase } : {}),
     paraReindex,
     hitl,

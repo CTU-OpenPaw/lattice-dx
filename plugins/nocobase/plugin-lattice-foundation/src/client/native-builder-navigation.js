@@ -11,6 +11,80 @@
 const { createNativeWorkspace, workspacePages, WORKSPACE_PATH } = require('./native-workspace');
 
 const BUILDER_PATH = '/admin/lattice-builder';
+const MOBILE_MENU_WRAP_STYLE_ID = 'ldx-mobile-drawer-menu-wrap-style';
+const MOBILE_MENU_WRAP_CSS = [
+  '.ant-drawer .ant-menu-item,',
+  '.ant-drawer .ant-menu-submenu-title {',
+  '  white-space: normal !important;',
+  '  line-height: 1.35 !important;',
+  '  height: auto !important;',
+  '  min-height: 40px;',
+  '  padding-block: 8px !important;',
+  '}',
+  '.ant-drawer .ant-menu-submenu-title {',
+  '  padding-inline-end: 34px !important;',
+  '}',
+  '.ant-drawer .ant-menu-item .ant-menu-title-content,',
+  '.ant-drawer .ant-menu-submenu-title .ant-menu-title-content,',
+  '.ant-drawer .ant-menu-item .ant-menu-title-content a,',
+  '.ant-drawer .ant-menu-submenu-title .ant-menu-title-content a {',
+  '  white-space: normal !important;',
+  '  overflow: visible !important;',
+  '  text-overflow: clip !important;',
+  '  line-height: 1.35 !important;',
+  '  word-break: break-word;',
+  '}',
+  '.ant-drawer .ant-menu-item .anticon,',
+  '.ant-drawer .ant-menu-submenu-title .anticon,',
+  '.ant-drawer .ant-menu-item .ant-menu-item-icon,',
+  '.ant-drawer .ant-menu-submenu-title .ant-menu-item-icon {',
+  '  flex-shrink: 0;',
+  '}',
+  '@media (max-width: 991px) {',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-item,',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-submenu-title {',
+  '    white-space: normal !important;',
+  '    line-height: 1.35 !important;',
+  '    height: auto !important;',
+  '    min-height: 40px;',
+  '    padding-block: 8px !important;',
+  '  }',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-submenu-title {',
+  '    padding-inline-end: 34px !important;',
+  '  }',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-title-content,',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-title-content a {',
+  '    white-space: normal !important;',
+  '    overflow: visible !important;',
+  '    text-overflow: clip !important;',
+  '    line-height: 1.35 !important;',
+  '    word-break: break-word;',
+  '  }',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-item .anticon,',
+  '  .ant-layout-sider:not(.ant-layout-sider-collapsed) .ant-menu-submenu-title .anticon {',
+  '    flex-shrink: 0;',
+  '  }',
+  '}',
+].join('\n');
+
+function ensureMobileMenuWrapStyles(doc) {
+  const targetDoc = doc || (typeof document !== 'undefined' ? document : null);
+  if (!targetDoc || !targetDoc.head || typeof targetDoc.createElement !== 'function') return null;
+  if (typeof targetDoc.getElementById === 'function' && targetDoc.getElementById(MOBILE_MENU_WRAP_STYLE_ID)) {
+    return null;
+  }
+  if (typeof targetDoc.querySelector === 'function' && targetDoc.querySelector(`style[data-ldx-style="${MOBILE_MENU_WRAP_STYLE_ID}"]`)) {
+    return null;
+  }
+  const styleEl = targetDoc.createElement('style');
+  styleEl.id = MOBILE_MENU_WRAP_STYLE_ID;
+  if (typeof styleEl.setAttribute === 'function') {
+    styleEl.setAttribute('data-ldx-style', MOBILE_MENU_WRAP_STYLE_ID);
+  }
+  styleEl.textContent = MOBILE_MENU_WRAP_CSS;
+  targetDoc.head.appendChild(styleEl);
+  return styleEl;
+}
 
 function pageTree(routes, query = '') {
   const needle = String(query).trim().toLocaleLowerCase('vi');
@@ -189,6 +263,10 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
     const configMode = /^\/admin\/settings(?:\/|$)/.test(pathname);
     const workspaceMode = pathname === WORKSPACE_PATH || pathname.startsWith(WORKSPACE_PATH + '/popups/');
     const isAdminRoot = pathname === '/admin' || pathname === '/admin/';
+
+    React.useEffect(() => {
+      ensureMobileMenuWrapStyles();
+    }, []);
 
     React.useEffect(() => {
       if (!model.layout?.uid && Array.isArray(allAccessRoutes)) model.syncMenuRoutes?.(allAccessRoutes);
@@ -486,4 +564,14 @@ function createNativeBuilderNavigation(client, React, antd, app, { clientV2, rou
   };
 }
 
-module.exports = { pageTree, hostPath, firstSettingsPath, resolvePortalRedirect, createNativeBuilderNavigation, BUILDER_PATH };
+module.exports = {
+  pageTree,
+  hostPath,
+  firstSettingsPath,
+  resolvePortalRedirect,
+  createNativeBuilderNavigation,
+  ensureMobileMenuWrapStyles,
+  MOBILE_MENU_WRAP_STYLE_ID,
+  MOBILE_MENU_WRAP_CSS,
+  BUILDER_PATH,
+};

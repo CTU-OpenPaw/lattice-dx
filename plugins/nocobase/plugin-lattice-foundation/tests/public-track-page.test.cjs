@@ -447,3 +447,73 @@ test('T4-RW-02: PublicTrackPage interactive buttons and inputs enforce >=44px mo
     }
   }
 });
+
+test('Bug #5: PublicTrackPage falls back to #verify= in loc.hash while preserving ?verify= search precedence', async () => {
+  const { parseTrackParams, createPublicTrackPage } = require('../src/client-v2/public-track-page');
+
+  assert.deepEqual(
+    parseTrackParams({ pathname: '/v/track/ORD-V100-001', search: '', hash: '#verify=hashproof123456' }),
+    { trackingCode: 'ORD-V100-001', token: '', verify: 'hashproof123456' },
+  );
+  assert.deepEqual(
+    parseTrackParams({ pathname: '/v/track/ORD-V100-001', search: '', hash: '#/v/track/ORD-V100-001?verify=hashroute7890' }),
+    { trackingCode: 'ORD-V100-001', token: '', verify: 'hashroute7890' },
+  );
+  assert.deepEqual(
+    parseTrackParams({ pathname: '/v/track/ORD-V100-001', search: '?verify=searchwins111', hash: '#verify=hashloses222' }),
+    { trackingCode: 'ORD-V100-001', token: '', verify: 'searchwins111' },
+  );
+  assert.deepEqual(
+    parseTrackParams({ pathname: '/v/track/ORD-V100-001', search: '', hash: '#verify=<script>alert(1)</script>' }),
+    { trackingCode: 'ORD-V100-001', token: '' },
+  );
+  assert.deepEqual(
+    parseTrackParams({
+      pathname: '/v/track/ORD-V100-001',
+      search: '?__proto__=polluted&constructor=bad&prototype=bad',
+      hash: '#__proto__=polluted&verify=safeproof999',
+    }),
+    { trackingCode: 'ORD-V100-001', token: '', verify: 'safeproof999' },
+  );
+  assert.equal(({}).polluted, undefined);
+
+  const fakeReact = createFakeReact();
+  const requests = [];
+  const mockApi = {
+    async request(req) {
+      requests.push(req);
+      return {
+        data: {
+          data: {
+            verified: true,
+            publicProofOnly: true,
+            trackingCode: 'ORD-V100-001',
+            keyId: 'ed25519-org-a-v1',
+            ledgerEntryHash: 'sha256_hash_fallback',
+            signedAt: '2026-11-27T02:00:00.000Z',
+          },
+        },
+      };
+    },
+  };
+
+  const PublicTrackPage = createPublicTrackPage({ Plugin: class {} }, fakeReact, { apiClient: mockApi });
+  let tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    location: { pathname: '/v/track/ORD-V100-001', search: '', hash: '#verify=hashproof123456' },
+  });
+  await fakeReact._flushEffects();
+  tree = fakeReact._render(PublicTrackPage, {
+    apiClient: mockApi,
+    location: { pathname: '/v/track/ORD-V100-001', search: '', hash: '#verify=hashproof123456' },
+  });
+
+  const verifyReq = requests.find((r) => r.url === 'dxosWms:verifyTrackSignature');
+  assert.ok(verifyReq, 'Must trigger dxosWms:verifyTrackSignature from #verify= hash fallback');
+  assert.deepEqual(verifyReq.data, {
+    code: 'ORD-V100-001',
+    trackingCode: 'ORD-V100-001',
+    verify: 'hashproof123456',
+  });
+  assert.ok(findNode(tree, (n) => n.props?.['data-testid'] === 'public-track-proof-card'));
+});

@@ -3047,3 +3047,191 @@ test('T1-MOBILE-05 & T1-MOBILE-06: MobileFieldPwaPage defaults canControlTwin an
     Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
   }
 });
+
+test('Bug #8 & Mobile PWA UX: onOnline clears stale offline notice with empty queue, retries transient Network Error once after settle, and renders clean UX', async () => {
+  const { createMobileFieldPwaPage, enqueueOfflineAction, readOfflineQueue } = require('../src/client-v2/mobile-field-pwa');
+  const prevGlobals = {
+    navigator: global.navigator,
+    window: global.window,
+    document: global.document,
+    fetch: globalThis.fetch,
+  };
+
+  try {
+    let navOnline = true;
+    const listeners = new Map();
+    const storage1 = makeMemoryStorage();
+    Object.defineProperty(global, 'navigator', {
+      configurable: true,
+      value: { get onLine() { return navOnline; } },
+    });
+    Object.defineProperty(global, 'window', {
+      configurable: true,
+      value: {
+        localStorage: storage1,
+        addEventListener(ev, fn) { listeners.set(ev, fn); },
+        removeEventListener(ev) { listeners.delete(ev); },
+      },
+    });
+    Object.defineProperty(global, 'document', {
+      configurable: true,
+      value: { head: { appendChild() {} }, querySelector() { return null; }, createElement() { return {}; } },
+    });
+    Object.defineProperty(globalThis, 'fetch', {
+      configurable: true,
+      writable: true,
+      value: async () => ({ ok: true, status: 200, body: null }),
+    });
+
+    // (a) Stale offline/network notice cleared on online event even when queue is empty
+    const fakeReact1 = createFakeReact();
+    let failNet = true;
+    const api1 = {
+      auth: { role: 'ldx_manager', getToken: () => 'jwt-bug8-a' },
+      async request(req) {
+        if (req.url === 'roles:check') return { data: { data: { allowAll: false, resources: ['latticeOrders', 'latticeIncidentCases', 'latticeServiceTickets'], actions: { 'latticeAssets:update': true } } } };
+        if (req.url === 'dxosApprovals:listInbox') return { data: { data: { items: [{ id: 1, title: 'Duyệt 1', riskLevel: 'high' }] } } };
+        if (req.url === 'latticeOrders:list') return { data: { data: [{ id: 2, code: 'ORD-UX-1', name: 'Đơn lạnh', status: 'in_progress' }] } };
+        if (req.url === 'latticeIncidentCases:list') return { data: { data: [{ id: 3, code: 'INC-UX-1', name: 'Cảnh báo', severity: 'high', status: 'open' }] } };
+        if (req.url === 'latticeServiceTickets:list') return { data: { data: [{ id: 4, code: 'TKT-UX-1', name: 'Phiếu UX', priority: 'medium', status: 'submitted' }] } };
+        if (req.url === 'dxosBlocks:twinSetDesired' && failNet) throw new Error('Network Error');
+        return { data: { data: { items: [] } } };
+      },
+    };
+    const MobilePage1 = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact1, {});
+    let tree1 = fakeReact1._render(MobilePage1, {
+      storage: storage1,
+      useIndexedDB: false,
+      apiClient: api1,
+      onlineSettleMs: 15,
+      transientRetryDelayMs: 15,
+      initialApprovals: [{ id: 1, title: 'Duyệt 1', riskLevel: 'high' }],
+      initialDeliveries: [{ id: 2, code: 'ORD-UX-1', name: 'Đơn lạnh', status: 'in_progress' }],
+      initialIncidents: [{ id: 3, code: 'INC-UX-1', name: 'Cảnh báo', severity: 'high', status: 'open' }],
+      initialTickets: [{ id: 4, code: 'TKT-UX-1', name: 'Phiếu UX', priority: 'medium', status: 'submitted' }],
+    });
+    fakeReact1._flushEffects();
+    await new Promise((r) => setTimeout(r, 20));
+    tree1 = fakeReact1._render(MobilePage1, {
+      storage: storage1,
+      useIndexedDB: false,
+      apiClient: api1,
+      onlineSettleMs: 15,
+      transientRetryDelayMs: 15,
+      initialApprovals: [{ id: 1, title: 'Duyệt 1', riskLevel: 'high' }],
+      initialDeliveries: [{ id: 2, code: 'ORD-UX-1', name: 'Đơn lạnh', status: 'in_progress' }],
+      initialIncidents: [{ id: 3, code: 'INC-UX-1', name: 'Cảnh báo', severity: 'high', status: 'open' }],
+      initialTickets: [{ id: 4, code: 'TKT-UX-1', name: 'Phiếu UX', priority: 'medium', status: 'submitted' }],
+    });
+
+    // UX assertions: clean subtitle, #475569 card borders, responsive GPS inputs
+    const rootText = collectText(tree1);
+    assert.ok(rootText.includes('Giao nhận hiện trường'));
+    assert.equal(rootText.includes('Giao nhận hiện trường · /v/mobile'), false);
+    for (const cardId of ['mobile-pwa-approval-card-1', 'mobile-pwa-delivery-card-2', 'mobile-pwa-incident-card-3', 'mobile-pwa-ticket-card-4']) {
+      const card = findNode(tree1, (n) => n.props?.['data-testid'] === cardId);
+      assert.equal(card?.props?.style?.border, '1px solid #475569', `${cardId} must have #475569 border`);
+    }
+    const latInput = findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-lat-input');
+    const lngInput = findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-lng-input');
+    assert.equal(latInput?.props?.placeholder, 'Vĩ độ (10.0452)');
+    assert.equal(lngInput?.props?.placeholder, 'Kinh độ (105.7469)');
+    assert.equal(latInput?.props?.style?.minWidth, 0);
+    const gpsGrid = findNode(tree1, (n) => n.type === 'div' && Array.isArray(n.children) && n.children.some((c) => c?.props?.['data-testid'] === 'mobile-pwa-lat-input'));
+    assert.equal(gpsGrid?.props?.style?.gridTemplateColumns, 'repeat(auto-fit, minmax(175px, 1fr))');
+
+    // Trigger transient failure -> stale warn notice -> drain queue manually -> offline -> online with empty queue
+    findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-asset-input').props.onChange({ target: { value: '10' } });
+    findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-temp-input').props.onChange({ target: { value: '-18' } });
+    tree1 = fakeReact1._render(MobilePage1, { storage: storage1, useIndexedDB: false, apiClient: api1, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    await findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-twin-submit').props.onClick({ preventDefault() {} });
+    tree1 = fakeReact1._render(MobilePage1, { storage: storage1, useIndexedDB: false, apiClient: api1, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    assert.ok(collectText(findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice')).includes('Mất mạng'));
+
+    // Empty storage directly while stale notice remains, transition offline -> online
+    storage1.removeItem('latticedx:mobile:offline-queue');
+    listeners.get('offline')();
+    navOnline = false;
+    tree1 = fakeReact1._render(MobilePage1, { storage: storage1, useIndexedDB: false, apiClient: api1, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    assert.ok(collectText(findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-network-banner')).includes('Ngoại tuyến'));
+
+    navOnline = true;
+    await listeners.get('online')();
+    tree1 = fakeReact1._render(MobilePage1, { storage: storage1, useIndexedDB: false, apiClient: api1, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    assert.ok(collectText(findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-network-banner')).includes('Trực tuyến'));
+    assert.equal(findNode(tree1, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice'), null, 'Stale offline/network notice MUST clear on online even when queue is empty');
+    fakeReact1._unmount();
+
+    // (b) Transient Network Error on initial online sync performs 1 automatic backoff retry and succeeds cleanly
+    listeners.clear();
+    const storage2 = makeMemoryStorage();
+    enqueueOfflineAction({
+      actionType: 'wms.epodCapture',
+      payload: { orderCode: 'ORD-RETRY-1', recipientName: 'Anh Hung', deliveredQty: 1, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,AAA' },
+    }, { storage: storage2 });
+    Object.defineProperty(global, 'window', {
+      configurable: true,
+      value: {
+        localStorage: storage2,
+        addEventListener(ev, fn) { listeners.set(ev, fn); },
+        removeEventListener(ev) { listeners.delete(ev); },
+      },
+    });
+    let epodAttempts = 0;
+    const api2 = {
+      auth: { role: 'ldx_driver', getToken: () => 'jwt-bug8-b' },
+      async request(req) {
+        if (req.url === 'dxosWms:epodCapture') {
+          epodAttempts += 1;
+          if (epodAttempts === 1) throw new Error('Network Error');
+          return { data: { trackingCode: 'LDX-TRK-RETRY-OK' } };
+        }
+        return { data: { data: { items: [] } } };
+      },
+    };
+    const fakeReact2 = createFakeReact();
+    const MobilePage2 = createMobileFieldPwaPage({ Plugin: class {} }, fakeReact2, {});
+    let tree2 = fakeReact2._render(MobilePage2, { storage: storage2, useIndexedDB: false, apiClient: api2, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    fakeReact2._flushEffects();
+    navOnline = false;
+    listeners.get('offline')();
+    navOnline = true;
+    await listeners.get('online')();
+    tree2 = fakeReact2._render(MobilePage2, { storage: storage2, useIndexedDB: false, apiClient: api2, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    assert.equal(epodAttempts, 2, 'Initial transient Network Error must perform 1 automatic backoff retry');
+    assert.equal(readOfflineQueue({ storage: storage2 }).length, 0);
+    const successNotice = collectText(findNode(tree2, (n) => n.props?.['data-testid'] === 'mobile-pwa-status-notice'));
+    assert.ok(successNotice.includes('1 thành công'), `Expected clean sync notice after retry, got: ${successNotice}`);
+    assert.equal(successNotice.includes('Network Error'), false);
+
+    // (c) If retry ALSO fails with transient Network Error, surfaces failed item cleanly
+    enqueueOfflineAction({
+      actionType: 'wms.epodCapture',
+      payload: { orderCode: 'ORD-RETRY-2', recipientName: 'Anh Hung', deliveredQty: 1, gpsLat: 10, gpsLng: 105, signatureDataUrl: 'data:image/png;base64,BBB' },
+    }, { storage: storage2 });
+    let alwaysFailAttempts = 0;
+    const api3 = {
+      auth: { role: 'ldx_driver', getToken: () => 'jwt-bug8-c' },
+      async request(req) {
+        if (req.url === 'dxosWms:epodCapture') {
+          alwaysFailAttempts += 1;
+          throw new Error('Network Error');
+        }
+        return { data: { data: { items: [] } } };
+      },
+    };
+    tree2 = fakeReact2._render(MobilePage2, { storage: storage2, useIndexedDB: false, apiClient: api3, onlineSettleMs: 15, transientRetryDelayMs: 15 });
+    await findNode(tree2, (n) => n.props?.['data-testid'] === 'mobile-pwa-sync-btn').props.onClick();
+    assert.equal(alwaysFailAttempts, 2, 'Should try once + 1 backoff retry before surfacing failed');
+    const rem = readOfflineQueue({ storage: storage2 });
+    assert.equal(rem.length, 1);
+    assert.equal(rem[0].status, 'failed');
+    assert.equal(rem[0].lastError, 'Network Error');
+    fakeReact2._unmount();
+  } finally {
+    Object.defineProperty(global, 'navigator', { configurable: true, writable: true, value: prevGlobals.navigator });
+    Object.defineProperty(global, 'window', { configurable: true, writable: true, value: prevGlobals.window });
+    Object.defineProperty(global, 'document', { configurable: true, writable: true, value: prevGlobals.document });
+    Object.defineProperty(globalThis, 'fetch', { configurable: true, writable: true, value: prevGlobals.fetch });
+  }
+});

@@ -35,7 +35,7 @@ function sanitizeTrackToken(raw) {
 }
 
 function parseQueryString(searchStr) {
-  const out = {};
+  const out = new Map();
   const raw = String(searchStr || '').replace(/^\?/, '');
   if (!raw) return out;
   for (const part of raw.split('&')) {
@@ -45,7 +45,7 @@ function parseQueryString(searchStr) {
     const v = eqIdx >= 0 ? part.slice(eqIdx + 1) : '';
     try {
       const key = decodeURIComponent(k.replace(/\+/g, ' '));
-      out[key] = decodeURIComponent(v.replace(/\+/g, ' '));
+      out.set(key, decodeURIComponent(v.replace(/\+/g, ' ')));
     } catch {
       // Ignore malformed query pair
     }
@@ -60,8 +60,11 @@ function parseTrackParams(locationLike) {
   const match = pathname.match(/^\/(?:v\/)?track\/([^/?#]+)\/?$/i);
   const trackingCode = match ? sanitizeTrackCode(match[1]) : '';
   const query = parseQueryString(loc.search || '');
-  const token = sanitizeTrackToken(query.token || query.trackingToken || '');
-  const verify = sanitizeTrackToken(query.verify || '');
+  const rawHash = String(loc.hash || '').replace(/^#/, '');
+  const hashQueryIdx = rawHash.indexOf('?');
+  const hashParams = parseQueryString(hashQueryIdx >= 0 ? rawHash.slice(hashQueryIdx + 1) : rawHash);
+  const token = sanitizeTrackToken(query.get('token') || query.get('trackingToken') || '');
+  const verify = sanitizeTrackToken(query.get('verify') || hashParams.get('verify') || '');
   return { trackingCode, token, ...(verify ? { verify } : {}) };
 }
 
