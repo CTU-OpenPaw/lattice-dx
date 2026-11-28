@@ -70,6 +70,135 @@
     return null;
   }
 
+  const SETTING_TITLE_TEMPLATE_RE = /^\s*\{\{\s*t\(\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)')\s*(?:,\s*\{([^}]*)\}\s*)?\)\s*\}\}\s*$/;
+  const SETTING_TITLE_EMBEDDED_RE = /\{\{\s*t\(\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)')\s*(?:,\s*\{([^}]*)\}\s*)?\)\s*\}\}/g;
+  const SETTING_TITLE_NS_RE = /(?:^|[,{\s])(?:"ns"|'ns'|ns)\s*:\s*(?:"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)')/;
+  const wrappedPluginSettingsManagers = new WeakSet();
+
+  function unescapeQuotedTitle(raw) {
+    return String(raw).replace(/\\(["'\\])/g, '$1');
+  }
+
+  function translateSettingKey(rawKey, optsRaw, app) {
+    const key = unescapeQuotedTitle(rawKey);
+    let ns = null;
+    if (typeof optsRaw === 'string' && optsRaw) {
+      const nsMatch = SETTING_TITLE_NS_RE.exec(optsRaw);
+      const rawNs = nsMatch ? (nsMatch[1] ?? nsMatch[2]) : null;
+      if (rawNs) ns = unescapeQuotedTitle(rawNs);
+    }
+    const i18n = app?.i18n;
+    const tFn = typeof i18n?.t === 'function' ? i18n.t.bind(i18n) : null;
+    const isUsable = (val) => typeof val === 'string' && val.trim() !== '' && !/\{\{\s*t\(/.test(val);
+    if (tFn) {
+      if (ns) {
+        try {
+          const translated = tFn(key, { ns });
+          if (isUsable(translated) && translated !== key) return translated;
+          try {
+            const fallback = tFn(key);
+            if (isUsable(fallback) && fallback !== key) return fallback;
+          } catch {}
+          if (isUsable(translated)) return translated;
+        } catch {
+          try {
+            const fallback = tFn(key);
+            if (isUsable(fallback)) return fallback;
+          } catch {}
+        }
+      } else {
+        try {
+          const translated = tFn(key);
+          if (isUsable(translated)) return translated;
+        } catch {}
+      }
+    }
+    return key;
+  }
+
+  function resolvePluginSettingTitle(rawTitle, app) {
+    if (typeof rawTitle !== 'string' || !rawTitle.includes('{{')) return rawTitle;
+    const exact = SETTING_TITLE_TEMPLATE_RE.exec(rawTitle);
+    if (exact) {
+      return translateSettingKey(exact[1] ?? exact[2] ?? '', exact[3], app);
+    }
+    if (!/\{\{\s*t\(/.test(rawTitle)) return rawTitle;
+    return rawTitle.replace(SETTING_TITLE_EMBEDDED_RE, (_full, dq, sq, optsRaw) => (
+      translateSettingKey(dq ?? sq ?? '', optsRaw, app)
+    ));
+  }
+
+  function installPluginSettingsTitleResolver(app) {
+    const psm = app?.pluginSettingsManager;
+    if (!psm || typeof psm !== 'object') return false;
+    if (wrappedPluginSettingsManagers.has(psm)) return true;
+    wrappedPluginSettingsManagers.add(psm);
+
+    const normalizeEntry = (entry, seen = new WeakSet()) => {
+      if (!entry || typeof entry !== 'object') return entry;
+      if (entry.$$typeof) return entry;
+      if (Array.isArray(entry)) return entry.map((item) => normalizeEntry(item, seen));
+      if (seen.has(entry)) return entry;
+      seen.add(entry);
+
+      const hasRawTitle = typeof entry.title === 'string' && entry.title.includes('{{');
+      const hasRawLabel = typeof entry.label === 'string' && entry.label.includes('{{');
+      let childrenChanged = false;
+      let nextChildren = entry.children;
+      if (Array.isArray(entry.children)) {
+        nextChildren = entry.children.map((child) => {
+          const normalized = normalizeEntry(child, seen);
+          if (normalized !== child) childrenChanged = true;
+          return normalized;
+        });
+      }
+      if (!hasRawTitle && !hasRawLabel && !childrenChanged) {
+        return entry;
+      }
+
+      const nextTitle = hasRawTitle ? resolvePluginSettingTitle(entry.title, app) : entry.title;
+      const nextLabel = entry.label !== undefined
+        ? (hasRawLabel ? resolvePluginSettingTitle(entry.label, app) : entry.label)
+        : nextTitle;
+
+      const overrides = {};
+      if (hasRawTitle) overrides.title = nextTitle;
+      if (entry.label !== undefined) {
+        if (hasRawLabel) overrides.label = nextLabel;
+      } else if (hasRawTitle) {
+        overrides.label = nextTitle;
+      }
+      if (childrenChanged) overrides.children = nextChildren;
+
+      const proto = Object.getPrototypeOf(entry);
+      return proto && proto !== Object.prototype
+        ? Object.assign(Object.create(proto), entry, overrides)
+        : { ...entry, ...overrides };
+    };
+
+    if (typeof psm.getList === 'function') {
+      const origGetList = psm.getList;
+      try {
+        psm.getList = function wrappedPluginSettingsGetList(...args) {
+          const result = origGetList.apply(this || psm, args);
+          return Array.isArray(result) ? result.map((entry) => normalizeEntry(entry)) : result;
+        };
+      } catch {}
+    }
+    for (const methodName of ['get', 'getSetting']) {
+      if (typeof psm[methodName] === 'function') {
+        const origMethod = psm[methodName];
+        try {
+          psm[methodName] = function wrappedPluginSettingsGet(...args) {
+            const result = origMethod.apply(this || psm, args);
+            return result && typeof result === 'object' ? normalizeEntry(result) : result;
+          };
+        } catch {}
+      }
+    }
+    return true;
+  }
+
   class LatticeFoundationClient extends client.Plugin {
     async load() {
       const mobileV2Dest = resolveLegacyMobileRedirect(typeof window !== 'undefined' ? window : null, this.app);
@@ -105,6 +234,7 @@
       if (SettingsTopbar?.prototype && !SettingsTopbar.prototype.aclSnippet) SettingsTopbar.prototype.aclSnippet = 'pm';
       const secSetting = this.app.pluginSettingsManager?.get?.('security');
       if (secSetting && !secSetting.aclSnippet) secSetting.aclSnippet = 'pm.security';
+      installPluginSettingsTitleResolver(this.app);
       if (typeof clientV2?.UserCenterActionItemModel === 'function' && typeof this.app.flowEngine?.registerModels === 'function' && !this.app.flowEngine.getModelClass?.('SignOutItemModel')) {
         class LatticeSignOutUserCenterItemModel extends clientV2.UserCenterActionItemModel {
           constructor(...args) { super(...args); this.label = 'Sign out'; this.section = 'danger'; this.sort = 100; this.danger = true; }
@@ -233,5 +363,5 @@
       }
     }
   }
-  return {__esModule: true, default: LatticeFoundationClient, useLatticeFormAction, createWorkspaceApi, ...actions};
+  return {__esModule: true, default: LatticeFoundationClient, useLatticeFormAction, createWorkspaceApi, resolvePluginSettingTitle, installPluginSettingsTitleResolver, ...actions};
 });

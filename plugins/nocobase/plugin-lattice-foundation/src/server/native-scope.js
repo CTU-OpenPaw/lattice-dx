@@ -12,6 +12,7 @@ const {
   installRlsTransactionBridge,
   getActiveRlsContext,
   canUsePgRlsSession,
+  isValidOrganizationId,
   setContextRlsTransaction,
   setTransactionRlsOrg,
   setTransactionRlsBypass,
@@ -75,6 +76,116 @@ async function resolveNativeActor(db, user, options = {}) {
   const organizationId = value(employee,'organizationId');
   if (typeof organizationId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(organizationId)) throw failure('NATIVE_MEMBERSHIP_INVALID');
   return {userId:String(id),employeeId:value(employee,'id'),organizationId,departmentId:value(employee,'departmentId')};
+}
+function validOrgId(raw) {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'all') return null;
+  return isValidOrganizationId(trimmed) ? trimmed : null;
+}
+async function resolveRootDefaultOrgAndActor(db, ctx, transaction = null) {
+  const headerOrg = validOrgId(typeof ctx?.get === 'function' ? ctx.get('X-Organization-Id') : null)
+    || validOrgId(ctx?.state?.defaultOrgId);
+  if (headerOrg) {
+    return { organizationId: headerOrg, employeeId: null, departmentId: null };
+  }
+
+  const execQuery = async (fn) => {
+    if (transaction && getActiveRlsContext()?.transaction) {
+      return runInRlsSavepoint(db, (spTx) => fn(spTx || transaction));
+    }
+    return fn(transaction || null);
+  };
+
+  const userId = value(ctx?.state?.currentUser, 'id');
+  if (userId != null && /^[1-9]\d*$/.test(String(userId))) {
+    try {
+      const empRepo = db?.getRepository?.('latticeEmployees');
+      if (empRepo && (typeof empRepo.find === 'function' || typeof empRepo.findOne === 'function')) {
+        const rows = await execQuery(async (tx) => {
+          const txOpt = tx ? { transaction: tx } : {};
+          if (typeof empRepo.find === 'function') {
+            return empRepo.find({ ...txOpt, filter: { userId }, limit: 2 });
+          }
+          const one = await empRepo.findOne({ ...txOpt, filter: { userId } });
+          return one ? [one] : [];
+        });
+        if (Array.isArray(rows)) {
+          const activeEmp = rows.find((row) => row && value(row, 'active') === true && validOrgId(value(row, 'organizationId')));
+          if (activeEmp) {
+            return {
+              organizationId: validOrgId(value(activeEmp, 'organizationId')),
+              employeeId: value(activeEmp, 'id') ?? null,
+              departmentId: value(activeEmp, 'departmentId') ?? null,
+            };
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const envOrg = validOrgId(process.env.DX_DEFAULT_ORGANIZATION_ID)
+    || validOrgId(process.env.LATTICE_DEFAULT_ORGANIZATION_ID);
+  if (envOrg) {
+    return { organizationId: envOrg, employeeId: null, departmentId: null };
+  }
+
+  const findFirstOrgFromRepo = async (repoName, filters, extractOrg) => {
+    let repo;
+    try {
+      repo = db?.getRepository?.(repoName);
+    } catch {
+      return null;
+    }
+    if (!repo || (typeof repo.find !== 'function' && typeof repo.findOne !== 'function')) return null;
+    for (const filter of filters) {
+      try {
+        const rows = await execQuery(async (tx) => {
+          const txOpt = tx ? { transaction: tx } : {};
+          if (typeof repo.find === 'function') {
+            return repo.find({ ...txOpt, filter, sort: ['id'], limit: 1 });
+          }
+          const one = await repo.findOne({ ...txOpt, filter, sort: ['id'] });
+          return one ? [one] : [];
+        });
+        const row = Array.isArray(rows) ? rows[0] : null;
+        if (row) {
+          const orgId = validOrgId(extractOrg(row));
+          if (orgId) return orgId;
+        }
+      } catch {}
+    }
+    return null;
+  };
+
+  const orgFromOrgs = await findFirstOrgFromRepo(
+    'latticeOrganizations',
+    [{ active: true }, {}],
+    (row) => value(row, 'organizationId') || value(row, 'code'),
+  );
+  if (orgFromOrgs) {
+    return { organizationId: orgFromOrgs, employeeId: null, departmentId: null };
+  }
+
+  const orgFromEmp = await findFirstOrgFromRepo(
+    'latticeEmployees',
+    [{ active: true }],
+    (row) => value(row, 'organizationId'),
+  );
+  if (orgFromEmp) {
+    return { organizationId: orgFromEmp, employeeId: null, departmentId: null };
+  }
+
+  const orgFromDept = await findFirstOrgFromRepo(
+    'latticeDepartments',
+    [{ active: true }],
+    (row) => value(row, 'organizationId'),
+  );
+  if (orgFromDept) {
+    return { organizationId: orgFromDept, employeeId: null, departmentId: null };
+  }
+
+  return { organizationId: null, employeeId: null, departmentId: null };
 }
 const CUSTOM_COLLECTION_RE = /^latticeCustom[A-Z][A-Za-z0-9]{1,40}$/;
 const IMMUTABLE_VOUCHER_STATUSES = new Set(['submitted', 'approved', 'completed', 'cancelled']);
@@ -383,13 +494,47 @@ function createNativeScopeMiddleware(db, definitions) {
       : next;
     // Root is the verified host configuration role, not a body/header flag.
     if (ctx.state.currentRole === 'root') {
+      const runRoot = async (transaction) => {
+        if (transaction) setContextRlsTransaction(ctx, transaction);
+        if (
+          actionName === 'create'
+          && resourceName === collectionName
+          && params?.values
+          && typeof params.values === 'object'
+          && !Array.isArray(params.values)
+        ) {
+          const currentOrg = params.values.organizationId;
+          const orgMissing = currentOrg === undefined || currentOrg === null || String(currentOrg).trim() === '';
+          if (orgMissing) {
+            const resolved = await resolveRootDefaultOrgAndActor(db, ctx, transaction);
+            if (resolved?.organizationId) {
+              const nextValues = { ...params.values, organizationId: resolved.organizationId };
+              const isDocument = collectionName === 'latticeRequests' || collectionName === 'latticeOrders';
+              if (isDocument) {
+                const currentStatus = nextValues.status;
+                if (currentStatus === undefined || currentStatus === null || String(currentStatus).trim() === '') {
+                  nextValues.status = 'draft';
+                }
+                if (nextValues.version === undefined || nextValues.version === null) {
+                  nextValues.version = 1;
+                }
+                if (nextValues.requesterId == null && resolved.employeeId != null) {
+                  nextValues.requesterId = resolved.employeeId;
+                }
+                if (nextValues.departmentId == null && resolved.departmentId != null) {
+                  nextValues.departmentId = resolved.departmentId;
+                }
+              }
+              params.values = nextValues;
+            }
+          }
+        }
+        return proceed();
+      };
       if (canUsePgRlsSession(db)) {
-        return withSystemRlsBypass(db, (transaction) => {
-          setContextRlsTransaction(ctx, transaction);
-          return proceed();
-        });
+        return withSystemRlsBypass(db, (transaction) => runRoot(transaction));
       }
-      return proceed();
+      return runRoot(null);
     }
     const actor = await resolveNativeActor(db,ctx.state.currentUser);
     if (resourceName !== collectionName) throw failure('NATIVE_ASSOCIATION_ACTION_UNSUPPORTED');
@@ -479,4 +624,4 @@ function createNativeScopeMiddleware(db, definitions) {
     return executeScoped(null);
   };
 }
-module.exports = {resolveNativeActor, scopeNativeRead, scopeNativeValues,createNativeScopeMiddleware,updateScopedDocument,extractExpectedVersion};
+module.exports = {resolveNativeActor, resolveRootDefaultOrgAndActor, scopeNativeRead, scopeNativeValues,createNativeScopeMiddleware,updateScopedDocument,extractExpectedVersion};

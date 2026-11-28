@@ -3709,3 +3709,304 @@ test('v0.4.2 Bug #6 & Logistics Kanban UX: lineageTrace forwards organizationId,
   assert.equal(actionsGroup.props.style.marginLeft, 'auto');
   kbHooks.unmount();
 });
+
+test('PR #77 Bug #1: numeric block settings use Formily NumberPicker and register FlowSettings InputNumber fallback alias', () => {
+  const { registerDxosBlockModels } = require(path.join(PLUGIN_ROOT, 'src/client/block-models.js'));
+  const { React } = createMiniHooks();
+
+  const makeMockBlockModel = () => class MockBlockModel {
+    constructor(opts = {}) { this.props = opts.props || {}; this.stepParams = opts.stepParams || {}; }
+    setProps(next) { this.props = { ...this.props, ...next }; }
+    getStepParams(f, s) { return this.stepParams?.[f]?.[s]; }
+    static define(meta) { this.meta = meta; }
+    static registerFlow(flow) { this.flows = [...(this.flows || []), flow]; }
+  };
+
+  // 1. Register with FlowSettings exposing NumberPicker (matches NocoBase v2.2.50 FlowSettings)
+  const MockNumberPicker = { $$typeof: Symbol.for('react.forward_ref'), displayName: 'NumberPicker' };
+  const registeredFromFlowSettings = [];
+  const flowEngineWithPicker = {
+    registerModels() {},
+    flowSettings: {
+      components: { NumberPicker: MockNumberPicker },
+      registerComponents(map) { registeredFromFlowSettings.push(map); },
+    },
+  };
+  const models = registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: makeMockBlockModel() },
+    flowEngineWithPicker,
+    {},
+  );
+
+  const expectedNumericFields = [
+    ['DxosKpiMetricBlockModel', 'columns'],
+    ['DxosAiProposalBlockModel', 'pageSize'],
+    ['DxosWorkflowTasksBlockModel', 'pageSize'],
+    ['DxosParaVaultBlockModel', 'pageSize'],
+    ['DxosWebGisBlockModel', 'centerLat'],
+    ['DxosWebGisBlockModel', 'centerLng'],
+    ['DxosKanbanScheduleBlockModel', 'pageSize'],
+    ['DxosBiChartBlockModel', 'limit'],
+  ];
+  for (const [modelKey, fieldKey] of expectedNumericFields) {
+    const uiSchema = models[modelKey].flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema;
+    assert.equal(uiSchema[fieldKey].type, 'number', `${modelKey}.${fieldKey} must stay type=number`);
+    assert.equal(uiSchema[fieldKey]['x-decorator'], 'FormItem', `${modelKey}.${fieldKey} must keep FormItem decorator`);
+    assert.equal(uiSchema[fieldKey]['x-component'], 'NumberPicker', `${modelKey}.${fieldKey} must use NumberPicker`);
+  }
+
+  const biLimitSchema = models.DxosBiChartBlockModel.flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema.limit;
+  assert.equal(biLimitSchema.title, 'Số nhóm tối đa (1-500)');
+  assert.deepEqual(biLimitSchema['x-component-props'], { min: 1, max: 500, step: 1, precision: 0, style: { width: '100%' } });
+
+  for (const [modelKey, ModelCls] of Object.entries(models)) {
+    const uiSchema = ModelCls.flows.find((f) => f.key === 'dxosBlockSettings').steps.config.uiSchema;
+    for (const [fieldKey, schema] of Object.entries(uiSchema)) {
+      assert.notEqual(schema['x-component'], 'InputNumber', `${modelKey}.${fieldKey} must not reference unregistered InputNumber`);
+    }
+  }
+
+  assert.equal(registeredFromFlowSettings.length, 1);
+  assert.equal(registeredFromFlowSettings[0].InputNumber, MockNumberPicker);
+
+  // 2. Fallback to antd.InputNumber when FlowSettings lacks NumberPicker
+  const MockAntdInputNumber = { $$typeof: Symbol.for('react.forward_ref'), displayName: 'AntdInputNumber' };
+  const registeredFromAntd = [];
+  registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    { InputNumber: MockAntdInputNumber },
+    { BlockModel: makeMockBlockModel() },
+    {
+      registerModels() {},
+      flowSettings: {
+        components: {},
+        registerComponents(map) { registeredFromAntd.push(map); },
+      },
+    },
+    {},
+  );
+  assert.equal(registeredFromAntd.length, 1);
+  assert.equal(registeredFromAntd[0].InputNumber, MockAntdInputNumber);
+
+  // 3. Do not overwrite existing InputNumber and do not register undefined component
+  const existingCalls = [];
+  registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    { InputNumber: MockAntdInputNumber },
+    { BlockModel: makeMockBlockModel() },
+    {
+      registerModels() {},
+      flowSettings: {
+        components: { InputNumber: () => null, NumberPicker: MockNumberPicker },
+        registerComponents(map) { existingCalls.push(map); },
+      },
+    },
+    {},
+  );
+  assert.equal(existingCalls.length, 0);
+
+  const emptyCalls = [];
+  registerDxosBlockModels(
+    { useAPIClient: () => null, useUIConfigurationPermissions: () => ({ allowAll: true }) },
+    React,
+    {},
+    { BlockModel: makeMockBlockModel() },
+    {
+      registerModels() {},
+      flowSettings: {
+        components: {},
+        registerComponents(map) { emptyCalls.push(map); },
+      },
+    },
+    {},
+  );
+  assert.equal(emptyCalls.length, 0);
+});
+
+test('PR #77 Bug #3: DxosBiChartView clears stale cfg.metric & stale fields when switching metricOp to count or changing collection', async () => {
+  const { createBiChartBlockView } = require(path.join(PLUGIN_ROOT, 'src/client/bi-chart-block.js'));
+
+  const mockCollections = [
+    {
+      name: 'latticeCustomClaims',
+      title: 'Khiếu nại bồi thường',
+      fields: [
+        { name: 'status', type: 'string', title: 'Trạng thái' },
+        { name: 'claimCategory', type: 'string', title: 'Loại khiếu nại' },
+        { name: 'settlementAmountVnd', type: 'decimal', title: 'Số tiền bồi thường (VND)' },
+      ],
+    },
+    {
+      name: 'latticeOrderLines',
+      title: 'Dòng đơn hàng',
+      fields: [
+        { name: 'sku', type: 'string', title: 'Mã SKU' },
+        { name: 'productName', type: 'string', title: 'Tên sản phẩm' },
+        { name: 'quantity', type: 'integer', title: 'Số lượng' },
+        { name: 'unitPrice', type: 'decimal', title: 'Đơn giá' },
+      ],
+    },
+  ];
+
+  // Scenario 1: Exact PR #77 flow — seeded cfg has BOTH metricField and metric: { op: 'sum', field: 'settlementAmountVnd' }
+  const hooks1 = createMiniHooks();
+  const aggCalls1 = [];
+  const api1 = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return { data: { data: { collections: mockCollections } } };
+      }
+      if (req.url === 'dxosBlocks:aggregateQuery') {
+        aggCalls1.push(req.data);
+        return {
+          data: {
+            data: {
+              ok: true,
+              collection: req.data.collection,
+              chartType: req.data.chartType,
+              series: [{ key: 'k1', label: 'k1', value: 42, count: 42 }],
+              summary: { count: 42, value: 42, op: req.data.metric?.op || 'count', field: req.data.metric?.field || null },
+              pivotMatrix: null,
+              totalRows: 42,
+              meta: {},
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+
+  const liveConfig1 = {
+    title: 'Biểu đồ Đối soát',
+    collection: 'latticeCustomClaims',
+    chartType: 'bar',
+    groupBy: 'status',
+    metricOp: 'sum',
+    metricField: 'settlementAmountVnd',
+    metric: { op: 'sum', field: 'settlementAmountVnd' },
+  };
+  const View1 = createBiChartBlockView({ useAPIClient: () => api1 }, hooks1.React, {}, {});
+  let tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+  await new Promise((r) => setTimeout(r, 20));
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+
+  assert.equal(aggCalls1.length, 1);
+  assert.deepEqual(aggCalls1[0].metric, { op: 'sum', field: 'settlementAmountVnd' });
+
+  // Switch metricOp to count -> stale cfg.metric must NOT override activeMetricOp
+  findByTestId(resolveTree(tree1), 'dxos-bi-viewer-metric-op').props.onChange({ target: { value: 'count' } });
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+  await new Promise((r) => setTimeout(r, 20));
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+
+  const countOnClaims = aggCalls1[aggCalls1.length - 1];
+  assert.equal(countOnClaims.collection, 'latticeCustomClaims');
+  assert.deepEqual(countOnClaims.metric, { op: 'count' });
+  assert.equal('field' in countOnClaims.metric, false);
+  const countClaimsResolved = resolveTree(tree1);
+  assert.equal(findByTestId(countClaimsResolved, 'dxos-bi-viewer-metric-field'), null);
+  assert.equal(textOf(findByTestId(countClaimsResolved, 'dxos-bi-chart-subtitle')).includes('settlementAmountVnd'), false, 'Subtitle must not show stale settlementAmountVnd in count mode');
+  assert.ok(textOf(findByTestId(countClaimsResolved, 'dxos-bi-chart-subtitle')).includes('Đếm (COUNT)'));
+
+  // Switch collection to latticeOrderLines -> must send { collection: 'latticeOrderLines', groupBy: 'sku', metric: { op: 'count' } }
+  findByTestId(countClaimsResolved, 'dxos-bi-viewer-collection').props.onChange({ target: { value: 'latticeOrderLines' } });
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+  await new Promise((r) => setTimeout(r, 20));
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+
+  const countOnOrderLines = aggCalls1[aggCalls1.length - 1];
+  assert.equal(countOnOrderLines.collection, 'latticeOrderLines');
+  assert.equal(countOnOrderLines.groupBy, 'sku');
+  assert.deepEqual(countOnOrderLines.metric, { op: 'count' });
+  assert.equal('field' in countOnOrderLines.metric, false);
+  const orderLinesCountResolved = resolveTree(tree1);
+  assert.equal(textOf(findByTestId(orderLinesCountResolved, 'dxos-bi-chart-subtitle')).includes('settlementAmountVnd'), false);
+  assert.equal(textOf(orderLinesCountResolved).includes('settlementAmountVnd'), false, 'Rendered tree must not display stale settlementAmountVnd after switching collection');
+
+  // Switch back to sum on latticeOrderLines -> must pick valid numeric field of latticeOrderLines (quantity), never settlementAmountVnd
+  findByTestId(orderLinesCountResolved, 'dxos-bi-viewer-metric-op').props.onChange({ target: { value: 'sum' } });
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+  await new Promise((r) => setTimeout(r, 20));
+  tree1 = hooks1.render(View1, { liveConfig: liveConfig1 });
+
+  const sumOnOrderLines = aggCalls1[aggCalls1.length - 1];
+  assert.equal(sumOnOrderLines.collection, 'latticeOrderLines');
+  assert.deepEqual(sumOnOrderLines.metric, { op: 'sum', field: 'quantity' });
+  const orderLinesSumResolved = resolveTree(tree1);
+  assert.ok(textOf(findByTestId(orderLinesSumResolved, 'dxos-bi-chart-subtitle')).includes('quantity'));
+  assert.equal(textOf(orderLinesSumResolved).includes('settlementAmountVnd'), false);
+  hooks1.unmount();
+
+  // Scenario 2: Switching collection BEFORE async collectionsMeta resolves must never send stale fields from old collection
+  const hooks2 = createMiniHooks();
+  const aggCalls2 = [];
+  let resolveMeta2;
+  const api2 = {
+    async request(req) {
+      if (req.url === 'dxosBlocks:collectionsMeta') {
+        return new Promise((resolve) => { resolveMeta2 = resolve; });
+      }
+      if (req.url === 'dxosBlocks:aggregateQuery') {
+        aggCalls2.push(req.data);
+        return {
+          data: {
+            data: {
+              ok: true,
+              collection: req.data.collection,
+              chartType: req.data.chartType,
+              series: [{ key: 'SKU-1', label: 'SKU-1', value: 12, count: 12 }],
+              summary: { count: 12, value: 12, op: req.data.metric?.op || 'count', field: req.data.metric?.field || null },
+              pivotMatrix: null,
+              totalRows: 12,
+              meta: {},
+            },
+          },
+        };
+      }
+      return { data: { data: [] } };
+    },
+  };
+  const liveConfig2 = {
+    title: 'Biểu đồ Đối soát Async',
+    collection: 'latticeCustomClaims',
+    chartType: 'bar',
+    groupBy: 'claimCategory',
+    metricOp: 'sum',
+    metricField: 'settlementAmountVnd',
+    metric: { op: 'sum', field: 'settlementAmountVnd' },
+  };
+  const View2 = createBiChartBlockView({ useAPIClient: () => api2 }, hooks2.React, {}, {});
+  let tree2 = hooks2.render(View2, { liveConfig: liveConfig2 });
+
+  // Switch collection to latticeOrderLines while collectionsMeta is still pending (nextMeta === null)
+  findByTestId(resolveTree(tree2), 'dxos-bi-viewer-collection').props.onChange({ target: { value: 'latticeOrderLines' } });
+  tree2 = hooks2.render(View2, { liveConfig: liveConfig2 });
+  await new Promise((r) => setTimeout(r, 20));
+  tree2 = hooks2.render(View2, { liveConfig: liveConfig2 });
+
+  const badOrderLineCalls = aggCalls2.filter(
+    (q) => q.collection === 'latticeOrderLines' && (q.groupBy === 'claimCategory' || q.metric?.field === 'settlementAmountVnd'),
+  );
+  assert.equal(badOrderLineCalls.length, 0, 'Must never fire aggregateQuery for latticeOrderLines with stale claimCategory or settlementAmountVnd');
+
+  // Now resolve collectionsMeta -> view auto-resolves valid fields for latticeOrderLines and fires clean query
+  resolveMeta2({ data: { data: { collections: mockCollections } } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree2 = hooks2.render(View2, { liveConfig: liveConfig2 });
+  await new Promise((r) => setTimeout(r, 20));
+  tree2 = hooks2.render(View2, { liveConfig: liveConfig2 });
+
+  const orderLinesAfterMeta = aggCalls2.filter((q) => q.collection === 'latticeOrderLines');
+  assert.ok(orderLinesAfterMeta.length >= 1, 'Expected valid aggregateQuery for latticeOrderLines once collectionsMeta resolves');
+  const latestCall = orderLinesAfterMeta[orderLinesAfterMeta.length - 1];
+  assert.equal(latestCall.groupBy, 'sku');
+  assert.notEqual(latestCall.metric?.field, 'settlementAmountVnd');
+  assert.equal(textOf(resolveTree(tree2)).includes('settlementAmountVnd'), false);
+  hooks2.unmount();
+});

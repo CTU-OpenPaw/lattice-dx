@@ -1436,7 +1436,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       { title: 'Chỉ số vận hành', columns: 4, metricsJson: DEFAULT_KPI_METRICS },
       {
         title: { type: 'string', title: 'Tiêu đề', 'x-decorator': 'FormItem', 'x-component': 'Input' },
-        columns: { type: 'number', title: 'Số cột (1-4)', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        columns: { type: 'number', title: 'Số cột (1-4)', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
         metricsJson: { type: 'string', title: 'Danh sách thẻ KPI (JSON)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
       },
     ],
@@ -1473,7 +1473,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           type: 'string', title: 'Trạng thái đề xuất', 'x-decorator': 'FormItem', 'x-component': 'Select',
           enum: [{ label: 'Tất cả', value: 'all' }, { label: 'Chờ duyệt', value: 'proposed' }, { label: 'Đã xem xét', value: 'reviewed' }],
         },
-        pageSize: { type: 'number', title: 'Số dòng tối đa', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        pageSize: { type: 'number', title: 'Số dòng tối đa', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
         showEvidence: { type: 'boolean', title: 'Hiển thị nguồn bằng chứng', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
       },
     ],
@@ -1488,7 +1488,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           type: 'string', title: 'Lọc trạng thái', 'x-decorator': 'FormItem', 'x-component': 'Select',
           enum: [{ label: 'Cần xử lý', value: 'pending' }, { label: 'Đã xử lý', value: 'resolved' }, { label: 'Tất cả', value: 'all' }],
         },
-        pageSize: { type: 'number', title: 'Số lượng tối đa', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        pageSize: { type: 'number', title: 'Số lượng tối đa', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
       },
     ],
     [
@@ -1508,7 +1508,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
             { label: 'Archives (Lưu trữ)', value: 'archives' },
           ],
         },
-        pageSize: { type: 'number', title: 'Số tài liệu hiển thị', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        pageSize: { type: 'number', title: 'Số tài liệu hiển thị', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
         enableQuickCreate: { type: 'boolean', title: 'Cho phép tạo nhanh trên block', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
         defaultOrganizationId: { type: 'string', title: 'Mã tổ chức mặc định (Admin)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
       },
@@ -1577,8 +1577,8 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
         labelField: { type: 'string', title: 'Trường tên hiển thị (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         statusField: { type: 'string', title: 'Trường trạng thái (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         defaultOrganizationId: { type: 'string', title: 'Mã tổ chức mặc định (Admin)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
-        centerLat: { type: 'number', title: 'Vĩ độ tâm bản đồ', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
-        centerLng: { type: 'number', title: 'Kinh độ tâm bản đồ', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        centerLat: { type: 'number', title: 'Vĩ độ tâm bản đồ', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
+        centerLng: { type: 'number', title: 'Kinh độ tâm bản đồ', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
         showTwinOverlay: { type: 'boolean', title: 'Hiển thị lớp trạng thái Digital Twin', 'x-decorator': 'FormItem', 'x-component': 'Switch' },
       },
     ],
@@ -1614,7 +1614,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
             { label: 'Lịch biểu theo tuần (Schedule)', value: 'schedule' },
           ],
         },
-        pageSize: { type: 'number', title: 'Số bản ghi tối đa', 'x-decorator': 'FormItem', 'x-component': 'InputNumber' },
+        pageSize: { type: 'number', title: 'Số bản ghi tối đa', 'x-decorator': 'FormItem', 'x-component': 'NumberPicker' },
         statusField: { type: 'string', title: 'Trường trạng thái Kanban (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         dateField: { type: 'string', title: 'Trường ngày hiển thị lịch (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
         titleField: { type: 'string', title: 'Trường tiêu đề thẻ (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input' },
@@ -1737,7 +1737,7 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
           type: 'number',
           title: 'Số nhóm tối đa (1-500)',
           'x-decorator': 'FormItem',
-          'x-component': 'InputNumber',
+          'x-component': 'NumberPicker',
           'x-component-props': { min: 1, max: 500, step: 1, precision: 0, style: { width: '100%' } },
         },
         filterJson: { type: 'string', title: 'Bộ lọc JSON (tùy chọn)', 'x-decorator': 'FormItem', 'x-component': 'Input.TextArea' },
@@ -1775,6 +1775,14 @@ function registerDxosBlockModels(client, React, antd, clientV2, flowEngine, app)
       },
     });
     models[modelKey] = ModelClass;
+  }
+
+  const flowSettings = flowEngine?.flowSettings;
+  if (typeof flowSettings?.registerComponents === 'function' && !flowSettings.components?.InputNumber) {
+    const fallbackInputNumber = flowSettings.components?.NumberPicker || antd?.InputNumber;
+    if (typeof fallbackInputNumber === 'function' || (fallbackInputNumber !== null && typeof fallbackInputNumber === 'object')) {
+      flowSettings.registerComponents({ InputNumber: fallbackInputNumber });
+    }
   }
 
   flowEngine.registerModels(models);

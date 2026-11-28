@@ -1259,3 +1259,200 @@ test('T4-RW-03 regression: DataGovConsole and LedgerConsole skip org-required qu
   }
 });
 
+test('Bug #9 regression: Legacy DMN grid and forms prevent vertical stretching of Chạy Mô phỏng DMN button', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const harness = createReactHarness();
+  const { client } = createApiMock({
+    'dxosDmn:listTables': async () => ({ organizationId: 'org-a', items: [] }),
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  const tree = await harness.mountAndFlush(Consoles, { initialSection: 'dmn', selectedOrg: 'org-a' });
+
+  const details = collectNodes(tree, (n) => n.type === 'details' && n.props?.['data-testid'] === 'dxos-dmn-raw-json-details')[0];
+  assert.ok(details);
+  const legacyGrid = collectNodes(
+    details,
+    (n) => n.type === 'div'
+      && collectNodes(n, (c) => c.props?.['data-testid'] === 'dxos-dmn-save-form').length === 1
+      && collectNodes(n, (c) => c.props?.['data-testid'] === 'dxos-dmn-eval-form').length === 1,
+  )[0];
+  assert.ok(legacyGrid, 'Expected Legacy DMN grid container wrapping save and eval forms');
+  assert.equal(legacyGrid.props.style?.alignItems, 'start', 'Legacy DMN grid must use alignItems: start so sibling forms do not vertically stretch');
+
+  const saveForm = collectNodes(details, (n) => n.props?.['data-testid'] === 'dxos-dmn-save-form')[0];
+  const evalForm = collectNodes(details, (n) => n.props?.['data-testid'] === 'dxos-dmn-eval-form')[0];
+  assert.equal(saveForm.props.style?.alignContent, 'start', 'dxos-dmn-save-form must set alignContent: start');
+  assert.equal(evalForm.props.style?.alignContent, 'start', 'dxos-dmn-eval-form must set alignContent: start');
+
+  const saveBtn = collectNodes(saveForm, (n) => n.type === 'button' && textOf(n) === 'Lưu Bảng Quyết định')[0];
+  const evalBtn = collectNodes(evalForm, (n) => n.type === 'button' && textOf(n) === 'Chạy Mô phỏng DMN')[0];
+  assert.ok(saveBtn && evalBtn);
+  for (const [label, btn] of [['Lưu Bảng Quyết định', saveBtn], ['Chạy Mô phỏng DMN', evalBtn]]) {
+    assert.equal(btn.props.style?.alignSelf, 'start', `${label} button must set alignSelf: start`);
+    assert.equal(btn.props.style?.height, 'auto', `${label} button must set height: auto`);
+    assert.equal(btn.props.style?.lineHeight, 1.35, `${label} button must set lineHeight: 1.35`);
+  }
+});
+
+test('Bug #8 regression: DataGov Quarantine Queue wraps long cells cleanly without flex-on-td or clipping Phê duyệt / Phát hành', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const harness = createReactHarness();
+  const { client } = createApiMock({
+    'dxosDataGov:tierSummary': async () => ({
+      organizationId: 'org-a',
+      hotOrders: 1,
+      warmOrders: 0,
+      hotTickets: 0,
+      coldSnapshots: 0,
+      coldTotalRecords: 0,
+      lineageEdges: 0,
+      quarantineOpen: 1,
+      quarantineResolved: 0,
+    }),
+    'dxosDataGov:listSnapshots': async () => ({ organizationId: 'org-a', total: 0, items: [] }),
+    'dxosDataGov:quarantineList': async () => ({
+      organizationId: 'org-a',
+      total: 1,
+      items: [
+        {
+          id: 88,
+          quarantineUid: 'QR-20261128-00088',
+          sourceSystem: 'iiot-edge-gateway',
+          assetEntityId: 'urn:ngsi-ld:Asset:org-a:cold-room-01',
+          metricName: 'temperature_mkt',
+          numericValue: 12.4,
+          unit: 'CEL',
+          reasonCode: 'MKT_THRESHOLD_BREACH',
+          status: 'quarantined',
+        },
+      ],
+    }),
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  const tree = await harness.mountAndFlush(Consoles, { initialSection: 'data-gov', selectedOrg: 'org-a' });
+
+  const tableWrap = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-quarantine-table-wrap')[0];
+  assert.ok(tableWrap, 'Expected data-testid="dxos-quarantine-table-wrap"');
+  assert.equal(tableWrap.props.style?.overflowX, 'auto');
+  assert.equal(tableWrap.props.style?.minWidth, 0);
+  assert.equal(tableWrap.props.style?.maxWidth, '100%');
+
+  const table = collectNodes(tableWrap, (n) => n.props?.['data-testid'] === 'dxos-quarantine-table')[0];
+  assert.ok(table, 'Expected data-testid="dxos-quarantine-table"');
+
+  const tds = collectNodes(table, (n) => n.type === 'td');
+  assert.equal(tds.length, 7);
+  for (const td of tds) {
+    assert.notEqual(td.props.style?.display, 'flex', '<td> must NOT use display: flex directly');
+  }
+  for (const idx of [0, 1, 2, 4]) {
+    assert.equal(tds[idx].props.style?.overflowWrap, 'anywhere', `Quarantine text cell ${idx} must allow overflowWrap: anywhere`);
+  }
+
+  const approveBtn = collectNodes(table, (n) => n.props?.['data-testid'] === 'dxos-quarantine-approve-QR-20261128-00088')[0];
+  const rejectBtn = collectNodes(table, (n) => n.props?.['data-testid'] === 'dxos-quarantine-reject-QR-20261128-00088')[0];
+  assert.ok(approveBtn && rejectBtn);
+  assert.equal(textOf(approveBtn), 'Phê duyệt / Phát hành');
+  assert.equal(approveBtn.props.style?.whiteSpace, 'normal');
+  assert.equal(approveBtn.props.style?.maxWidth, '100%');
+  assert.equal(approveBtn.props.style?.padding, '5px 9px');
+  assert.equal(rejectBtn.props.style?.whiteSpace, 'normal');
+});
+
+test('Bug #7 regression: DMN visual editor and Studio Settings enforce narrow mobile responsive layout without clipping', async () => {
+  const { createDxosGovernanceConsoles } = require(path.join(PLUGIN_ROOT, 'src/client/governance-consoles.js'));
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  const harness = createReactHarness();
+  const { client } = createApiMock({
+    'dxosDmn:listTables': async () => ({
+      organizationId: 'org-a',
+      items: [
+        {
+          id: 1,
+          tableKey: 'cold-chain-rule',
+          name: 'Cold Chain Policy Very Long Title For Mobile Test',
+          hitPolicy: 'FIRST',
+          inputsJson: [{ name: 'temperature', type: 'number' }, { name: 'tier', type: 'string' }],
+          outputsJson: [{ name: 'action', type: 'string' }],
+          rulesJson: [{ when: { temperature: { op: 'gt', value: 8 }, tier: { op: 'any', value: null } }, then: { action: 'hold_mkt' } }],
+          version: 1,
+        },
+      ],
+    }),
+  });
+
+  const Consoles = createDxosGovernanceConsoles(client, harness.React, {}, {});
+  const tree = await harness.mountAndFlush(Consoles, { initialSection: 'dmn', selectedOrg: '' });
+
+  // Org override input must cap width to 100% on narrow panes
+  const orgInput = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-gov-org-override-input')[0];
+  assert.ok(orgInput);
+  assert.equal(orgInput.props.style?.maxWidth, '100%');
+
+  // Wrapper around DmnVisualEditor must constrain flex width so table scrolls internally
+  const visualWrap = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-dmn-visual-wrap')[0];
+  assert.ok(visualWrap, 'Expected data-testid="dxos-dmn-visual-wrap"');
+  assert.equal(visualWrap.props.style?.order, -1);
+  assert.equal(visualWrap.props.style?.minWidth, 0);
+  assert.equal(visualWrap.props.style?.maxWidth, '100%');
+
+  const editorRoot = collectNodes(visualWrap, (n) => n.props?.['data-testid'] === 'dmn-visual-editor')[0];
+  assert.ok(editorRoot);
+  assert.equal(editorRoot.props.style?.minWidth, 0);
+  assert.equal(editorRoot.props.style?.maxWidth, '100%');
+  assert.equal(editorRoot.props.style?.boxSizing, 'border-box');
+
+  const header = collectNodes(editorRoot, (n) => n.props?.className === 'dxos-dmn-header')[0];
+  assert.ok(header, 'Expected DMN header with className="dxos-dmn-header"');
+  assert.ok(String(header.props.style?.gridTemplateColumns || '').includes('min(100%'), 'DMN header grid must clamp minmax with min(100%, ...)');
+  assert.equal(String(header.props.style?.gridTemplateColumns || '').includes('minmax(230px'), false);
+
+  const nameInput = collectNodes(header, (n) => n.props?.['data-testid'] === 'dmn-table-name-input')[0];
+  assert.ok(nameInput);
+  assert.notEqual(nameInput.props.style?.minWidth, 230, 'dmn-table-name-input must NOT hardcode minWidth: 230');
+  const nameWrapper = collectNodes(header, (n) => n.type === 'div' && Array.isArray(n.children) && n.children.includes(nameInput))[0];
+  assert.ok(nameWrapper);
+  assert.notEqual(nameWrapper.props.style?.gridColumn, 'span 2', 'Name wrapper must NOT force gridColumn: span 2');
+  assert.notEqual(nameWrapper.props.style?.minWidth, 230, 'Name wrapper must NOT force minWidth: 230');
+
+  const tableWrap = collectNodes(editorRoot, (n) => n.props?.['data-testid'] === 'dmn-decision-table-wrap')[0];
+  assert.ok(tableWrap, 'Expected data-testid="dmn-decision-table-wrap"');
+  assert.equal(tableWrap.props.style?.overflowX, 'auto');
+  assert.equal(tableWrap.props.style?.minWidth, 0);
+  assert.equal(tableWrap.props.style?.maxWidth, '100%');
+  assert.equal(tableWrap.props.style?.boxSizing, 'border-box');
+
+  const simPanel = collectNodes(editorRoot, (n) => n.props?.['data-testid'] === 'dmn-simulator-panel')[0];
+  assert.ok(simPanel);
+  assert.equal(simPanel.props.style?.gridTemplateColumns, 'minmax(0, 1fr)');
+  assert.equal(simPanel.props.style?.minWidth, 0);
+  assert.equal(simPanel.props.style?.maxWidth, '100%');
+  assert.equal(simPanel.props.style?.boxSizing, 'border-box');
+
+  const simInputsGrid = collectNodes(
+    simPanel,
+    (n) => n.type === 'div' && String(n.props?.style?.gridTemplateColumns || '').includes('auto-fit'),
+  )[0];
+  assert.ok(simInputsGrid);
+  assert.ok(String(simInputsGrid.props.style?.gridTemplateColumns || '').includes('min(100%'), 'Simulator inputs grid must clamp minmax with min(100%, ...)');
+  assert.equal(simInputsGrid.props.style?.minWidth, 0);
+
+  // Studio Settings mobile responsive CSS rules
+  const studioHarness = createReactHarness();
+  const studioMock = createApiMock({
+    'dxosStudio:listTemplates': async () => ({ items: [] }),
+    'dxosStudio:listEmployees': async () => ({ items: [], organizations: ['org-a'], organizationCounts: { 'org-a': 1 } }),
+    'dxosStudio:readiness': async () => ({ plugins: [] }),
+  });
+  const Page = createDxosStudioSettingsPage(studioMock.client, studioHarness.React, {}, {});
+  const studioTree = await studioHarness.mountAndFlush(Page);
+  const styleNode = collectNodes(studioTree, (n) => n.type === 'style')[0];
+  assert.ok(styleNode);
+  const cssText = textOf(styleNode);
+  assert.ok(cssText.includes('@media (max-width: 767px)'), 'Studio settings must define @media (max-width: 767px) mobile rules');
+  assert.ok(cssText.includes('.dxos-studio-content'), 'Mobile CSS must constrain .dxos-studio-content');
+  assert.ok(cssText.includes('.dxos-dmn-header'), 'Mobile CSS must stack .dxos-dmn-header on narrow viewports');
+});
+

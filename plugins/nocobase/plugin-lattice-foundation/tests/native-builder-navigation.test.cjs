@@ -11,6 +11,7 @@ const assert = require('node:assert/strict');
 const { pageTree, hostPath, firstSettingsPath, createNativeBuilderNavigation, resolvePortalRedirect } = require('../src/client/native-builder-navigation');
 const { createNativePortalManager } = require('../src/client/native-portal-manager');
 const { readFileSync } = require('node:fs');
+const { createRequire } = require('node:module');
 const { runInNewContext } = require('node:vm');
 
 test('projects host accessible groups/pages without catalog or external link destinations', () => {
@@ -581,4 +582,206 @@ test('UX-drawer: injects mobile drawer & narrow sider menu wrapping CSS without 
   assert.ok(footer, 'Powered by NocoBase Clause 5.2 footer must remain intact');
   const link = find(footer, n => n.type === 'a' && n.props.href === 'https://www.nocobase.com');
   assert.equal(link.children[0], 'NocoBase');
+});
+
+function loadClientSourceMod() {
+  let factory;
+  const define = (_name, _deps, value) => { factory = value; };
+  define.amd = {};
+  const entryPath = require.resolve('../src/client/index.js');
+  runInNewContext(readFileSync(entryPath, 'utf8'), {
+    define,
+    require: createRequire(entryPath),
+    URL,
+    window: { location: { hostname: 'localhost', pathname: '/admin' } },
+    sessionStorage: { getItem: () => null, removeItem() {} },
+  });
+  class BlockModel { static define() {} static registerFlow() {} }
+  const client = { Plugin: class {}, AdminProvider() {}, useAllAccessDesktopRoutes() {}, useUIConfigurationPermissions() {}, useDesignable() {} };
+  return factory(
+    client,
+    { createElement() {}, useEffect() {}, useMemo: (fn) => fn(), useState: (v) => [v, () => {}], useCallback: (fn) => fn },
+    {},
+    { BlockModel, getAdminLayoutModel() {} },
+    { Link() {}, Outlet() {}, useLocation() {} },
+    { FlowModelRenderer: { $$typeof: Symbol.for('react.memo') } },
+  );
+}
+
+test('Bug #4: resolvePluginSettingTitle resolves all 12 NocoBase {{t(...)}} setting titles safely with or without i18n', () => {
+  const mod = loadClientSourceMod();
+  assert.equal(typeof mod.resolvePluginSettingTitle, 'function');
+
+  const twelveExpressions = [
+    ['{{t("Data sources", { ns: "data-source-manager" })}}', 'Data sources', 'data-source-manager', 'Nguồn dữ liệu'],
+    ['{{t("Users & Permissions", { ns: "users" })}}', 'Users & Permissions', 'users', 'Người dùng & Phân quyền'],
+    ['{{t("Workflow", { ns: "workflow" })}}', 'Workflow', 'workflow', 'Quy trình'],
+    ['{{t("License settings")}}', 'License settings', undefined, 'Cài đặt giấy phép'],
+    ['{{t("System settings")}}', 'System settings', undefined, 'Cài đặt hệ thống'],
+    ['{{t("File manager", { ns: "file-manager" })}}', 'File manager', 'file-manager', 'Quản lý tệp'],
+    ['{{t("Authentication", { ns: "auth" })}}', 'Authentication', 'auth', 'Xác thực'],
+    ['{{t("Plugin manager", { ns: "pm" })}}', 'Plugin manager', 'pm', 'Quản lý plugin'],
+    ['{{t("Notification manager", { ns: "notification-manager" })}}', 'Notification manager', 'notification-manager', 'Quản lý thông báo'],
+    ['{{t("Theme editor", { ns: "theme-editor" })}}', 'Theme editor', 'theme-editor', 'Trình chỉnh sửa giao diện'],
+    ['{{t("API keys", { ns: "api-keys" })}}', 'API keys', 'api-keys', 'Khóa API'],
+    ['{{t("Localization", { ns: "localization" })}}', 'Localization', 'localization', 'Bản địa hóa'],
+  ];
+
+  const viApp = {
+    i18n: {
+      t(key, opts) {
+        const hit = twelveExpressions.find(([, k, ns]) => k === key && (ns === undefined ? !opts?.ns : opts?.ns === ns));
+        return hit ? hit[3] : key;
+      },
+    },
+  };
+
+  for (const [raw, fallbackKey, , viExpected] of twelveExpressions) {
+    // Without app.i18n -> clean human-readable fallback key, never raw {{t(...)}}
+    const withoutI18n = mod.resolvePluginSettingTitle(raw, null);
+    assert.equal(withoutI18n, fallbackKey);
+    assert.equal(withoutI18n.includes('{{t('), false);
+
+    // With Vietnamese i18n.t -> translated Vietnamese title
+    assert.equal(mod.resolvePluginSettingTitle(raw, viApp), viExpected);
+  }
+
+  // Single quotes & escaped quotes
+  assert.equal(
+    mod.resolvePluginSettingTitle("{{t('Users & Permissions', { ns: 'users' })}}", viApp),
+    'Người dùng & Phân quyền',
+  );
+  assert.equal(
+    mod.resolvePluginSettingTitle('{{t("Admin\\"s settings", { ns: "core" })}}', null),
+    'Admin"s settings',
+  );
+
+  // Broken/throwing i18n never leaks raw {{t(...)}}
+  const brokenApp = { i18n: { t: () => '{{t("Workflow", { ns: "workflow" })}}' } };
+  assert.equal(mod.resolvePluginSettingTitle('{{t("Workflow", { ns: "workflow" })}}', brokenApp), 'Workflow');
+  const throwingApp = { i18n: { t: () => { throw new Error('i18n failure'); } } };
+  assert.equal(mod.resolvePluginSettingTitle('{{t("System settings")}}', throwingApp), 'System settings');
+
+  // Plain strings and React elements remain untouched
+  assert.equal(mod.resolvePluginSettingTitle('Multi-Portal Manager', viApp), 'Multi-Portal Manager');
+  const reactEl = { $$typeof: Symbol.for('react.element'), type: 'span', props: { children: 'Custom' } };
+  assert.equal(mod.resolvePluginSettingTitle(reactEl, viApp), reactEl);
+  assert.equal(mod.resolvePluginSettingTitle(null, viApp), null);
+  assert.equal(mod.resolvePluginSettingTitle(undefined, viApp), undefined);
+});
+
+test('Bug #4: LatticeFoundationClient.load wraps pluginSettingsManager getList/get/getSetting to normalize raw {{t(...)}} titles while keeping secObj.aclSnippet intact', async () => {
+  const mod = loadClientSourceMod();
+  assert.equal(typeof mod.installPluginSettingsTitleResolver, 'function');
+
+  const secObj = { name: 'security', title: 'Security', path: '/admin/settings/security' };
+  const reactTitle = { $$typeof: Symbol.for('react.element'), type: 'span', props: { children: 'Badge' } };
+  const rawItems = [
+    {
+      name: 'data-source-manager',
+      title: '{{t("Data sources", { ns: "data-source-manager" })}}',
+      label: '{{t("Data sources", { ns: "data-source-manager" })}}',
+      path: '/admin/settings/data-source-manager',
+      isAllow: true,
+    },
+    {
+      name: 'users-group',
+      title: '{{t("Users & Permissions", { ns: "users" })}}',
+      children: [
+        {
+          name: 'workflow',
+          title: '{{t("Workflow", { ns: "workflow" })}}',
+          path: '/admin/settings/workflow',
+        },
+        {
+          name: 'license',
+          title: '{{t("License settings")}}',
+          label: '{{t("License settings")}}',
+          path: '/admin/settings/license',
+        },
+      ],
+    },
+    { name: 'custom-node', title: reactTitle, path: '/admin/settings/custom' },
+    secObj,
+  ];
+
+  const byName = new Map([
+    ['security', secObj],
+    ['data-source-manager', rawItems[0]],
+    ['users-group', rawItems[1]],
+    ['workflow', rawItems[1].children[0]],
+  ]);
+  const getListArgs = [];
+
+  const app = {
+    i18n: {
+      t(key, opts) {
+        if (key === 'Data sources' && opts?.ns === 'data-source-manager') return 'Nguồn dữ liệu';
+        if (key === 'Users & Permissions' && opts?.ns === 'users') return 'Người dùng & Phân quyền';
+        if (key === 'Workflow' && opts?.ns === 'workflow') return 'Quy trình';
+        if (key === 'License settings') return 'Cài đặt giấy phép';
+        return key;
+      },
+    },
+    flowEngine: { getModelClass: () => undefined, registerModels() {} },
+    pluginSettingsManager: {
+      add() {},
+      getList(...args) {
+        getListArgs.push(args);
+        return rawItems;
+      },
+      get(name) {
+        return byName.get(name) || null;
+      },
+      getSetting(name) {
+        return byName.get(name) || null;
+      },
+    },
+    router: { add() {} },
+    addComponents() {},
+    addScopes() {},
+    use() {},
+    schemaInitializerManager: { get: () => ({ add() {} }) },
+  };
+
+  const plugin = new mod.default();
+  plugin.app = app;
+  plugin.flowEngine = app.flowEngine;
+  await plugin.load();
+
+  // Existing security aclSnippet mutation still applies to original secObj
+  assert.equal(secObj.aclSnippet, 'pm.security');
+  assert.equal(app.pluginSettingsManager.get('security'), secObj);
+
+  // getList passes arguments through and resolves all nested titles/labels
+  const list = app.pluginSettingsManager.getList(false);
+  assert.deepEqual(getListArgs, [[false]]);
+  assert.equal(list[0].title, 'Nguồn dữ liệu');
+  assert.equal(list[0].label, 'Nguồn dữ liệu');
+  assert.equal(list[0].path, '/admin/settings/data-source-manager');
+  assert.equal(list[0].isAllow, true);
+
+  assert.equal(list[1].title, 'Người dùng & Phân quyền');
+  assert.equal(list[1].label, 'Người dùng & Phân quyền');
+  assert.equal(list[1].children[0].title, 'Quy trình');
+  assert.equal(list[1].children[0].label, 'Quy trình');
+  assert.equal(list[1].children[1].title, 'Cài đặt giấy phép');
+  assert.equal(list[1].children[1].label, 'Cài đặt giấy phép');
+
+  // React element title & plain object identity preserved
+  assert.equal(list[2].title, reactTitle);
+  assert.equal(list[3], secObj);
+
+  // Zero raw {{t(...)}} expressions anywhere in resolved list
+  assert.equal(JSON.stringify(list).includes('{{t('), false);
+
+  // get() and getSetting() also normalize raw templates
+  assert.equal(app.pluginSettingsManager.get('data-source-manager').title, 'Nguồn dữ liệu');
+  assert.equal(app.pluginSettingsManager.getSetting('workflow').title, 'Quy trình');
+  assert.equal(app.pluginSettingsManager.getSetting('workflow').label, 'Quy trình');
+
+  // Idempotent: calling installPluginSettingsTitleResolver again does not double-wrap
+  const wrappedGetListRef = app.pluginSettingsManager.getList;
+  mod.installPluginSettingsTitleResolver(app);
+  assert.equal(app.pluginSettingsManager.getList, wrappedGetListRef);
 });

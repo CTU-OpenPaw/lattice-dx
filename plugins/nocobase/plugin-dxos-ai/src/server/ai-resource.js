@@ -488,7 +488,30 @@ function createDxosAiActions(db, { env = process.env, fetchImpl, llmClient } = {
 
       const repo = targetDb?.getRepository?.('latticeAiAuditLogs');
       const runQuery = async () => {
-        if (!repo) return { rows: [], total: 0 };
+        if (!repo) return { rows: [], total: 0, facets: { agents: [], channels: [] } };
+        const computeFacets = async (fallbackRows = []) => {
+          const facetFilter = scopedOrg ? { organizationId: scopedOrg } : {};
+          let facetRows = fallbackRows;
+          try {
+            const found = await repo.find({ filter: facetFilter, sort: ['-id'], limit: 1000 });
+            if (Array.isArray(found)) facetRows = found;
+          } catch {
+            facetRows = fallbackRows;
+          }
+          const agentSet = new Set();
+          const channelSet = new Set();
+          for (const r of facetRows || []) {
+            const ag = String(val(r, 'aiEmployee') || val(r, 'actorUsername') || '').trim();
+            if (ag) agentSet.add(ag);
+            const ch = String(val(r, 'channel') || '').trim();
+            if (ch) channelSet.add(ch);
+          }
+          return {
+            agents: [...agentSet].sort((a, b) => a.localeCompare(b)),
+            channels: [...channelSet].sort((a, b) => a.localeCompare(b)),
+          };
+        };
+
         if (q) {
           const allRows = (await repo.find({ filter, sort: ['-id'], limit: 2000 })) || [];
           const matched = allRows.filter((row) => {
@@ -503,7 +526,8 @@ function createDxosAiActions(db, { env = process.env, fetchImpl, llmClient } = {
             return hay.includes(q);
           });
           const offset = (page - 1) * pageSize;
-          return { rows: matched.slice(offset, offset + pageSize), total: matched.length };
+          const facets = await computeFacets(allRows);
+          return { rows: matched.slice(offset, offset + pageSize), total: matched.length, facets };
         }
         const offset = (page - 1) * pageSize;
         const rows = (await repo.find({ filter, sort: ['-id'], limit: pageSize, offset })) || [];
@@ -514,10 +538,11 @@ function createDxosAiActions(db, { env = process.env, fetchImpl, llmClient } = {
           const full = (await repo.find({ filter, sort: ['-id'], limit: 2000 })) || [];
           total = full.length;
         }
-        return { rows, total };
+        const facets = await computeFacets(rows);
+        return { rows, total, facets };
       };
 
-      const { rows, total } = isRootActor(actorScope) && !scopedOrg
+      const { rows, total, facets } = isRootActor(actorScope) && !scopedOrg
         ? await runWithSystemRlsBypass(targetDb, runQuery)
         : await runWithTenantRls(targetDb, scopedOrg || actorScope.organizationId, runQuery);
 
@@ -526,6 +551,7 @@ function createDxosAiActions(db, { env = process.env, fetchImpl, llmClient } = {
         total: Number(total) || 0,
         page,
         pageSize,
+        facets: facets || { agents: [], channels: [] },
       };
       if (typeof next === 'function') await next();
     },

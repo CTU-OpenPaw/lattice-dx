@@ -564,3 +564,79 @@ test('P1-06 regression: GitOps Diff Tree renders solution-bundle.js item-keyed d
   assert.ok(diffText.includes('QA Reviewer'), 'Diff tree must render added field value');
   assert.ok(diffText.includes('Legacy Role'), 'Diff tree must render removed field value');
 });
+
+test('Bug #10 regression: Outbox Xem Payload renders item.payload JSON instead of null when payloadJson is omitted', async () => {
+  const { createDxosStudioSettingsPage } = require(path.join(PLUGIN_ROOT, 'src/client/studio-settings.js'));
+  let idx = 0;
+  const slots = [];
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => {
+      const cur = idx++;
+      const v = typeof init === 'function' ? init() : init;
+      if (slots[cur] === undefined) slots[cur] = cur === 0 ? 'outbox' : v;
+      return [slots[cur], (next) => { slots[cur] = typeof next === 'function' ? next(slots[cur]) : next; }];
+    },
+    useEffect: () => {},
+    useMemo: (fn) => fn(),
+    useCallback: (fn) => fn,
+  };
+  const mockClient = {
+    useAPIClient: () => ({
+      request: async (req) => {
+        if (req.url === 'dxosStudio:outboxDlqList') {
+          return {
+            data: {
+              data: {
+                total: 1,
+                page: 1,
+                pageSize: 20,
+                summary: { failed: 1, retry: 0, pending: 0, processing: 0, delivered: 0 },
+                items: [
+                  {
+                    id: 101,
+                    eventId: 'evt-real-payload-1',
+                    organizationId: 'org-a',
+                    collectionName: 'latticeLocations',
+                    recordId: 7,
+                    attempts: 3,
+                    status: 'failed',
+                    errorCode: 'BROKER_HTTP_502',
+                    payload: { type: 'Location', code: 'WH-HCM-01' },
+                  },
+                ],
+              },
+            },
+          };
+        }
+        return { data: { data: {} } };
+      },
+    }),
+  };
+
+  const PageInner = createDxosStudioSettingsPage(mockClient, React, {}, {});
+  const render = () => {
+    idx = 0;
+    return PageInner();
+  };
+
+  let tree = render();
+  const statusSelect = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-outbox-status-filter')[0];
+  assert.ok(statusSelect);
+  await statusSelect.props.onChange({ target: { value: 'failed' } });
+  tree = render();
+
+  const toggleBtn = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-outbox-payload-toggle-evt-real-payload-1')[0];
+  assert.ok(toggleBtn, 'Expected Xem Payload toggle button for evt-real-payload-1');
+  toggleBtn.props.onClick();
+  tree = render();
+
+  const payloadView = collectNodes(tree, (n) => n.props?.['data-testid'] === 'dxos-outbox-payload-view-evt-real-payload-1')[0];
+  assert.ok(payloadView, 'Expected payload view panel to render when toggled');
+  const pre = collectNodes(payloadView, (n) => n.type === 'pre')[0];
+  assert.ok(pre, 'Expected <pre> element inside outbox payload view');
+  const renderedJson = textOf(pre).trim();
+  assert.notEqual(renderedJson, 'null', 'Outbox payload <pre> must NOT render null when item.payload exists');
+  assert.deepEqual(JSON.parse(renderedJson), { type: 'Location', code: 'WH-HCM-01' });
+});

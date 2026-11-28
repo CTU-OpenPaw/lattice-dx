@@ -447,9 +447,16 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       : 'bar';
     const configGroupBy = normalizeBiField(cfg.groupBy);
     const configSecondaryGroupBy = normalizeBiField(cfg.secondaryGroupBy);
-    const rawConfigMetricOp = String(cfg.metric?.op ?? cfg.metricOp ?? 'count').trim().toLowerCase();
+    const hasStepMetricOverride = Boolean(
+      stepCfg && typeof stepCfg === 'object' && ('metricOp' in stepCfg || 'metricField' in stepCfg) && !stepCfg.metric,
+    );
+    const rawConfigMetricOp = String(
+      (hasStepMetricOverride ? stepCfg.metricOp : (cfg.metric?.op ?? cfg.metricOp)) ?? 'count',
+    ).trim().toLowerCase();
     const configMetricOp = BI_METRIC_OPS.includes(rawConfigMetricOp) ? rawConfigMetricOp : 'count';
-    const configMetricField = normalizeBiField(cfg.metric?.field ?? cfg.metricField);
+    const configMetricField = configMetricOp === 'count'
+      ? ''
+      : normalizeBiField(hasStepMetricOverride ? stepCfg.metricField : (cfg.metric?.field ?? cfg.metricField));
     const configLimit = buildAggregateQueryPayload({ limit: cfg.limit }).limit;
 
     const [activeCollection, setActiveCollection] = React.useState(configCollection);
@@ -519,13 +526,19 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       return map;
     }, [matchedCollection, allFieldOptions]);
 
-    const effectiveGroupBy = activeGroupBy || (activeChartType !== 'kpi' ? (allFieldOptions[0]?.value || '') : '');
+    const fallbackGroupBy = allFieldOptions.find((o) => o.value === 'status')?.value || allFieldOptions[0]?.value || '';
+    const isActiveGroupByValid = Boolean(activeGroupBy) && (allFieldOptions.length === 0 || allFieldOptions.some((o) => o.value === activeGroupBy));
+    const effectiveGroupBy = isActiveGroupByValid
+      ? activeGroupBy
+      : (activeChartType !== 'kpi' ? fallbackGroupBy : '');
     const effectiveSecondaryGroupBy = activeChartType === 'pivot'
       ? resolvePivotSecondaryField(effectiveGroupBy, activeSecondaryGroupBy, allFieldOptions)
       : '';
-    const effectiveMetricField = activeMetricOp !== 'count'
-      ? (activeMetricField || numericFieldOptions[0]?.value || '')
-      : '';
+    const effectiveMetricField = activeMetricOp === 'count'
+      ? ''
+      : (numericFieldOptions.length > 0
+          ? (numericFieldOptions.some((o) => o.value === activeMetricField) ? activeMetricField : (numericFieldOptions[0]?.value || ''))
+          : (allFieldOptions.length > 0 ? '' : activeMetricField));
 
     const payload = buildAggregateQueryPayload({
       ...cfg,
@@ -535,6 +548,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       secondaryGroupBy: effectiveSecondaryGroupBy,
       metricOp: activeMetricOp,
       metricField: effectiveMetricField,
+      metric: effectiveMetricField ? { op: activeMetricOp, field: effectiveMetricField } : { op: activeMetricOp },
       limit: activeLimit,
     });
     const rawFilterStr = typeof cfg.filterJson === 'string' ? cfg.filterJson.trim() : '';
@@ -646,6 +660,12 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       const nextCollection = normalizeBiCollection(nextCollectionRaw);
       setActiveCollection(nextCollection);
       const nextMeta = collectionsMeta.find((c) => c?.name === nextCollection) || null;
+      if (!nextMeta) {
+        setActiveGroupBy(nextCollection === configCollection ? configGroupBy : '');
+        setActiveSecondaryGroupBy(nextCollection === configCollection ? configSecondaryGroupBy : '');
+        setActiveMetricField('');
+        return;
+      }
       const nextAll = extractBiFieldOptions(nextMeta, { numericOnly: false });
       const nextNums = extractBiFieldOptions(nextMeta, { numericOnly: true });
       const nextGroup = nextAll.some((o) => o.value === activeGroupBy)
@@ -658,15 +678,15 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       } else if (activeSecondaryGroupBy && nextAll.length && !nextAll.some((o) => o.value === activeSecondaryGroupBy)) {
         setActiveSecondaryGroupBy('');
       }
-      if (activeMetricOp !== 'count') {
-        if (nextNums.some((o) => o.value === activeMetricField)) {
-          // keep current numeric field
-        } else if (nextNums.length > 0) {
-          setActiveMetricField(nextNums[0].value);
-        } else {
-          setActiveMetricOp('count');
-          setActiveMetricField('');
-        }
+      if (activeMetricOp === 'count') {
+        setActiveMetricField('');
+      } else if (nextNums.some((o) => o.value === activeMetricField)) {
+        // keep current numeric field
+      } else if (nextNums.length > 0) {
+        setActiveMetricField(nextNums[0].value);
+      } else {
+        setActiveMetricOp('count');
+        setActiveMetricField('');
       }
     };
 
@@ -1017,7 +1037,7 @@ function createBiChartBlockView(client, React, _antd, app, { subscribeModelConfi
       h('div', { style: { display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 8 } },
         h('div', null,
           h('h3', { style: { margin: 0, fontSize: 16, fontWeight: 700, color: '#0f172a' } }, cleanTitle),
-          h('div', { style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, `${collectionTitle} · ${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` (${resolveFieldLabel(payload.metric.field)})` : ''}`),
+          h('div', { 'data-testid': 'dxos-bi-chart-subtitle', style: { fontSize: 12, color: '#64748b', marginTop: 2 } }, `${collectionTitle} · ${METRIC_OP_LABELS[payload.metric.op] || payload.metric.op}${payload.metric.field ? ` (${resolveFieldLabel(payload.metric.field)})` : ''}`),
         ),
         h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' } },
           ...BI_CHART_TYPES.map((ct) => h('button', {

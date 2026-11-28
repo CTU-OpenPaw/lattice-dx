@@ -435,7 +435,13 @@ test('runHeadlessPaaSAcceptance looks up frozen snapshot id via listSnapshots wh
   const v2Mock = createMockHeadlessCaller({ bundleSchemaVersion: 'latticedx.solution-bundle/v2' });
   await assert.rejects(
     () => runHeadlessPaaSAcceptance(v2Mock.callActor, { organizationId: 'native-ui-lab' }),
-    /latticedx\.solution-bundle\/v3/,
+    (err) => {
+      const rawMessage = String(err?.message || '');
+      const plainMessage = rawMessage.replace(/\x1b\[[0-9;]*m/g, '');
+      assert.match(plainMessage, /Expected bundle schemaVersion latticedx\.solution-bundle\/v3/);
+      assert.match(rawMessage, /latticedx\.solution-bundle\/v3/);
+      return true;
+    },
   );
   assert.ok(v2Mock.destroyed.some((p) => p.includes('latticeFrozenSnapshots:destroy?filterByTk=1401')));
 });
