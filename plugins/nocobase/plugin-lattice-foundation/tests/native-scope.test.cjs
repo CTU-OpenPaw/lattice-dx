@@ -642,3 +642,238 @@ test('Task 1 remediation: resolveNativeActor({ transaction }), updateScopedDocum
     else process.env.DX_PG_RLS_SESSION = prevFlag;
   }
 });
+
+test('Bug #2: root latticeOrders:create with omitted organizationId auto-resolves from root employee record and populates document defaults', async () => {
+  const rootEmployee = { id: 10, userId: 1, organizationId: 'org-a', departmentId: 4, active: true };
+  const guard = api.createNativeScopeMiddleware(db([rootEmployee]), {
+    orders: { name: 'latticeOrders', fields: [] },
+    requests: { name: 'latticeRequests', fields: [] },
+    assets: { name: 'latticeAssets', fields: [] },
+  });
+
+  const orderCtx = {
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      resourceName: 'latticeOrders',
+      actionName: 'create',
+      params: { values: { code: 'ORD-001', name: 'Đơn vận chuyển HCM - Cần Thơ' } },
+    },
+  };
+  let ran = false;
+  await guard(orderCtx, async () => { ran = true; });
+  assert.equal(ran, true);
+  assert.equal(orderCtx.action.params.values.organizationId, 'org-a');
+  assert.equal(orderCtx.action.params.values.status, 'draft');
+  assert.equal(orderCtx.action.params.values.version, 1);
+  assert.equal(orderCtx.action.params.values.requesterId, 10);
+  assert.equal(orderCtx.action.params.values.departmentId, 4);
+
+  // Non-document scoped collection receives organizationId without document-only fields
+  const assetCtx = {
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      resourceName: 'latticeAssets',
+      actionName: 'create',
+      params: { values: { code: 'AST-01', name: 'Xe lạnh 01', organizationId: '   ' } },
+    },
+  };
+  await guard(assetCtx, async () => {});
+  assert.equal(assetCtx.action.params.values.organizationId, 'org-a');
+  assert.equal(assetCtx.action.params.values.requesterId, undefined);
+  assert.equal(assetCtx.action.params.values.status, undefined);
+
+  // X-Organization-Id header overrides default lookup when valid, ignores 'all'
+  const headerCtx = {
+    get: (h) => (h === 'X-Organization-Id' ? 'org-hdr' : ''),
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      resourceName: 'latticeRequests',
+      actionName: 'create',
+      params: { values: { code: 'REQ-01', name: 'Yêu cầu cấp thiết bị' } },
+    },
+  };
+  await guard(headerCtx, async () => {});
+  assert.equal(headerCtx.action.params.values.organizationId, 'org-hdr');
+  assert.equal(headerCtx.action.params.values.status, 'draft');
+  assert.equal(headerCtx.action.params.values.version, 1);
+
+  const allHeaderCtx = {
+    get: (h) => (h === 'X-Organization-Id' ? 'all' : ''),
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      resourceName: 'latticeOrders',
+      actionName: 'create',
+      params: { values: { code: 'ORD-002', name: 'Bỏ qua header all' } },
+    },
+  };
+  await guard(allHeaderCtx, async () => {});
+  assert.equal(allHeaderCtx.action.params.values.organizationId, 'org-a');
+});
+
+test('Bug #2: root without employee record resolves default organizationId from latticeOrganizations under FORCE RLS', async () => {
+  const prevFlag = process.env.DX_PG_RLS_SESSION;
+  const txStates = new WeakMap();
+  let txSeq = 0;
+
+  const isBypassed = (opts) => {
+    const st = opts?.transaction ? txStates.get(opts.transaction) : null;
+    return Boolean(st && st.bypass === 'on');
+  };
+
+  const rlsDb = {
+    sequelize: {
+      getDialect: () => 'postgres',
+      transaction: async (cb) => {
+        const tx = { id: `tx-root-org-${++txSeq}`, LOCK: { UPDATE: 'UPDATE' } };
+        txStates.set(tx, { bypass: '' });
+        return cb(tx);
+      },
+      query: async (sql, opts = {}) => {
+        const text = String(sql);
+        const st = opts?.transaction ? txStates.get(opts.transaction) : null;
+        if (text.includes("set_config('app.rls_bypass', 'on'")) {
+          if (st) st.bypass = 'on';
+        }
+        return [[]];
+      },
+    },
+    getRepository(name) {
+      if (name === 'latticeEmployees') {
+        return { find: async () => [] };
+      }
+      if (name === 'latticeOrganizations') {
+        return {
+          find: async (opts) => {
+            if (!isBypassed(opts)) return [];
+            return [{ id: 1, code: 'org-primary', active: true, get: (k) => ({ id: 1, code: 'org-primary', active: true }[k]) }];
+          },
+        };
+      }
+      return null;
+    },
+  };
+
+  try {
+    process.env.DX_PG_RLS_SESSION = 'true';
+    const guard = api.createNativeScopeMiddleware(rlsDb, {
+      orders: { name: 'latticeOrders', fields: [] },
+    });
+    let observedValues = null;
+    const ctx = {
+      state: { currentUser: { id: 1 }, currentRole: 'root' },
+      action: {
+        resourceName: 'latticeOrders',
+        actionName: 'create',
+        params: { values: { code: 'ORD-RLS-1', name: 'Đơn RLS root' } },
+      },
+    };
+    await guard(ctx, async () => {
+      observedValues = { ...ctx.action.params.values };
+    });
+    assert.equal(observedValues.organizationId, 'org-primary');
+    assert.equal(observedValues.status, 'draft');
+    assert.equal(observedValues.version, 1);
+    assert.equal(observedValues.requesterId, undefined);
+    assert.equal(observedValues.departmentId, undefined);
+  } finally {
+    if (prevFlag === undefined) delete process.env.DX_PG_RLS_SESSION;
+    else process.env.DX_PG_RLS_SESSION = prevFlag;
+  }
+});
+
+test('Bug #2: root explicit organizationId on latticeOrders:create is preserved untouched', async () => {
+  const rootEmployee = { id: 10, userId: 1, organizationId: 'org-a', departmentId: 4, active: true };
+  const guard = api.createNativeScopeMiddleware(db([rootEmployee]), {
+    orders: { name: 'latticeOrders', fields: [] },
+  });
+  const ctx = {
+    state: { currentUser: { id: 1 }, currentRole: 'root' },
+    action: {
+      resourceName: 'latticeOrders',
+      actionName: 'create',
+      params: { values: { code: 'ORD-B', name: 'Đơn org-b', organizationId: 'org-b' } },
+    },
+  };
+  let ran = false;
+  await guard(ctx, async () => { ran = true; });
+  assert.equal(ran, true);
+  assert.deepEqual(ctx.action.params.values, {
+    code: 'ORD-B',
+    name: 'Đơn org-b',
+    organizationId: 'org-b',
+  });
+});
+
+test('Bug #2: root falls back to first active latticeEmployees or latticeDepartments org when latticeOrganizations is unavailable', async () => {
+  const prevDefault = process.env.DX_DEFAULT_ORGANIZATION_ID;
+  const prevLatticeDefault = process.env.LATTICE_DEFAULT_ORGANIZATION_ID;
+  delete process.env.DX_DEFAULT_ORGANIZATION_ID;
+  delete process.env.LATTICE_DEFAULT_ORGANIZATION_ID;
+  try {
+    // Fallback 1: latticeOrganizations throws/unavailable -> latticeEmployees first active org (without inheriting employeeId/departmentId)
+    const fallbackEmpDb = {
+      getRepository(name) {
+        if (name === 'latticeOrganizations') throw new Error('Collection not found');
+        if (name === 'latticeEmployees') {
+          return {
+            find: async ({ filter }) => {
+              if (filter?.userId != null) return [];
+              if (filter?.active === true) {
+                return [{ id: 55, userId: 99, organizationId: 'org-emp-fallback', departmentId: 8, active: true }];
+              }
+              return [];
+            },
+          };
+        }
+        return null;
+      },
+    };
+    const guard1 = api.createNativeScopeMiddleware(fallbackEmpDb, {
+      orders: { name: 'latticeOrders', fields: [] },
+    });
+    const ctx1 = {
+      state: { currentUser: { id: 1 }, currentRole: 'root' },
+      action: {
+        resourceName: 'latticeOrders',
+        actionName: 'create',
+        params: { values: { code: 'ORD-FB-1', name: 'Fallback Employee Org' } },
+      },
+    };
+    await guard1(ctx1, async () => {});
+    assert.equal(ctx1.action.params.values.organizationId, 'org-emp-fallback');
+    assert.equal(ctx1.action.params.values.requesterId, undefined);
+    assert.equal(ctx1.action.params.values.departmentId, undefined);
+
+    // Fallback 2: latticeEmployees empty -> latticeDepartments first active org
+    const fallbackDeptDb = {
+      getRepository(name) {
+        if (name === 'latticeOrganizations') return null;
+        if (name === 'latticeEmployees') return { find: async () => [] };
+        if (name === 'latticeDepartments') {
+          return {
+            find: async ({ filter }) => (filter?.active === true ? [{ id: 7, organizationId: 'org-dept-fallback', active: true }] : []),
+          };
+        }
+        return null;
+      },
+    };
+    const guard2 = api.createNativeScopeMiddleware(fallbackDeptDb, {
+      orders: { name: 'latticeOrders', fields: [] },
+    });
+    const ctx2 = {
+      state: { currentUser: { id: 1 }, currentRole: 'root' },
+      action: {
+        resourceName: 'latticeOrders',
+        actionName: 'create',
+        params: { values: { code: 'ORD-FB-2', name: 'Fallback Dept Org' } },
+      },
+    };
+    await guard2(ctx2, async () => {});
+    assert.equal(ctx2.action.params.values.organizationId, 'org-dept-fallback');
+  } finally {
+    if (prevDefault === undefined) delete process.env.DX_DEFAULT_ORGANIZATION_ID;
+    else process.env.DX_DEFAULT_ORGANIZATION_ID = prevDefault;
+    if (prevLatticeDefault === undefined) delete process.env.LATTICE_DEFAULT_ORGANIZATION_ID;
+    else process.env.LATTICE_DEFAULT_ORGANIZATION_ID = prevLatticeDefault;
+  }
+});

@@ -461,6 +461,33 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       orgDailyUsd: '50',
     });
     const [quotaSaveBusy, setQuotaSaveBusy] = React.useState(false);
+    const [knownAuditAgents, setKnownAuditAgents] = React.useState([]);
+    const [knownAuditChannels, setKnownAuditChannels] = React.useState([]);
+
+    const mergeUniqueChoices = (...lists) => {
+      const set = new Set();
+      for (const list of lists) {
+        if (!Array.isArray(list)) continue;
+        for (const v of list) {
+          const trimmed = String(v || '').trim();
+          if (trimmed) set.add(trimmed);
+        }
+      }
+      return [...set].sort((a, b) => a.localeCompare(b));
+    };
+
+    const recordAuditFacets = (data, items) => {
+      const facetAgents = Array.isArray(data?.facets?.agents) ? data.facets.agents : [];
+      const itemAgents = (items || []).map((i) => String(i?.aiEmployee || i?.actorUsername || '').trim()).filter(Boolean);
+      if (facetAgents.length || itemAgents.length) {
+        setKnownAuditAgents((prev) => mergeUniqueChoices(prev, facetAgents, itemAgents));
+      }
+      const facetChannels = Array.isArray(data?.facets?.channels) ? data.facets.channels : [];
+      const itemChannels = (items || []).map((i) => String(i?.channel || '').trim()).filter(Boolean);
+      if (facetChannels.length || itemChannels.length) {
+        setKnownAuditChannels((prev) => mergeUniqueChoices(prev, facetChannels, itemChannels));
+      }
+    };
 
     const selectDraft = (next) => {
       const fallbackOrg = resolveStudioDefaultOrg({ topology, catalog, profiles, app });
@@ -548,6 +575,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
           const items = Array.isArray(data.items) ? data.items : [];
           setAuditItems(items);
           setAuditTotal(Number(data.total ?? items.length) || 0);
+          recordAuditFacets(data, items);
         } else {
           partialErrors.push(aRes.reason?.response?.data?.errors?.[0]?.message || aRes.reason?.message || 'Audit logs');
         }
@@ -741,6 +769,7 @@ function createDxosAiStudioPage(client, React, _antd, app) {
         setAuditTotal(Number(data.total ?? items.length) || 0);
         setAuditPage(Number(data.page || nextPage));
         setAuditPageSize(Number(data.pageSize || nextSize));
+        recordAuditFacets(data, items);
       } catch (err) {
         setNotice({ type: 'error', text: err?.response?.data?.errors?.[0]?.message || err?.message || 'Không tải được nhật ký kiểm toán AI.' });
       }
@@ -2140,8 +2169,17 @@ function createDxosAiStudioPage(client, React, _antd, app) {
       })() : null,
 
       tab === 'audit' ? (() => {
-        const agentChoices = [...new Set((auditItems || []).map((i) => String(i.aiEmployee || i.actorUsername || '').trim()).filter(Boolean))];
-        const channelChoices = [...new Set((auditItems || []).map((i) => String(i.channel || '').trim()).filter(Boolean))];
+        const agentChoices = mergeUniqueChoices(
+          knownAuditAgents,
+          (profiles || []).map((p) => String(p?.username || '').trim()).filter(Boolean),
+          (auditItems || []).map((i) => String(i?.aiEmployee || i?.actorUsername || '').trim()).filter(Boolean),
+          auditAgentFilter && auditAgentFilter !== 'all' ? [auditAgentFilter] : [],
+        );
+        const channelChoices = mergeUniqueChoices(
+          knownAuditChannels,
+          (auditItems || []).map((i) => String(i?.channel || '').trim()).filter(Boolean),
+          auditChannelFilter && auditChannelFilter !== 'all' ? [auditChannelFilter] : [],
+        );
         const q = String(auditSearch || '').trim().toLowerCase();
         const filteredAuditItems = (auditItems || []).filter((item) => {
           if (auditStatusFilter !== 'all' && String(item.status || '').toLowerCase() !== auditStatusFilter) return false;

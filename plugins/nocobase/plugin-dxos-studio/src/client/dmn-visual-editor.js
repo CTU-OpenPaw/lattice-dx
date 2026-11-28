@@ -571,13 +571,13 @@ function buildInitialSimContext(table) {
 
 function editorStyles() {
   return {
-    root: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 12, padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff' },
-    header: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(230px, 1fr))', gap: 10, alignItems: 'end' },
-    toolbar: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between' },
+    root: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', gap: 12, padding: 14, borderRadius: 10, border: '1px solid #cbd5e1', background: '#ffffff' },
+    header: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 160px), 1fr))', gap: 10, alignItems: 'end', width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box' },
+    toolbar: { display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', justifyContent: 'space-between', minWidth: 0, maxWidth: '100%' },
     label: { display: 'block', fontSize: 11, fontWeight: 600, color: '#475569', marginBottom: 4 },
-    input: { width: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
+    input: { width: '100%', minWidth: 0, maxWidth: '100%', padding: '6px 8px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
     cellInput: { width: '100%', minWidth: 112, padding: '4px 6px', borderRadius: 4, border: '1px solid #cbd5e1', fontSize: 12, fontFamily: 'monospace', boxSizing: 'border-box', background: '#ffffff' },
-    tableWrap: { width: '100%', maxWidth: '100%', overflowX: 'auto', border: '1px solid #e2e8f0', borderRadius: 8 },
+    tableWrap: { width: '100%', maxWidth: '100%', minWidth: 0, overflowX: 'auto', WebkitOverflowScrolling: 'touch', boxSizing: 'border-box', border: '1px solid #e2e8f0', borderRadius: 8 },
     table: { width: 'max-content', minWidth: '100%', borderCollapse: 'collapse', fontSize: 12 },
     thInput: { textAlign: 'left', padding: '6px 6px', background: '#eff6ff', borderBottom: '2px solid #bfdbfe', color: '#1e3a8a', minWidth: 175 },
     thOutput: { textAlign: 'left', padding: '6px 6px', background: '#f0fdf4', borderBottom: '2px solid #bbf7d0', color: '#14532d', minWidth: 148 },
@@ -594,7 +594,7 @@ function editorStyles() {
       color: disabled ? '#94a3b8' : (primary || danger) ? '#ffffff' : '#1e293b',
       whiteSpace: 'nowrap',
     }),
-    simPanel: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gap: 10 },
+    simPanel: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', gap: 10 },
   };
 }
 
@@ -800,8 +800,8 @@ function createDmnVisualEditor(ReactLib, antdLib) {
     };
 
     return h('div', { 'data-testid': 'dmn-visual-editor', style: S.root },
-      h('div', { style: S.header },
-        h('div', null,
+      h('div', { className: 'dxos-dmn-header', 'data-testid': 'dmn-editor-header', style: S.header },
+        h('div', { style: { minWidth: 0, maxWidth: '100%' } },
           h('label', { style: S.label }, 'Mã Bảng'),
           h('input', {
             'data-testid': 'dmn-table-key-input',
@@ -812,7 +812,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
             style: S.input,
           }),
         ),
-        h('div', { style: { gridColumn: 'span 2', minWidth: 230 } },
+        h('div', { style: { minWidth: 0, maxWidth: '100%' } },
           h('label', { style: S.label }, 'Tên Bảng Quyết Định'),
           h('input', {
             'data-testid': 'dmn-table-name-input',
@@ -820,10 +820,10 @@ function createDmnVisualEditor(ReactLib, antdLib) {
             value: table.name,
             title: table.name,
             onChange: (e) => commitTable((p) => ({ ...p, name: e.target.value })),
-            style: { ...S.input, minWidth: 230 },
+            style: S.input,
           }),
         ),
-        h('div', null,
+        h('div', { style: { minWidth: 0, maxWidth: '100%' } },
           h('label', { style: S.label }, 'Chính sách khớp'),
           h('select', {
             'data-testid': 'dmn-hit-policy-select',
@@ -832,13 +832,13 @@ function createDmnVisualEditor(ReactLib, antdLib) {
             style: S.input,
           }, HIT_POLICIES.map((hp) => h('option', { key: hp, value: hp }, hp))),
         ),
-        h('div', { style: { display: 'flex', justifyContent: 'flex-end' } },
+        h('div', { style: { display: 'flex', justifyContent: 'flex-end', minWidth: 0, maxWidth: '100%' } },
           renderBtn({
             'data-testid': 'dmn-save-btn',
             'data-variant': 'primary',
             disabled: isBusy,
             onClick: handleSave,
-            style: S.btn(true, false, isBusy),
+            style: { ...S.btn(true, false, isBusy), maxWidth: '100%' },
           }, isBusy ? 'Đang lưu…' : 'Lưu Bảng DMN'),
         ),
       ),
@@ -857,7 +857,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
       }, statusMsg.text) : null,
 
       h('div', { style: S.toolbar },
-        h('div', { style: { fontSize: 12, color: '#475569' } },
+        h('div', { style: { fontSize: 12, color: '#475569', minWidth: 0, maxWidth: '100%', overflowWrap: 'break-word' } },
           'Cú pháp FEEL: ',
           h('code', null, '< 10'), ', ',
           h('code', null, '[0..8]'), ', ',
@@ -886,7 +886,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
         ),
       ),
 
-      h('div', { style: S.tableWrap },
+      h('div', { 'data-testid': 'dmn-decision-table-wrap', style: S.tableWrap },
         h('table', { 'data-testid': 'dmn-decision-table-grid', style: S.table },
           h('thead', null,
             h('tr', null,
@@ -1025,7 +1025,7 @@ function createDmnVisualEditor(ReactLib, antdLib) {
       ),
 
       h('div', { 'data-testid': 'dmn-simulator-panel', style: S.simPanel },
-        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', minWidth: 0, maxWidth: '100%' } },
           h('strong', { style: { fontSize: 13, color: '#0f172a' } }, 'Trình Mô Phỏng Luật DMN'),
           renderBtn({
             'data-testid': 'dmn-sim-run-btn',
@@ -1040,8 +1040,8 @@ function createDmnVisualEditor(ReactLib, antdLib) {
           role: 'alert',
           style: { padding: '8px 10px', borderRadius: 6, background: '#fef2f2', border: '1px solid #fecaca', color: '#991b1b', fontSize: 12 },
         }, simValidation) : null,
-        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8 } },
-          table.inputsJson.map((col) => h('div', { key: `sim-${col.name}` },
+        h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 140px), 1fr))', gap: 8, minWidth: 0, maxWidth: '100%' } },
+          table.inputsJson.map((col) => h('div', { key: `sim-${col.name}`, style: { minWidth: 0, maxWidth: '100%' } },
             h('label', { style: S.label }, `${col.name} (${col.type || 'string'})`),
             col.type === 'boolean'
               ? h('select', {
@@ -1062,14 +1062,14 @@ function createDmnVisualEditor(ReactLib, antdLib) {
               }),
           )),
         ),
-        h('div', null,
+        h('div', { style: { minWidth: 0, maxWidth: '100%' } },
           h('label', { style: S.label }, 'Dữ liệu Ngữ cảnh (JSON)'),
           h('textarea', {
             'data-testid': 'dmn-sim-json-input',
             rows: 3,
             value: simJsonText,
             onChange: (e) => handleSimJsonChange(e.target.value),
-            style: { ...S.input, fontFamily: 'monospace' },
+            style: { ...S.input, fontFamily: 'monospace', maxWidth: '100%' },
           }),
         ),
         simResult ? h('div', {
@@ -1081,6 +1081,9 @@ function createDmnVisualEditor(ReactLib, antdLib) {
             border: `1px solid ${simResult.matched ? '#86efac' : '#cbd5e1'}`,
             fontSize: 12,
             display: 'grid',
+            minWidth: 0,
+            maxWidth: '100%',
+            boxSizing: 'border-box',
             gap: 4,
           },
         },

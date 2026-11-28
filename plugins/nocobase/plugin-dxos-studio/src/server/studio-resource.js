@@ -472,22 +472,34 @@ function createDxosStudioActions(db, { applyBlueprint } = {}) {
         }
       }
       ctx.body = {
-        items: rows.map((r) => ({
-          id: val(r, 'id'),
-          eventId: val(r, 'eventId'),
-          entityId: val(r, 'entityId'),
-          organizationId: val(r, 'organizationId'),
-          collectionName: val(r, 'collectionName'),
-          recordId: val(r, 'recordId'),
-          state: val(r, 'state'),
-          attempts: val(r, 'attempts'),
-          errorCode: val(r, 'errorCode'),
-          lastError: val(r, 'lastError') ?? val(r, 'errorMessage') ?? null,
-          payloadJson: val(r, 'payloadJson') ?? null,
-          nextAttemptAt: val(r, 'nextAttemptAt'),
-          lockedAt: val(r, 'lockedAt'),
-          updatedAt: val(r, 'updatedAt'),
-        })),
+        items: rows.map((r) => {
+          const candidatePayload = val(r, 'payloadJson') ?? val(r, 'payload') ?? null;
+          let rawPayload = candidatePayload;
+          if (typeof candidatePayload === 'string') {
+            try {
+              rawPayload = JSON.parse(candidatePayload);
+            } catch {
+              rawPayload = candidatePayload;
+            }
+          }
+          return {
+            id: val(r, 'id'),
+            eventId: val(r, 'eventId'),
+            entityId: val(r, 'entityId'),
+            organizationId: val(r, 'organizationId'),
+            collectionName: val(r, 'collectionName'),
+            recordId: val(r, 'recordId'),
+            state: val(r, 'state'),
+            attempts: val(r, 'attempts'),
+            errorCode: val(r, 'errorCode'),
+            lastError: val(r, 'lastError') ?? val(r, 'errorMessage') ?? null,
+            payloadJson: rawPayload,
+            payload: rawPayload,
+            nextAttemptAt: val(r, 'nextAttemptAt'),
+            lockedAt: val(r, 'lockedAt'),
+            updatedAt: val(r, 'updatedAt'),
+          };
+        }),
         total,
         page,
         pageSize,

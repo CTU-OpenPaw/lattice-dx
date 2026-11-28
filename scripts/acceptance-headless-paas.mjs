@@ -731,7 +731,11 @@ export async function runHeadlessPaaSAcceptance(callActor, { organizationId = DE
     const bundleRes = await okActor('root', `dxosStudio:solutionBundleExport?organizationId=${encodeURIComponent(organizationId)}`);
     const bundle = bundleRes.data || {};
     assert.equal(bundle.metadata?.organizationId, organizationId);
-    assert.equal(bundle.metadata?.schemaVersion, 'latticedx.solution-bundle/v3');
+    assert.equal(
+      bundle.metadata?.schemaVersion,
+      'latticedx.solution-bundle/v3',
+      'Expected bundle schemaVersion latticedx.solution-bundle/v3',
+    );
     assert.ok(typeof bundle.metadata?.contentSha256 === 'string' && bundle.metadata.contentSha256.length >= 32);
     assert.ok(Array.isArray(bundle.roles) && Array.isArray(bundle.portals));
     checks.autofillTriageAndBundleOk = true;

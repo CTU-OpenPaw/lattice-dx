@@ -103,33 +103,214 @@ function extractPortalsFromSpec(spec = {}, defaultCollectionName = '') {
   return [];
 }
 
+const FIELD_ATTR_CONTINUATION_RE = /^(?:kieu|loai|type|co\s+ma|ma\s+truong|ma\s+cot|ten\s+ky\s+thuat|ma(?:\s*[:=]|\s+[a-z])|bat\s+buoc|required|duy\s+nhat|unique|mac\s+dinh|default|enum|gia\s+tri|cong\s+thuc|formula|tieu\s+de|nhan|title|mo\s+ta)\b/i;
+
+const FIELD_HAS_MODIFIER_RE = /\b(?:kieu|loai|type|co\s+ma|ma\s+truong|ma\s+cot|ten\s+ky\s+thuat|bat\s+buoc|required|duy\s+nhat|unique|mac\s+dinh|default|enum|gia\s+tri|cong\s+thuc|formula|tieu\s+de|nhan|title|mo\s+ta)\b/i;
+
+const FIELD_MODIFIER_START_RE = /^(?:[:,(]|(?:kieu|loai|type|bat\s+buoc|required|duy\s+nhat|unique|mac\s+dinh|default|enum|gia\s+tri|cong\s+thuc|formula|tieu\s+de|nhan|title|mo\s+ta|string|chuoi|text|van\s+ban|float|so\s+thuc|so\s+nguyen|integer|boolean|dung\/sai|dung\s+sai|checkbox|datetime|ngay\s+gio|date|ngay|json)\b)/i;
+
+const FIELD_ID_HARD_STOPWORDS = new Set([
+  'kieu', 'loai', 'type', 'truong', 'cot', 'field', 'fields',
+  'text', 'string', 'chuoi', 'van', 'ban', 'ghi', 'chu',
+  'bat', 'buoc', 'duy', 'nhat', 'required', 'unique', 'default', 'mac', 'dinh',
+  'float', 'integer', 'number', 'so', 'nguyen', 'thuc',
+  'boolean', 'bool', 'dung', 'sai', 'checkbox',
+  'date', 'datetime', 'ngay', 'gio',
+  'json', 'formula', 'cong', 'enum', 'gia', 'tri',
+  'cho', 'bang', 'trong', 'cua', 'voi', 'co', 'ma', 'ten', 'ky', 'thuat',
+  'va', 'and', 'hoac', 'or', 'la', 'them', 'bo', 'sung', 'add',
+  'tieu', 'de', 'nhan', 'mo', 'ta', 'ki',
+]);
+
+const FIELD_EXPLICIT_MARKER_MULTI_RE = /(?<![\p{L}\p{M}\d_])(?:có\s+mã|co\s+ma|mã\s+trường|ma\s+truong|mã\s+cột|ma\s+cot|tên\s+kỹ\s+thuật|ten\s+ky\s+thuat|field\s*name)\s*[:=]?\s*[`"']?([a-zA-Z][a-zA-Z0-9_]{1,48})[`"']?(?![\p{L}\p{M}\d_])/giu;
+
+const FIELD_EXPLICIT_MARKER_SHORT_RE = /(?<![\p{L}\p{M}\d_])(?:mã|ma|key|code|name)\s*[:=]?\s*[`"']?([a-zA-Z][a-zA-Z0-9_]{1,48})[`"']?(?![\p{L}\p{M}\d_])/giu;
+
+function splitNaturalFieldSegments(bodyRaw) {
+  const cleaned = String(bodyRaw || '')
+    .trim()
+    .replace(/[.\s,;]+$/g, '')
+    .replace(/\s+(?:và|va|and)\s*$/i, '')
+    .trim();
+  if (!cleaned) return [];
+
+  const tokens = cleaned.split(/(\s*,\s*|\s+(?:và|va|and)\s+)/i);
+  const segments = [];
+  let pendingDelim = '';
+
+  for (let i = 0; i < tokens.length; i += 1) {
+    const tok = tokens[i];
+    if (!tok) continue;
+    if (i % 2 === 1) {
+      pendingDelim = tok;
+      continue;
+    }
+    const piece = tok.trim().replace(/^[.,;\s]+|[.\s]+$/g, '');
+    if (!piece) continue;
+    const pieceNorm = stripDiacriticsSimple(piece).toLowerCase();
+
+    if (segments.length > 0) {
+      const prev = segments[segments.length - 1];
+      const isCommaDelim = pendingDelim.includes(',');
+      if (FIELD_ATTR_CONTINUATION_RE.test(pieceNorm)) {
+        segments[segments.length - 1] = `${prev}${isCommaDelim ? ', ' : ' '}${piece}`;
+        pendingDelim = '';
+        continue;
+      }
+      const enumIdx = prev.search(/(?:^|[\s,])(?:enum|giá\s+trị|gia\s+tri)\s*[:=]/i);
+      const prevHasOpenEnum = enumIdx >= 0 && !prev.slice(enumIdx).includes(';');
+      if (isCommaDelim && prevHasOpenEnum && !FIELD_HAS_MODIFIER_RE.test(pieceNorm) && /^[\p{L}\p{M}\d_\- ]{1,32}$/u.test(piece)) {
+        segments[segments.length - 1] = `${prev}, ${piece}`;
+        pendingDelim = '';
+        continue;
+      }
+    }
+    segments.push(piece);
+    pendingDelim = '';
+  }
+  return segments;
+}
+
+function inferExplicitFieldType(typePhraseNorm) {
+  const s = String(typePhraseNorm || '').trim();
+  if (/^(?:formula|cong\s+thuc)\b/.test(s)) return 'formula';
+  if (/^(?:integer|so\s+nguyen)\b/.test(s)) return 'integer';
+  if (/^(?:float|so\s+thuc|so)\b/.test(s)) return 'float';
+  if (/^(?:boolean|bool|dung\/sai|dung\s+sai|co\/khong|checkbox)\b/.test(s)) return 'boolean';
+  if (/^(?:datetime|ngay\s+gio)\b/.test(s)) return 'datetime';
+  if (/^(?:date|ngay)\b/.test(s)) return 'date';
+  if (/^(?:text|van\s+ban)\b/.test(s)) return 'text';
+  if (/^(?:string|chuoi)\b/.test(s)) return 'string';
+  if (/^(?:json)\b/.test(s)) return 'json';
+  return null;
+}
+
+function inferFieldTypeFromSegment(segNorm) {
+  const explicitTypeMatch = segNorm.match(/\b(?:kieu|loai|type)\s*[:=]?\s*([a-z0-9_/\s]{1,24})/);
+  if (explicitTypeMatch?.[1]) {
+    const explicitType = inferExplicitFieldType(explicitTypeMatch[1].trim());
+    if (explicitType) return explicitType;
+  }
+  if (/\b(formula|cong thuc)\b/.test(segNorm)) return 'formula';
+  if (/\b(integer|so nguyen)\b/.test(segNorm)) return 'integer';
+  if (/\b(float|so thuc|tien|amount|price|discount)\b/.test(segNorm)) return 'float';
+  if (/\b(boolean|bool|dung\/sai|dung sai|co\/khong|checkbox)\b/.test(segNorm)) return 'boolean';
+  if (/\b(datetime|ngay gio)\b/.test(segNorm)) return 'datetime';
+  if (/\b(date|ngay)\b/.test(segNorm)) return 'date';
+  if (/\b(text|van ban|mo ta|ghi chu)\b/.test(segNorm)) return 'text';
+  if (/\b(json)\b/.test(segNorm)) return 'json';
+  return 'string';
+}
+
 function inferFieldDefFromSegment(segRaw, collectionName) {
-  const seg = String(segRaw || '').trim();
+  const seg = String(segRaw || '')
+    .trim()
+    .replace(/^(?:thêm|them|bổ\s+sung|bo\s+sung|add)\s+(?:các\s+|cac\s+)?(?:trường|truong|cột|cot|field)s?\s+/i, '')
+    .replace(/^[.,;:\s]+|[.,;\s]+$/g, '');
+  if (!seg) return null;
+
+  const segForId = seg
+    .replace(/(?:cho|trong|của|cua|vào|vao|on|in|for)\s+(?:bảng|bang|collection|table)\s+latticeCustom[A-Za-z0-9_]+/gi, ' ')
+    .replace(/(?:enum|giá\s+trị|gia\s+tri)\s*[:=]\s*[^\n;]+/gi, ' ')
+    .replace(/(?:formula|công\s+thức|cong\s+thuc)\s*[:=]\s*[^\n;]+/gi, ' ')
+    .trim();
+
+  const cleanLabelPrefix = (rawPrefix) => String(rawPrefix || '')
+    .replace(/[\s,(\-–—:]+$/g, '')
+    .replace(/^[(\s]+/g, '')
+    .trim();
+
+  let name = '';
+  let title = '';
+
+  for (const m of segForId.matchAll(FIELD_EXPLICIT_MARKER_MULTI_RE)) {
+    const candidate = String(m[1] || '').trim();
+    if (!candidate || FIELD_ID_HARD_STOPWORDS.has(candidate.toLowerCase())) continue;
+    name = candidate;
+    const label = cleanLabelPrefix(segForId.slice(0, m.index));
+    if (label) title = label;
+    break;
+  }
+
+  if (!name) {
+    for (const m of segForId.matchAll(FIELD_EXPLICIT_MARKER_SHORT_RE)) {
+      const candidate = String(m[1] || '').trim();
+      const candLow = candidate.toLowerCase();
+      if (!candidate || FIELD_ID_HARD_STOPWORDS.has(candLow) || /^lattice[A-Z]/.test(candidate)) continue;
+      name = candidate;
+      const label = cleanLabelPrefix(segForId.slice(0, m.index));
+      if (label) title = label;
+      break;
+    }
+  }
+
+  const findEmbeddedTechId = (text) => {
+    const re = /(?<![\p{L}\p{M}\d_])[`"']?([a-z][a-z0-9]*(?:[A-Z][a-zA-Z0-9_]*|_[a-zA-Z0-9_]+))[`"']?(?![\p{L}\p{M}\d_])/gu;
+    for (const m of text.matchAll(re)) {
+      const cand = m[1];
+      if (!cand || /^lattice[A-Z]/.test(cand) || FIELD_ID_HARD_STOPWORDS.has(cand.toLowerCase())) continue;
+      return { id: cand, index: m.index };
+    }
+    return null;
+  };
+
+  if (!name) {
+    const leadMatch = segForId.match(/^[`"']?([a-z][a-zA-Z0-9_]{1,48})[`"']?(?![\p{L}\p{M}\d_])/u);
+    if (leadMatch) {
+      const leadId = leadMatch[1].trim();
+      const leadLow = leadId.toLowerCase();
+      const rest = segForId.slice(leadMatch[0].length).trim();
+      const restNorm = stripDiacriticsSimple(rest).toLowerCase();
+      const leadIsCompoundTech = /[A-Z_]/.test(leadId);
+      const restStartsWithModifier = !rest || FIELD_MODIFIER_START_RE.test(restNorm);
+
+      if (leadIsCompoundTech || (!FIELD_ID_HARD_STOPWORDS.has(leadLow) && restStartsWithModifier)) {
+        name = leadId;
+      } else {
+        const embedded = findEmbeddedTechId(segForId);
+        if (embedded) {
+          name = embedded.id;
+          const label = cleanLabelPrefix(segForId.slice(0, embedded.index));
+          if (label) title = label;
+        } else if (!FIELD_ID_HARD_STOPWORDS.has(leadLow)) {
+          name = leadId;
+        }
+      }
+    }
+  }
+
+  if (!name) {
+    const embedded = findEmbeddedTechId(segForId);
+    if (embedded) {
+      name = embedded.id;
+      const label = cleanLabelPrefix(segForId.slice(0, embedded.index));
+      if (label) title = label;
+    }
+  }
+
+  if (!name) return null;
+
   const segNorm = stripDiacriticsSimple(seg).toLowerCase();
-  const idMatch = seg.match(/^([a-z][a-zA-Z0-9_]{1,48})\b/);
-  if (!idMatch) return null;
-  const name = idMatch[1].trim();
-  let type = 'string';
-  if (/\b(formula|cong thuc)\b/.test(segNorm)) type = 'formula';
-  else if (/\b(integer|so nguyen)\b/.test(segNorm)) type = 'integer';
-  else if (/\b(float|so thuc|tien|amount|price|discount)\b/.test(segNorm)) type = 'float';
-  else if (/\b(boolean|co\/khong|checkbox)\b/.test(segNorm)) type = 'boolean';
-  else if (/\b(datetime|ngay gio)\b/.test(segNorm)) type = 'datetime';
-  else if (/\b(date|ngay)\b/.test(segNorm)) type = 'date';
-  else if (/\b(text|van ban|mo ta|ghi chu)\b/.test(segNorm)) type = 'text';
-  else if (/\b(json)\b/.test(segNorm)) type = 'json';
+  const type = inferFieldTypeFromSegment(segNorm);
   const required = /\b(bat buoc|required)\b/.test(segNorm);
   const unique = /\b(duy nhat|unique)\b/.test(segNorm);
-  const enumMatch = seg.match(/(?:enum|giá trị|gia tri)\s*[:=]\s*([^\n;]+)/i);
-  const enumValues = enumMatch
-    ? enumMatch[1].split(/[,/|]/).map((s) => s.trim()).filter(Boolean)
+  const enumMatch = seg.match(/(?:enum|giá\s+trị|gia\s+tri)\s*[:=]\s*([^\n;]+)/i);
+  const enumRaw = enumMatch
+    ? enumMatch[1].replace(/,\s*(?:bắt\s+buộc|bat\s+buoc|required|duy\s+nhất|duy\s+nhat|unique|kiểu|kieu|loại|loai|type|mặc\s+định|mac\s+dinh|default)\b[\s\S]*$/i, '')
+    : '';
+  const enumValues = enumRaw
+    ? enumRaw.split(/[,/|]/).map((s) => s.trim()).filter(Boolean)
     : [];
   const formulaMatch = seg.match(/(?:formula|công\s+thức|cong\s+thuc)\s*[:=]?\s*([a-zA-Z0-9_+\-*/().\s]+)/i);
+  if (!title) {
+    const explicitTitle = seg.match(/(?:tiêu\s+đề|tieu\s+de|nhãn|nhan|title)\s*[:=]\s*["']?([^"',;]+)["']?/i);
+    if (explicitTitle?.[1]) title = explicitTitle[1].trim();
+  }
   return {
     collectionName,
     name,
     type: enumValues.length ? 'enum' : type,
-    title: name,
+    title: title || name,
     ...(required ? { required: true } : {}),
     ...(unique ? { unique: true } : {}),
     ...(enumValues.length ? { enumValues } : {}),
@@ -150,27 +331,20 @@ function parseNaturalAppPlanOrPatch(promptText, baseSpec = {}) {
 
   // 1. Detect single or multi-field "thêm (các) trường/cột/field ..." with type & constraints
   const clauseBoundaryRe = /\b(?:liên\s+kết|lien\s+ket|quan\s+hệ|quan\s+he|belongsTo|ẩn|an\s+trường|ngừng|xóa\s+khối|gỡ\s+khối|sửa\s+trường|cập\s+nhật\s+trường|đổi\s+theme|thêm\s+vai\s+trò|gắn\s+khối|thêm\s+khối)\b|;|\n/i;
-  const multiFieldLead = raw.match(/(?:thêm|bổ\s+sung|add)\s+(?:các\s+)?(?:trường|cột|field)s?\s+([\s\S]+)/i);
+  const multiFieldLead = raw.match(/(?:thêm|them|bổ\s+sung|bo\s+sung|add)\s+(?:các\s+|cac\s+)?(?:trường|truong|cột|cot|field)s?\s+([\s\S]+)/i);
   if (multiFieldLead && matchedCol) {
     const bodyUntilBoundary = multiFieldLead[1].split(clauseBoundaryRe)[0] || '';
-    const segments = bodyUntilBoundary
-      .split(/\s*(?:,|\bvà\b|\band\b)\s*/i)
-      .map((s) => s.trim())
-      .filter((s) => /^[a-z][a-zA-Z0-9_]{1,48}\b/.test(s));
-    const parsedFields = segments.map((seg) => inferFieldDefFromSegment(seg, matchedCol)).filter(Boolean);
+    const segments = splitNaturalFieldSegments(bodyUntilBoundary);
+    const seenFieldNames = new Set();
+    const parsedFields = [];
+    for (const seg of segments) {
+      const def = inferFieldDefFromSegment(seg, matchedCol);
+      if (!def || !def.name || seenFieldNames.has(def.name)) continue;
+      seenFieldNames.add(def.name);
+      parsedFields.push(def);
+    }
     if (parsedFields.length) {
       patch.addFields = parsedFields;
-    }
-  }
-  if (!patch.addFields && matchedCol) {
-    const fieldMatches = [
-      ...raw.matchAll(/(?:thêm|bổ\s+sung|add)\s+(?:trường|cột|field)\s+([a-z][a-zA-Z0-9_]{1,48})/gi),
-    ];
-    if (fieldMatches.length) {
-      patch.addFields = fieldMatches.map((m) => inferFieldDefFromSegment(m[1], matchedCol)).filter(Boolean);
-    } else if (/(?:them|bo\s+sung|add)\s+(?:truong|cot|field)\s+([a-z][a-zA-Z0-9_]{1,48})/i.test(n)) {
-      const m = n.match(/(?:them|bo\s+sung|add)\s+(?:truong|cot|field)\s+([a-z][a-zA-Z0-9_]{1,48})/i);
-      if (m?.[1]) patch.addFields = [{ collectionName: matchedCol, name: m[1].trim(), type: 'string', title: m[1].trim() }];
     }
   }
 

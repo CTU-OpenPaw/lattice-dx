@@ -116,15 +116,15 @@ function safeJsonParse(rawText, label) {
 
 function makeStyles() {
   return {
-    card: { padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', background: '#ffffff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 12 },
-    subCard: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', minWidth: 0, maxWidth: '100%', gap: 10 },
-    grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 10, minWidth: 0 },
-    kpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 8 },
+    card: { padding: 16, borderRadius: 12, border: '1px solid #e2e8f0', background: '#ffffff', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', gap: 12 },
+    subCard: { padding: 12, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', alignContent: 'start', width: '100%', minWidth: 0, maxWidth: '100%', boxSizing: 'border-box', gap: 10 },
+    grid2: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 220px), 1fr))', alignItems: 'start', gap: 10, minWidth: 0, maxWidth: '100%' },
+    kpiGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 140px), 1fr))', gap: 8, minWidth: 0 },
     kpiBox: { padding: 10, borderRadius: 8, border: '1px solid #e2e8f0', background: '#f8fafc' },
     label: { display: 'block', fontSize: 12, fontWeight: 600, color: '#334155', marginBottom: 4 },
-    input: { width: '100%', padding: '7px 9px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
-    textarea: { width: '100%', padding: 8, borderRadius: 6, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12, boxSizing: 'border-box' },
-    tableWrap: { width: '100%', overflowX: 'auto' },
+    input: { width: '100%', minWidth: 0, maxWidth: '100%', padding: '7px 9px', borderRadius: 6, border: '1px solid #cbd5e1', fontSize: 12, boxSizing: 'border-box' },
+    textarea: { width: '100%', minWidth: 0, maxWidth: '100%', padding: 8, borderRadius: 6, border: '1px solid #cbd5e1', fontFamily: 'monospace', fontSize: 12, boxSizing: 'border-box' },
+    tableWrap: { width: '100%', maxWidth: '100%', minWidth: 0, overflowX: 'auto', WebkitOverflowScrolling: 'touch', boxSizing: 'border-box' },
     table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
     th: { textAlign: 'left', padding: '7px 8px', borderBottom: '2px solid #e2e8f0', color: '#475569', background: '#f8fafc', whiteSpace: 'nowrap' },
     td: { padding: '7px 8px', borderBottom: '1px solid #f1f5f9', color: '#0f172a', verticalAlign: 'top' },
@@ -154,6 +154,8 @@ function makeStyles() {
       cursor: disabled ? 'not-allowed' : 'pointer',
       fontSize: 12,
       fontWeight: 600,
+      height: 'auto',
+      lineHeight: 1.35,
       border: disabled ? '1px solid #cbd5e1' : danger ? '1px solid #dc2626' : primary ? '1px solid #1677ff' : '1px solid #cbd5e1',
       background: disabled ? '#e2e8f0' : danger ? '#dc2626' : primary ? '#1677ff' : '#ffffff',
       color: disabled ? '#94a3b8' : (primary || danger) ? '#ffffff' : '#1e293b',
@@ -536,36 +538,50 @@ function renderDataGovConsole(h, S, state, patchState, actions, busy, hasOrg = t
       h('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 } },
         h('div', { style: { fontSize: 13, fontWeight: 700 } }, 'Hàng đợi Cách ly Dữ liệu (Quarantine Queue)'),
         h('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' } },
-          h('input', { type: 'text', value: resolveNote, placeholder: 'Ghi chú xử lý (tùy chọn)', onChange: (e) => patchState((p) => ({ ...p, resolveNote: e.target.value })), style: { ...S.input, width: 210 } }),
+          h('input', { type: 'text', value: resolveNote, placeholder: 'Ghi chú xử lý (tùy chọn)', onChange: (e) => patchState((p) => ({ ...p, resolveNote: e.target.value })), style: { ...S.input, width: 210, maxWidth: '100%' } }),
           h('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 } },
             h('input', { type: 'checkbox', checked: Boolean(releaseToTelemetry), onChange: (e) => patchState((p) => ({ ...p, releaseToTelemetry: Boolean(e?.target?.checked) })) }),
             'Đẩy lại Telemetry khi duyệt',
           ),
         ),
       ),
-      h('div', { style: S.tableWrap },
-        h('table', { style: S.table },
-          h('thead', null, h('tr', null, ['UID', 'Nguồn', 'Asset / Metric', 'Giá trị', 'Lý do', 'Trạng thái', 'Xử lý'].map((c) => h('th', { key: c, style: S.th }, c)))),
-          h('tbody', null,
-            !quarantine.length
-              ? h('tr', null, h('td', { colSpan: 7, style: { ...S.td, color: '#64748b' } }, 'Không có bản ghi cách ly.'))
-              : quarantine.map((q) => h('tr', { key: q.quarantineUid },
-                h('td', { style: S.td }, q.quarantineUid),
-                h('td', { style: S.td }, q.sourceSystem),
-                h('td', { style: S.td }, `${q.assetEntityId || '-'} · ${q.metricName || '-'}`),
-                h('td', { style: S.td }, q.numericValue != null ? `${q.numericValue} ${q.unit || ''}`.trim() : '-'),
-                h('td', { style: S.td }, q.reasonCode),
-                h('td', { style: S.td }, h('span', { style: S.badge(renderStatusTone(q.status)) }, q.status)),
-                h('td', { style: { ...S.td, display: 'flex', gap: 6, flexWrap: 'wrap' } },
-                  q.status === 'quarantined' ? [
-                    h('button', { key: 'app', 'data-testid': `dxos-quarantine-approve-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'approved_release'), style: S.btn(true, false, busy) }, 'Phê duyệt / Phát hành'),
-                    h('button', { key: 'rej', 'data-testid': `dxos-quarantine-reject-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'rejected'), style: S.btn(false, true, busy) }, 'Từ chối'),
-                  ] : h('span', { style: { fontSize: 11, color: '#64748b' } }, q.resolvedBy || 'Đã xử lý'),
-                ),
-              )),
+      (() => {
+        const qWrapTd = { ...S.td, overflowWrap: 'anywhere', wordBreak: 'break-word', padding: '6px 7px' };
+        const qCompactTd = { ...S.td, padding: '6px 7px' };
+        const qActionBtn = (primary, danger) => ({
+          ...S.btn(primary, danger, busy),
+          padding: '5px 9px',
+          whiteSpace: 'normal',
+          lineHeight: 1.25,
+          textAlign: 'center',
+          maxWidth: '100%',
+        });
+        return h('div', { 'data-testid': 'dxos-quarantine-table-wrap', style: S.tableWrap },
+          h('table', { 'data-testid': 'dxos-quarantine-table', style: S.table },
+            h('thead', null, h('tr', null, ['UID', 'Nguồn', 'Asset / Metric', 'Giá trị', 'Lý do', 'Trạng thái', 'Xử lý'].map((c) => h('th', { key: c, style: { ...S.th, padding: '6px 7px' } }, c)))),
+            h('tbody', null,
+              !quarantine.length
+                ? h('tr', null, h('td', { colSpan: 7, style: { ...S.td, color: '#64748b' } }, 'Không có bản ghi cách ly.'))
+                : quarantine.map((q) => h('tr', { key: q.quarantineUid },
+                  h('td', { style: qWrapTd }, q.quarantineUid),
+                  h('td', { style: qWrapTd }, q.sourceSystem),
+                  h('td', { style: qWrapTd }, `${q.assetEntityId || '-'} · ${q.metricName || '-'}`),
+                  h('td', { style: { ...qCompactTd, whiteSpace: 'nowrap' } }, q.numericValue != null ? `${q.numericValue} ${q.unit || ''}`.trim() : '-'),
+                  h('td', { style: qWrapTd }, q.reasonCode),
+                  h('td', { style: qCompactTd }, h('span', { style: S.badge(renderStatusTone(q.status)) }, q.status)),
+                  h('td', { style: qCompactTd },
+                    q.status === 'quarantined'
+                      ? h('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' } },
+                        h('button', { key: 'app', 'data-testid': `dxos-quarantine-approve-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'approved_release'), style: qActionBtn(true, false) }, 'Phê duyệt / Phát hành'),
+                        h('button', { key: 'rej', 'data-testid': `dxos-quarantine-reject-${q.quarantineUid}`, type: 'button', disabled: busy, onClick: () => actions.resolveQuarantine(q.quarantineUid, 'rejected'), style: qActionBtn(false, true) }, 'Từ chối'),
+                      )
+                      : h('span', { style: { fontSize: 11, color: '#64748b' } }, q.resolvedBy || 'Đã xử lý'),
+                  ),
+                )),
+            ),
           ),
-        ),
-      ),
+        );
+      })(),
     ),
   );
 }
@@ -747,7 +763,7 @@ function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEdito
       ),
     ),
 
-    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 } },
+    h('div', { style: { display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0, maxWidth: '100%', width: '100%' } },
       h('details', { 'data-testid': 'dxos-dmn-raw-json-details', style: S.subCard },
         h('summary', { style: { cursor: 'pointer', fontSize: 13, fontWeight: 700, color: '#334155' } }, 'Chỉnh sửa JSON & Mô phỏng nâng cao (Legacy)'),
         h('div', { style: { ...S.grid2, marginTop: 10 } },
@@ -781,7 +797,7 @@ function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEdito
               h('label', { style: S.label }, 'Rules JSON'),
               h('textarea', { rows: 5, value: form.rulesText, onChange: (e) => setForm({ rulesText: e.target.value }), style: S.textarea }),
             ),
-            h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Lưu Bảng Quyết định'),
+            h('button', { type: 'submit', disabled: busy, style: { ...S.btn(true, false, busy), alignSelf: 'start', height: 'auto', lineHeight: 1.35 } }, 'Lưu Bảng Quyết định'),
           ),
 
           h('form', { 'data-testid': 'dxos-dmn-eval-form', onSubmit: actions.evaluateDmn, style: S.subCard },
@@ -794,7 +810,7 @@ function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEdito
               h('label', { style: S.label }, 'Context đầu vào JSON'),
               h('textarea', { rows: 5, value: simContextText, onChange: (e) => patchState((p) => ({ ...p, simContextText: e.target.value })), style: S.textarea }),
             ),
-            h('button', { type: 'submit', disabled: busy, style: S.btn(true, false, busy) }, 'Chạy Mô phỏng DMN'),
+            h('button', { type: 'submit', disabled: busy, style: { ...S.btn(true, false, busy), alignSelf: 'start', height: 'auto', lineHeight: 1.35 } }, 'Chạy Mô phỏng DMN'),
             simResult ? h('div', { 'data-testid': 'dxos-dmn-eval-result', style: { padding: 10, borderRadius: 6, background: '#ffffff', border: '1px solid #cbd5e1', fontSize: 12, display: 'grid', gap: 4 } },
               h('div', null, h('strong', null, `Khớp: ${simResult.matched ? 'CÓ' : 'KHÔNG'}`), ` · Chính sách: ${simResult.hitPolicy} · Chỉ số luật khớp: ${simResult.matchedRuleIndex ?? '-'}`),
               h('pre', { style: { margin: 0, fontSize: 11, overflowX: 'auto' } }, JSON.stringify(simResult.hitPolicy === 'COLLECT' ? simResult.results : (simResult.outputs ?? simResult.result), null, 2)),
@@ -803,7 +819,7 @@ function renderDmnConsole(h, S, state, patchState, actions, busy, DmnVisualEdito
         ),
       ),
 
-      DmnVisualEditor ? h('div', { style: { order: -1 } },
+      DmnVisualEditor ? h('div', { 'data-testid': 'dxos-dmn-visual-wrap', style: { order: -1, minWidth: 0, maxWidth: '100%', width: '100%' } },
         h(DmnVisualEditor, {
           initialTable: initialVisualTable,
           table: loadedTable || tables[0] || undefined,
@@ -1620,7 +1636,7 @@ function createDxosGovernanceConsoles(client, React, _antd, app) {
           value: orgInputValue,
           placeholder: 'VD: org-a (bắt buộc với root)',
           onChange: (e) => setOrgOverride(e.target.value),
-          style: { ...S.input, width: 220 },
+          style: { ...S.input, width: 220, maxWidth: '100%' },
         }),
       ) : null,
 

@@ -544,13 +544,18 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
     const isGovernanceTab = tab === 'governance' || GOVERNANCE_SECTIONS.some((s) => s.id === tab);
     const activeGovSection = tab === 'governance' ? govSection : (isGovernanceTab ? tab : govSection);
 
-    return h('div', { 'data-testid': 'dxos-studio-settings-page', style: { padding: '20px 24px 64px', maxWidth: 1320, width: '100%', boxSizing: 'border-box', margin: '0 auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, minWidth: 0 } },
+    return h('div', { className: 'dxos-studio-settings-page', 'data-testid': 'dxos-studio-settings-page', style: { padding: '20px 24px 64px', maxWidth: 1320, width: '100%', boxSizing: 'border-box', margin: '0 auto', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 16, minWidth: 0 } },
       h('style', null, [
         '@media (max-width: 1023px) {',
         '  .dxos-studio-shell { flex-direction: column !important; }',
         '  .dxos-studio-sidebar { width: 100% !important; flex: none !important; }',
         '  .dxos-studio-nav-group-items { flex-direction: row !important; flex-wrap: wrap !important; }',
         '  .dxos-studio-nav-group-items > button { width: auto !important; }',
+        '}',
+        '@media (max-width: 767px) {',
+        '  .dxos-studio-settings-page { padding: 12px 10px 64px !important; }',
+        '  .dxos-studio-content { width: 100% !important; min-width: 0 !important; max-width: 100% !important; }',
+        '  .dxos-dmn-header { grid-template-columns: minmax(0, 1fr) !important; min-width: 0 !important; max-width: 100% !important; }',
         '}',
       ].join('\n')),
       h('div', { style: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: 12, alignItems: 'center' } },
@@ -632,6 +637,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
           ),
         ),
         h('main', {
+          className: 'dxos-studio-content',
           'data-testid': 'dxos-studio-content',
           style: { flex: 1, minWidth: 0, maxWidth: '100%', display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 14 },
         },
@@ -847,7 +853,7 @@ function createDxosStudioSettingsPage(client, React, antd, app) {
                   style: { padding: 10, borderRadius: 6, background: '#0f172a', color: '#e2e8f0', fontFamily: 'monospace', fontSize: 11, overflowX: 'auto', display: 'grid', gap: 6 },
                 },
                   item.lastError ? h('div', { style: { color: '#fca5a5', wordBreak: 'break-word' } }, `lastError: ${item.lastError}`) : null,
-                  h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, JSON.stringify(item.payloadJson ?? null, null, 2)),
+                  h('pre', { style: { margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word' } }, JSON.stringify(item.payloadJson ?? item.payload ?? null, null, 2)),
                 ) : null,
               );
             }),

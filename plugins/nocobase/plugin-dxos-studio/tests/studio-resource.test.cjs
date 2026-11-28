@@ -1409,3 +1409,70 @@ test('M5 P2-07: outboxDlqList supports state=all + payloadJson and outboxDlqPurg
   assert.equal(rows.length, 1);
   assert.equal(rows[0].eventId, 'evt-2');
 });
+
+test('Bug #10 regression: outboxDlqList reads real latticeContextOutbox payload column and exposes both payloadJson and payload', async () => {
+  const { createDxosStudioActions } = require(path.join(PLUGIN_ROOT, 'src/server/studio-resource.js'));
+  const rows = [
+    {
+      id: 101,
+      eventId: 'evt-real-payload-1',
+      entityId: 'urn:ngsi-ld:Location:WH-HCM-01',
+      organizationId: 'org-a',
+      collectionName: 'latticeLocations',
+      recordId: 7,
+      state: 'failed',
+      attempts: 3,
+      errorCode: 'BROKER_HTTP_502',
+      payload: { type: 'Location', code: 'WH-HCM-01' },
+      updatedAt: '2026-11-28T09:00:00Z',
+    },
+    {
+      id: 102,
+      eventId: 'evt-json-string-2',
+      entityId: 'urn:ngsi-ld:Asset:A-02',
+      organizationId: 'org-a',
+      collectionName: 'latticeAssets',
+      recordId: 8,
+      state: 'failed',
+      attempts: 2,
+      errorCode: 'BROKER_HTTP_503',
+      payload: '{"type":"Asset","code":"A-02"}',
+      updatedAt: '2026-11-28T09:01:00Z',
+    },
+    {
+      id: 103,
+      eventId: 'evt-raw-string-3',
+      entityId: 'urn:ngsi-ld:Asset:A-03',
+      organizationId: 'org-a',
+      collectionName: 'latticeAssets',
+      recordId: 9,
+      state: 'failed',
+      attempts: 1,
+      errorCode: 'BROKER_BAD_PAYLOAD',
+      payload: 'raw-unparsed-payload',
+      updatedAt: '2026-11-28T09:02:00Z',
+    },
+  ];
+  const db = {
+    getRepository(name) {
+      if (name === 'latticeContextOutbox') {
+        return {
+          findAndCount: async () => [rows, rows.length],
+          count: async ({ filter }) => rows.filter((r) => !filter?.state || r.state === filter.state).length,
+        };
+      }
+      return null;
+    },
+  };
+  const actions = createDxosStudioActions(db);
+  const ctx = { method: 'GET', state: { currentUser: { id: 1 }, currentRoles: ['root'] }, action: { params: { state: 'failed' } } };
+  await actions.outboxDlqList(ctx, async () => {});
+
+  assert.equal(ctx.body.items.length, 3);
+  assert.deepEqual(ctx.body.items[0].payloadJson, { type: 'Location', code: 'WH-HCM-01' });
+  assert.deepEqual(ctx.body.items[0].payload, { type: 'Location', code: 'WH-HCM-01' });
+  assert.deepEqual(ctx.body.items[1].payloadJson, { type: 'Asset', code: 'A-02' });
+  assert.deepEqual(ctx.body.items[1].payload, { type: 'Asset', code: 'A-02' });
+  assert.equal(ctx.body.items[2].payloadJson, 'raw-unparsed-payload');
+  assert.equal(ctx.body.items[2].payload, 'raw-unparsed-payload');
+});

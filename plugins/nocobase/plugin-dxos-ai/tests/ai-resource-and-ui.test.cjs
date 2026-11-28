@@ -3261,3 +3261,134 @@ test('T4-RW-01: portal-agent-launcher skips surfaceEvents SSE for inaccessible /
     global.localStorage = origStorage;
   }
 });
+
+test('Bug #6 regression: auditLogs returns tenant-scoped unfiltered facets and Audit tab preserves all agent/channel choices after selecting one', async () => {
+  const { createDxosAiActions } = require(path.join(PLUGIN_ROOT, 'src/server/ai-resource.js'));
+  const { createDxosAiStudioPage } = require(path.join(PLUGIN_ROOT, 'src/client/ai-studio-page.js'));
+
+  // 1. Server test: dxosAi:auditLogs filtered by aiEmployee still returns org-scoped facets.agents & facets.channels, excluding other tenants
+  const db = makeMockDb();
+  db.stores.roles.push({ name: 'ldx_org_admin', allowConfigure: true, snippets: ['pm.dxosAi'] });
+  db.stores.rolesUsers.push({ userId: 30, roleName: 'ldx_org_admin' });
+  db.stores.latticeEmployees.push({ id: 30, userId: 30, organizationId: 'org-a', active: true });
+  db.stores.latticeAiAuditLogs.push(
+    { id: 1, organizationId: 'org-a', toolName: 'dxos_warranty_check', channel: 'ai-chat', aiEmployee: 'dxos-quan-ly-bao-hanh', actorUsername: 'emp1', status: 'allowed', resultSummary: 'OK 1' },
+    { id: 2, organizationId: 'org-a', toolName: 'dxos_alarm_action', channel: 'mcp', aiEmployee: 'dxos-ops', actorUsername: 'emp2', status: 'allowed', resultSummary: 'OK 2' },
+    { id: 3, organizationId: 'org-a', toolName: 'dxos_compose_page_blocks', channel: 'studio-sync', aiEmployee: 'dxos-architect', actorUsername: 'adm1', status: 'denied', resultSummary: 'Denied' },
+    { id: 4, organizationId: 'org-b', toolName: 'dxos_secret_op', channel: 'tenant-b-channel', aiEmployee: 'dxos-tenant-b-secret-agent', actorUsername: 'b-user', status: 'allowed', resultSummary: 'Tenant B' },
+  );
+
+  const actions = createDxosAiActions(db);
+  const filteredCtx = {
+    method: 'GET',
+    state: { currentUser: { id: 30, username: 'org-a-admin' }, currentRoles: ['ldx_org_admin'] },
+    action: { params: { aiEmployee: 'dxos-quan-ly-bao-hanh', channel: 'ai-chat' } },
+  };
+  await actions.auditLogs(filteredCtx, async () => {});
+  assert.equal(filteredCtx.body.items.length, 1);
+  assert.equal(filteredCtx.body.items[0].aiEmployee, 'dxos-quan-ly-bao-hanh');
+  assert.ok(filteredCtx.body.facets && Array.isArray(filteredCtx.body.facets.agents), 'auditLogs must return facets.agents array');
+  assert.ok(filteredCtx.body.facets && Array.isArray(filteredCtx.body.facets.channels), 'auditLogs must return facets.channels array');
+  assert.deepEqual(
+    filteredCtx.body.facets.agents,
+    ['dxos-architect', 'dxos-ops', 'dxos-quan-ly-bao-hanh'],
+    'facets.agents must retain all org-a agents and strictly exclude org-b agents',
+  );
+  assert.deepEqual(
+    filteredCtx.body.facets.channels,
+    ['ai-chat', 'mcp', 'studio-sync'],
+    'facets.channels must retain all org-a channels and strictly exclude org-b channels',
+  );
+  assert.equal(filteredCtx.body.facets.agents.includes('dxos-tenant-b-secret-agent'), false);
+  assert.equal(filteredCtx.body.facets.channels.includes('tenant-b-channel'), false);
+
+  // 2. Client UI test: selecting one agent in dxos-audit-agent-filter preserves all 3 agents in dropdown options
+  const allRows = [
+    { id: 1, toolName: 'dxos_warranty_check', channel: 'ai-chat', aiEmployee: 'dxos-quan-ly-bao-hanh', status: 'allowed', resultSummary: 'Warranty OK' },
+    { id: 2, toolName: 'dxos_alarm_action', channel: 'mcp', aiEmployee: 'dxos-ops', status: 'allowed', resultSummary: 'Ops OK' },
+    { id: 3, toolName: 'dxos_compose_page_blocks', channel: 'studio-sync', aiEmployee: 'dxos-architect', status: 'denied', resultSummary: 'Architect Denied' },
+  ];
+  const stateSlots = [];
+  const refSlots = [];
+  const effectSlots = [];
+  const memoSlots = [];
+  let sIdx = 0; let rIdx = 0; let eIdx = 0; let mIdx = 0;
+  const depsChanged = (p, n) => !p || !n || p.length !== n.length || n.some((d, i) => d !== p[i]);
+  const React = {
+    Fragment: 'Fragment',
+    createElement: (type, props, ...children) => ({ type, props: props || {}, children }),
+    useState: (init) => { const i = sIdx++; if (!(i in stateSlots)) stateSlots[i] = typeof init === 'function' ? init() : init; return [stateSlots[i], (v) => { stateSlots[i] = typeof v === 'function' ? v(stateSlots[i]) : v; }]; },
+    useRef: (init) => { const i = rIdx++; if (!(i in refSlots)) refSlots[i] = { current: init }; return refSlots[i]; },
+    useEffect: (fn, deps) => { const i = eIdx++; effectSlots[i] = { fn, deps, changed: depsChanged(effectSlots[i]?.deps, deps) }; },
+    useMemo: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn(), deps }; return memoSlots[i].value; },
+    useCallback: (fn, deps) => { const i = mIdx++; if (!memoSlots[i] || depsChanged(memoSlots[i].deps, deps)) memoSlots[i] = { value: fn, deps }; return memoSlots[i].value; },
+  };
+  const api = {
+    request: async (req) => {
+      if (req.url === 'dxosAi:listProfiles') {
+        return { data: { data: { profiles: [], organizations: ['org-a'], defaultOrganizationId: 'org-a', catalog: { availableTools: [], roleOptions: [] } } } };
+      }
+      if (req.url === 'dxosAi:enterpriseTopology') {
+        return { data: { data: { defaultOrganizationId: 'org-a', organizations: ['org-a'], planes: [] } } };
+      }
+      if (req.url === 'dxosAi:auditLogs') {
+        let items = [...allRows];
+        if (req.params?.aiEmployee) items = items.filter((r) => r.aiEmployee === req.params.aiEmployee);
+        if (req.params?.channel) items = items.filter((r) => r.channel === req.params.channel);
+        return { data: { data: { items, total: items.length, page: 1, pageSize: 20 } } };
+      }
+      return { data: { data: {} } };
+    },
+  };
+  const Page = createDxosAiStudioPage({ useAPIClient: () => api }, React, {}, { defaultOrganizationId: 'org-a' });
+  const render = () => { sIdx = 0; rIdx = 0; eIdx = 0; mIdx = 0; const t = Page(); for (const ef of effectSlots) if (ef.changed) { ef.changed = false; ef.fn(); } return t; };
+  const findTid = (n, id) => { if (!n || typeof n !== 'object') return null; if (n.props?.['data-testid'] === id) return n; for (const k of (Array.isArray(n.children) ? n.children.flat(Infinity) : [])) { const h = findTid(k, id); if (h) return h; } return null; };
+  const collectOptionValues = (selectNode) => {
+    const out = [];
+    const walk = (node) => {
+      if (!node || typeof node !== 'object') return;
+      if (node.type === 'option') out.push(node.props?.value);
+      for (const k of (Array.isArray(node.children) ? node.children.flat(Infinity) : [])) walk(k);
+    };
+    walk(selectNode);
+    return out;
+  };
+
+  let tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+  findTid(tree, 'dxos-tab-audit').props.onClick();
+  tree = render();
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+
+  // Verify initial 3 agents present
+  const initialAgentOpts = collectOptionValues(findTid(tree, 'dxos-audit-agent-filter'));
+  assert.ok(initialAgentOpts.includes('dxos-quan-ly-bao-hanh'));
+  assert.ok(initialAgentOpts.includes('dxos-ops'));
+  assert.ok(initialAgentOpts.includes('dxos-architect'));
+
+  // Select one agent -> mock API returns ONLY 1 filtered row
+  findTid(tree, 'dxos-audit-agent-filter').props.onChange({ target: { value: 'dxos-quan-ly-bao-hanh' } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+
+  // Filtered table has only dxos-quan-ly-bao-hanh, BUT dropdown STILL lists all 3 agents!
+  const tableDump = JSON.stringify(findTid(tree, 'dxos-audit-table'));
+  assert.ok(tableDump.includes('dxos_warranty_check'));
+  assert.equal(tableDump.includes('dxos_alarm_action'), false);
+
+  const afterAgentOpts = collectOptionValues(findTid(tree, 'dxos-audit-agent-filter'));
+  assert.ok(afterAgentOpts.includes('dxos-quan-ly-bao-hanh'), 'Selected agent must remain in dropdown');
+  assert.ok(afterAgentOpts.includes('dxos-ops'), 'Other agent dxos-ops must NOT disappear after selecting one agent');
+  assert.ok(afterAgentOpts.includes('dxos-architect'), 'Other agent dxos-architect must NOT disappear after selecting one agent');
+
+  // Channel filter also preserves all previously seen channels
+  findTid(tree, 'dxos-audit-channel-filter').props.onChange({ target: { value: 'ai-chat' } });
+  await new Promise((r) => setTimeout(r, 20));
+  tree = render();
+  const afterChannelOpts = collectOptionValues(findTid(tree, 'dxos-audit-channel-filter'));
+  assert.ok(afterChannelOpts.includes('ai-chat'));
+  assert.ok(afterChannelOpts.includes('mcp'), 'Other channel mcp must NOT disappear after filtering by ai-chat');
+  assert.ok(afterChannelOpts.includes('studio-sync'), 'Other channel studio-sync must NOT disappear after filtering by ai-chat');
+});

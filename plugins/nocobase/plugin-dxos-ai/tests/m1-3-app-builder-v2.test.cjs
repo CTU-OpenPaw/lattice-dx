@@ -1290,3 +1290,78 @@ test('M1.3 R2 Fix 5c: Tab 7 UI refreshes builtAppSelected immediately when handl
   assert.ok(detailNode, 'Expanded detail card must remain open');
   assert.ok(JSON.stringify(detailNode).includes('snap-v2'), 'Expanded detail card must immediately refresh to v2 snapshot');
 });
+
+test('Bug #5 regression: parseNaturalAppPlanOrPatch extracts explicit Vietnamese technical field codes without bogus ASCII/accent splits', () => {
+  const { parseNaturalAppPlanOrPatch, applySpecPatch } = require('../src/server/app-builder-planner');
+  const baseSpec = {
+    appKey: 'warranty-suite',
+    portalSlug: 'services',
+    pageTitle: 'Bảo hành',
+    collectionName: 'latticeCustomWarranties',
+    fields: [{ name: 'serialNumber', type: 'string', title: 'Số seri' }],
+  };
+
+  // Exact PR #77 reproduction (plan-diff.png)
+  const p1 = parseNaturalAppPlanOrPatch(
+    'Thêm trường ghi chú bảo hành có mã warrantyNote, kiểu văn bản.',
+    baseSpec,
+  );
+  assert.ok(Array.isArray(p1.addFields), 'Expected addFields array');
+  assert.equal(p1.addFields.length, 1, `Expected exactly 1 field, got: ${JSON.stringify(p1.addFields)}`);
+  assert.equal(p1.addFields[0].name, 'warrantyNote');
+  assert.equal(p1.addFields[0].type, 'text');
+  assert.equal(p1.addFields[0].collectionName, 'latticeCustomWarranties');
+  assert.equal(p1.addFields.some((f) => f.name === 'ghi' || f.name === 'ki'), false);
+
+  const patched1 = applySpecPatch(
+    baseSpec,
+    null,
+    'Thêm trường ghi chú bảo hành có mã warrantyNote, kiểu văn bản.',
+  );
+  assert.deepEqual(
+    patched1.fields.map((f) => f.name),
+    ['serialNumber', 'warrantyNote'],
+  );
+
+  // Additional Vietnamese variants
+  const p2 = parseNaturalAppPlanOrPatch(
+    'Thêm trường hạn mức tín dụng có mã creditLimit, kiểu số thực, bắt buộc.',
+    baseSpec,
+  );
+  assert.equal(p2.addFields?.length, 1, `Expected 1 field, got: ${JSON.stringify(p2.addFields)}`);
+  assert.equal(p2.addFields[0].name, 'creditLimit');
+  assert.equal(p2.addFields[0].type, 'float');
+  assert.equal(p2.addFields[0].required, true);
+
+  const p3 = parseNaturalAppPlanOrPatch(
+    'Thêm trường ngày hết hạn mã expiryDate, kiểu ngày.',
+    baseSpec,
+  );
+  assert.equal(p3.addFields?.length, 1, `Expected 1 field, got: ${JSON.stringify(p3.addFields)}`);
+  assert.equal(p3.addFields[0].name, 'expiryDate');
+  assert.equal(p3.addFields[0].type, 'date');
+
+  // Mixed multi-field prompt (ASCII + explicit Vietnamese field code + modifier clauses)
+  const p4 = parseNaturalAppPlanOrPatch(
+    'Thêm các trường priority bắt buộc, budget kiểu float và ghi chú bảo hành có mã warrantyNote, kiểu văn bản',
+    baseSpec,
+  );
+  assert.equal(p4.addFields?.length, 3, `Expected 3 fields, got: ${JSON.stringify(p4.addFields)}`);
+  assert.deepEqual(
+    p4.addFields.map((f) => f.name),
+    ['priority', 'budget', 'warrantyNote'],
+  );
+  assert.equal(p4.addFields[0].required, true);
+  assert.equal(p4.addFields[1].type, 'float');
+  assert.equal(p4.addFields[2].type, 'text');
+
+  // Enum comma values must not be split into bogus fields
+  const p5 = parseNaturalAppPlanOrPatch(
+    'Thêm các trường priority bắt buộc, budget kiểu float và status enum: draft, active',
+    baseSpec,
+  );
+  assert.equal(p5.addFields?.length, 3, `Expected 3 fields, got: ${JSON.stringify(p5.addFields)}`);
+  assert.deepEqual(p5.addFields.map((f) => f.name), ['priority', 'budget', 'status']);
+  assert.equal(p5.addFields[2].type, 'enum');
+  assert.deepEqual(p5.addFields[2].enumValues, ['draft', 'active']);
+});
